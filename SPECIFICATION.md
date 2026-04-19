@@ -178,30 +178,66 @@ repeated as a rolling cycle. The byte at the very start of each
 string the sector starts at. Last four bytes (0x0FFC..0x1000) are the
 CRC-32 footer (§2.2).
 
-## 4. Page 1 … N — encrypted payload
+## 4. Page 1 … N — "encrypted" payload
 
 Every page after page 0 observed so far is high-entropy (Shannon
-entropy near 8 bit/byte). Cursory statistical inspection has not yet
-revealed an obvious per-page plaintext header. Hypotheses, all
-untested:
+entropy near 8 bit/byte) in isolation.
 
-1. Pages are XOR-encrypted with a file-keyed keystream.
-2. Pages are encrypted with a block cipher (DES / 3DES / AES) keyed
-   by a per-file value derivable from the superblock.
-3. Only a subset of pages (e.g. "data" pages, not "free" pages) are
-   encrypted.
+### 4.1 The obfuscation is *not* per-file keyed
 
-Note: because the per-page CRC-32 footer (§2.2) is applied *after*
-encryption, the ciphertext is what's protected; an attacker can
-re-stamp a valid CRC after any modification. This is integrity-only,
-not authenticated encryption.
+Comparing pages of two unrelated `.QBW` files from the same
+QuickBooks distribution (see `re/xor_test.py`):
 
-Next experiments (see `re/`):
+| Metric                                              | Observed | Random-noise expectation |
+| --------------------------------------------------- | -------- | ------------------------ |
+| Pages byte-identical between the two files          | 14.2 %   | ~0 %                     |
+| Mean zero-bytes per 4096-byte XOR(page\_A,page\_B)  | 2460.4   | 16.0                     |
+| Mean Shannon entropy of XOR(page, page) (first 64)  | 0.247 b  | 8.000 b                  |
 
-- Entropy histogram per page for one file.
-- XOR two pages of the same file and look for structure.
-- XOR homologous pages of two files with the same QuickBooks version
-  (e.g. two B22 files) and look for constant-plaintext diff residue.
+→ Whatever transformation produces the on-disk ciphertext is
+**deterministic in `(page_number, byte_offset)` alone**. The per-file
+`file_id_lo` at 0x08 is *not* an encryption key; two files with
+different `file_id_lo` values still produce the same ciphertext for
+the same (page, offset) wherever their plaintexts coincide. See
+[C.8](re/NOTES.md#c8--encryption-is-file-independent--2026-04-19).
+
+### 4.2 Arithmetic-progression residue in "empty" pages
+
+Several data pages exhibit byte sequences of the form
+`byte[i] ≡ (S · i + C) (mod 256)` for a page-specific step `S` and
+constant `C`. Example (file #0, page 6, offsets 0x00..0x1F):
+
+```
+  63 66 69 6c 6f 72 75 78 7b 7e 81 84 87 8a 8d 90
+  93 96 99 9c 9f a2 a5 a8 ab ae b1 b4 b7 ba bd c0
+```
+
+Exactly matches `(3 · offset + 0x63) mod 256` with zero residual.
+Across the first 100 pages of that file the best-fit `(S, C)` pair
+covers up to **~13 %** of each page's bytes in tight runs. Candidate
+explanations (untested):
+
+- SAP SQL Anywhere's "free sector" / "unused slot" fill pattern —
+  an on-disk marker pattern analogous to the page-0 copyright
+  fingerprint, but numeric.
+- B-tree slot-offset arrays naturally forming arithmetic sequences
+  when slots are packed at a regular stride.
+
+Together with §4.1 this strongly suggests the payload is **not**
+encrypted at all: pages 1..N are genuine SA 17.0.4 on-disk pages,
+and the "randomness" is simply SA's binary structure (per-page CRC,
+LSN, hashed b-tree index entries, numeric fill patterns). Formal
+refutation/confirmation is the next milestone.
+
+### 4.3 Next experiments
+
+- Attempt to parse page 1 assuming a documented SA page-header
+  layout (type, size, LSN, prev/next pointers).
+- Decode the SA `SYSTABLE` catalog root pointer, which in SA is at a
+  known well-known offset in the superblock (candidate offsets 0x20,
+  0x24 of our page 0 — both vary per file).
+- Locate `SYSCOLUMN` / `SYSUSER` / `SYSDOMAIN` to validate that we
+  are reading real SA structures.
 
 ## 5. Record / row encoding
 
@@ -214,7 +250,13 @@ layout once decryption is solved.
 
 ## 7. Encryption & obfuscation
 
-_Unknown._ See §4.
+As of milestone C.9 there is **strong evidence that there is no
+per-file encryption** on `.QBW` pages (see §4.1). The apparent
+randomness of pages 1..N is consistent with them being genuine SAP
+SQL Anywhere 17.0.4 on-disk pages whose binary structure (CRC, LSN,
+hashed b-tree nodes, numeric fill patterns) resembles noise to
+casual inspection. This hypothesis must still be validated by
+parsing a page successfully.
 
 ## 8. Open questions
 
@@ -237,3 +279,10 @@ _Unknown._ See §4.
   Anywhere 17.0.4 build 2182 via the rolling copyright string at
   page-0 offsets 0x400..0xFFC. Secondary page-0 structure block at
   0x2BC identified.
+- **2026-04-19 · C.8–C.9** — Pairwise file comparison shows the
+  per-(page, offset) ciphertext is **file-independent** (14 % of
+  pages byte-identical across unrelated files; XOR residue has
+  entropy 0.25 bit/byte). Arithmetic-progression residue of the
+  form `byte[i] = (S·i + C) mod 256` observed in "empty" data
+  pages. Working hypothesis: pages 1..N are plain SAP SQL Anywhere
+  17 pages with no encryption layer.
