@@ -356,7 +356,29 @@ refutation/confirmation is the next milestone.
 
 ## 5. Record / row encoding
 
-_Unknown._
+Partially understood. SYSTABLE rows carry an 8-byte invariant record
+tag immediately before the `table_name` column:
+
+```
+05 00 00 00                    row marker (constant on all SYSTABLE rows)
+<table_id u32_LE> 00 00 00 00  32-bit id, zero-padded to 8 bytes
+b1 0d 19 0d 00 00 00 00        fixed record tag
+<name_len u8> <name ASCII>
+…                              trailer (see below)
+```
+
+The trailer immediately after the name contains monotone sequences
+of table-local fields. On consecutive rows of the SA system schema
+the `u32_LE` at offset +21 past the name increments by one per
+table, matching the SA `object_id` space; the `u16_LE` at offset +6
+(`4e 3c`, `4e 3e`, `4e 40`, `4e 42` …) also moves monotonically.
+The `first_page` / `primary_root` page pointers defined by the SA17
+SYSTABLE schema have **not yet** been identified in the trailer; the
+exact variable-field layout is still open.
+
+Rows smaller than the SYSTABLE header padding, non-SYSTABLE tables,
+and rows in other system tables (SYSCOLUMN, SYSINDEX, …) have not
+been decoded yet — their record tags may differ.
 
 ## 6. Slotted catalog pages
 
@@ -543,3 +565,15 @@ Reproduce with `re/template_clusters.py`.
   340 (`E`) has 44 slots with 2 deleted entries. The prelude bytes
   immediately before the array contain the minimum row offset and the
   slot count, but other fields remain unidentified.
+- **2026-04-19 · C.18** — SYSTABLE row tag identified and catalog
+  scanned. `re/systable_scan.py` extracts `(table_id, name)` pairs
+  from every deobfuscated `E` page matching the invariant tag
+  `b1 0d 19 0d 00 00 00 00` preceded by `05 00 00 00` and the row
+  `table_id u32_LE`. On `B22_Sample.qbw` the scan recovers 114
+  unique tables spread across 10 pages — all SA system/diagnostic
+  catalog, no QuickBooks user tables. On two other files in the
+  corpus (`B22_Chapter 3`, `B22_Chapter 5`) the tag appears on zero
+  pages because `fill_overlay.recover_base` misfires on data-dense
+  sectors. Page-walking to QB user tables is blocked on C.19.
+  `fill_overlay.recover_base` also rewritten from O(256·n) to O(n)
+  via a residue histogram — ~40× speed-up on full-corpus scans.
