@@ -250,23 +250,34 @@ layout once decryption is solved.
 
 ## 7. Encryption & obfuscation
 
-As of milestone C.9 there is **strong evidence that there is no
-per-file encryption** on `.QBW` pages (see §4.1). The apparent
-randomness of pages 1..N is consistent with them being genuine SAP
-SQL Anywhere 17.0.4 on-disk pages whose binary structure (CRC, LSN,
-hashed b-tree nodes, numeric fill patterns) resembles noise to
-casual inspection. This hypothesis must still be validated by
-parsing a page successfully.
+**None.** Three independent lines of evidence (C.8, C.10, C.11) rule
+out any cryptographic transformation of pages 1..N:
+
+1. **Pairwise file comparison.** 14 % of pages are byte-identical
+   between two unrelated files; the XOR has entropy 0.25 bit/byte.
+   (C.8.)
+2. **Template clustering.** The 112-file corpus partitions into 6
+   byte-identical schema templates. Pages 0..200 are shipped
+   identically with every new company file in the cluster. (C.10.)
+3. **Block analysis.** The most common 16-byte block on disk is
+   `00…00` (540 occurrences across 20 random files × 50 pages).
+   The second-most-common blocks are literal ASCII fragments of
+   the SAP copyright string. Any deterministic keyed encryption
+   (AES-ECB, XOR-with-fixed-keystream, …) would destroy this
+   signature. (C.11.)
+
+The on-disk bytes of the payload are exactly the logical SAP SQL
+Anywhere 17 pages. No decryption key is required at any point.
 
 ## 8. Open questions
 
-1. What algorithm decrypts pages 1..N? Is the key derived from
-   `file_id_lo` (`0x08`), a constant, or a truncated password?
-2. What is `flags_06`? Why 0x09 vs 0x49 and nothing else?
-3. Is `version_a = 201` / `version_b = 12` an ASA schema version pair?
-4. Are pages 1..127 really reserved (§3.2), and what do they hold?
-5. Do `.TLG` files share the page-0 superblock, or do they use a
+1. What is `flags_06`? Why 0x09 vs 0x49 and nothing else?
+2. Is `version_a = 201` / `version_b = 12` an ASA schema version pair?
+3. Are pages 1..127 really reserved (§3.2), and what do they hold?
+4. Do `.TLG` files share the page-0 superblock, or do they use a
    completely different journal format?
+5. What is the SA page-header layout at offset 0 of pages ≥ 1? (Next
+   milestone.)
 
 ## 8a. Template clustering (C.10)
 
