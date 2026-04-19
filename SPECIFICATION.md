@@ -483,3 +483,14 @@ Reproduce with `re/template_clusters.py`.
   procedure names (`sp_columns`, `sp_password`, `sp_addmessage`,
   `sp_addlogin`) and a monotonic u16 slot directory on page 11 of
   Rock Castle. §7 rewritten; §2.2c added.
+- **2026-04-19 · C.15** — Bulk plaintext extraction. Deobfuscating
+  the first 500 type-`E` pages of Rock Castle and filtering for
+  printable ASCII runs ≥ 6 chars yields **9 503 unique strings**,
+  including the full SAP SQL Anywhere system catalog (`SYSCOLUMN`,
+  `SYSINDEX`, `SYSPROCEDURE`, `SYSTABLE`-family, `SYSCATALOG`,
+  `SYSFOREIGNKEY`, `SYSJAVACLASS`, ...) **and** QuickBooks-specific
+  Java class names (`QBAccountingGroup`, `PayrollGroup`,
+  `VerifyPriceRulesOrphanItems`, `VerifySiteItemIdMatches`,
+  `emp_Pay_Item_Id_Num`). This corroborates C.14 at corpus scale
+  and confirms the payload is a genuine SA 17 database with an
+  Intuit schema overlaid. Tool: `re/strings_plain.py`.
