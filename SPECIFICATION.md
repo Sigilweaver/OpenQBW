@@ -494,3 +494,12 @@ Reproduce with `re/template_clusters.py`.
   `emp_Pay_Item_Id_Num`). This corroborates C.14 at corpus scale
   and confirms the payload is a genuine SA 17 database with an
   Intuit schema overlaid. Tool: `re/strings_plain.py`.
+- **2026-04-19 · C.16** — Catalog + UI pages located. On Rock
+  Castle, page 2 (type `A`) is the SA **index catalog** (ISYS*
+  names); page 340 (type `E`) holds the SA **system-table list**
+  (SYSTABLE, SYSCOLUMN, SYSCATALOG, ...); page 1382 (type `E`) is
+  a QuickBooks **UI page** — the Home-screen menu definitions for
+  Company Center, Customer Center, Create Invoices, Pay Bills,
+  Chart of Accounts etc., with references to `qbwin32.dll`. Row-
+  data pages for QB entities begin at pn ≈ 1289. Tool:
+  `re/find_string.py` (preset-driven needle search).
