@@ -323,3 +323,7 @@ Reproduce with `re/template_clusters.py`.
   with QB distribution/flavour. Proves the "system" pages are a
   shipped schema image seeded at company-file creation, not
   per-file-keyed ciphertext. See §8a.
+- **2026-04-19 · C.11** — 16-byte block analysis across 20 × 50 pages
+  finds the most-frequent block on disk is all-zeros and the next
+  most-frequent are literal ASCII fragments of the SAP copyright
+  string. **Definitively no encryption layer**; §7 rewritten.
