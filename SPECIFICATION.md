@@ -268,6 +268,38 @@ parsing a page successfully.
 5. Do `.TLG` files share the page-0 superblock, or do they use a
    completely different journal format?
 
+## 8a. Template clustering (C.10)
+
+Hashing page 3 of every file in the corpus produces only **6 distinct
+hashes** across 112 files. The clusters line up with the QuickBooks
+distribution + flavour:
+
+| files | hash prefix | composition |
+|------:|-------------|-------------|
+|    55 | `a68289bc…` | 11 files each from five QB distributions (2018, 2020, 2021, 2022, …) |
+|    24 | `8fc7be19…` | 4–5 files each from the same five distributions |
+|    20 | `a536c856…` | 4 files each from the same five distributions |
+|     8 | `1b4a8402…` | `Mastering QuickBooks for Contractors` only |
+|     3 | `ef33a71f…` | `Mastering QuickBooks for Contractors` only |
+|     2 | `298853cb…` | `UserBooks2018E-2` only |
+
+Within each cluster, page 3 is **byte-identical**, as are many other
+pages in the 0..200 range. This is unmistakably a shipped
+schema/template image: every new company file is seeded from one of a
+small set of fresh SA databases that already contain the QuickBooks
+system catalog (SYSTABLE, indexes, stored procedures, …) and then the
+user's data is written on top.
+
+Consequences for the parser:
+
+- The schema is (mostly) static and discoverable. Once one template's
+  catalog is decoded, the result generalises to every file in the
+  cluster and largely to the others.
+- This reinforces C.8: the bytes shared across files cannot be
+  encrypted with a per-file key.
+
+Reproduce with `re/template_clusters.py`.
+
 ## 9. Change log
 
 - **2026-04-19 · C.1–C.4** — Initial specification: corpus survey,
@@ -286,3 +318,8 @@ parsing a page successfully.
   form `byte[i] = (S·i + C) mod 256` observed in "empty" data
   pages. Working hypothesis: pages 1..N are plain SAP SQL Anywhere
   17 pages with no encryption layer.
+- **2026-04-19 · C.10** — Hashing page 3 of every file partitions the
+  corpus into exactly **6 byte-identical template clusters** aligned
+  with QB distribution/flavour. Proves the "system" pages are a
+  shipped schema image seeded at company-file creation, not
+  per-file-keyed ciphertext. See §8a.
