@@ -358,10 +358,40 @@ refutation/confirmation is the next milestone.
 
 _Unknown._
 
-## 6. Schema / catalog
+## 6. Slotted catalog pages
 
-_Unknown._ Expected to follow SAP SQL Anywhere's on-disk catalog
-layout once decryption is solved.
+Deobfuscated catalog pages follow the classic SAP SQL Anywhere
+**slot-directory** layout: variable-size rows live in the page body
+and a descending array of little-endian row offsets points at them.
+
+Observed structure on the Rock Castle sample:
+
+- **Page 2** (type `A`, index catalog): slot scan starts at `0x069`,
+  the actual array starts at `0x06B` after a zero sentinel, there are
+  **39 slots**, and the smallest row offset is `0x0076`. Prelude bytes
+  immediately before the array decode as
+  `[0x0404, 0x30C6, 0x0076, 0x0027, 0x0001, 0x0000]`.
+- **Page 11** (type `E`, SA procedure catalog): slot scan starts at
+  `0x06F`, array starts at `0x071`, there are **124 slots**, and the
+  smallest row offset is `0x01C2`. Prelude bytes contain
+  `[0x0404, 0x7265, 0x01C2, 0x007C, 0x05B4, 0x0000]`; the leading
+  `0x7265` is likely row tail, not header.
+- **Page 340** (type `E`, system-table list): slot scan starts at
+  `0x09B`, array starts at `0x09D`, there are **44 slots** of which
+  **2 are deleted** (`0x0000` interior entries), and the smallest live
+  row offset is `0x01F8`. Prelude bytes decode as
+  `[0x0304, 0x022C, 0x01F8, 0x002C, 0x0001, 0x0000]`.
+
+In all three pages:
+
+- the slot array is monotonic decreasing;
+- the slot-count field in the prelude matches the number of slot
+  entries, not just live rows;
+- the array may start on an **odd byte boundary**;
+- a zero sentinel word may appear immediately before the first slot.
+
+The precise semantics of the non-count prelude fields are not yet
+assigned.
 
 ## 7. Encryption & obfuscation
 
@@ -403,8 +433,10 @@ alone. No secret key is required at any point.
 3. Are pages 1..127 really reserved (§3.2), and what do they hold?
 4. Do `.TLG` files share the page-0 superblock, or do they use a
    completely different journal format?
-5. What is the SA page-header layout at offset 0 of pages ≥ 1? (Next
-   milestone.)
+5. What do the non-count prelude fields mean on slotted pages
+  (`0x0404`, `0x30C6`, `0x0304`, `0x022C`, `0x0001`, `0x05B4`, ...)?
+6. Why do QB UI pages such as pn 1328/1329 not expose a clean slot
+  directory under the current per-sector recovery model?
 
 ## 8a. Template clustering (C.10)
 
@@ -497,9 +529,17 @@ Reproduce with `re/template_clusters.py`.
 - **2026-04-19 · C.16** — Catalog + UI pages located. On Rock
   Castle, page 2 (type `A`) is the SA **index catalog** (ISYS*
   names); page 340 (type `E`) holds the SA **system-table list**
-  (SYSTABLE, SYSCOLUMN, SYSCATALOG, ...); page 1382 (type `E`) is
-  a QuickBooks **UI page** — the Home-screen menu definitions for
+  (SYSTABLE, SYSCOLUMN, SYSCATALOG, ...); pages 1328 / 1329 / 1337
+  carry QuickBooks **UI strings** — the Home-screen menu for
   Company Center, Customer Center, Create Invoices, Pay Bills,
-  Chart of Accounts etc., with references to `qbwin32.dll`. Row-
-  data pages for QB entities begin at pn ≈ 1289. Tool:
-  `re/find_string.py` (preset-driven needle search).
+  Chart of Accounts etc., with references to `qbwin32.dll` and
+  `qbw:centers?...` URLs. Row-data pages for QB entities begin at
+  pn ≈ 1289. Tool: `re/find_string.py`.
+- **2026-04-19 · C.17** — Slotted-page directories parsed.
+  `re/page_layout.py` now locates the descending u16 row-offset array
+  on deobfuscated SAP catalog pages even when the array is odd-aligned
+  and preceded by a zero sentinel. Verified on Rock Castle:
+  page 2 (`A`) has 39 slots, page 11 (`E`) has 124 slots, and page
+  340 (`E`) has 44 slots with 2 deleted entries. The prelude bytes
+  immediately before the array contain the minimum row offset and the
+  slot count, but other fields remain unidentified.
