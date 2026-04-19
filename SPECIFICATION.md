@@ -69,6 +69,43 @@ means the CRC is computed over the on-disk (ciphertext) bytes: the
 encryption layer runs *before* CRC stamping, so a parser can validate
 page integrity **without** knowing the encryption key. See [C.5](re/NOTES.md#c5--universal-page-footer-is-crc32-of-the-page-body--2026-04-19).
 
+### 2.2a Universal 12-byte page trailer (C.12)
+
+The 12 bytes immediately before the CRC-32 footer — offsets
+`0xFF0..0xFFB` — have a fixed layout, proven by scanning all
+456 409 non-zero pages across 112 files with **zero invariant
+failures**:
+
+| Offset | Size | Field         | Notes |
+|-------:|-----:|---------------|-------|
+| 0xFF0  | 1    | `flag_ff0`    | per-type variable byte |
+| 0xFF1  | 1    | `flag_ff1`    | almost always `0x00` (rare `0x01`) |
+| 0xFF2  | 1    | **`page_type`** | ASCII letter; see table below |
+| 0xFF3  | 1    | `zero_ff3`    | **always `0x00`** (checked) |
+| 0xFF4  | 1    | `meta_ff4`    | varies per page type |
+| 0xFF5  | 1    | `meta_ff5`    | varies per page type |
+| 0xFF6  | 6    | `zero_ff6`    | **always `00 00 00 00 00 00`** (checked) |
+| 0xFFC  | 4    | `crc32_le`    | zlib CRC-32 over `page[0x000..0xFFC]` |
+
+Corpus-wide frequency of the page-type byte at 0xFF2
+(456 409 pages, 112 files):
+
+| Byte | ASCII | Count  | %      | Working name / guess |
+|-----:|------:|-------:|-------:|----------------------|
+| 0x45 | `'E'` | 242 460 | 53.12 % | **E**xtent / data page |
+| 0x41 | `'A'` | 208 783 | 45.74 % | **A**llocation / free-space map |
+| 0x4D | `'M'` |   3 159 |  0.69 % | **M**ap / metadata |
+| 0x48 | `'H'` |     550 |  0.12 % | **H**eader block |
+| 0x43 | `'C'` |     492 |  0.11 % | **C**atalog |
+| 0x40 | `'@'` |     448 |  0.10 % | reserved / bootstrap (pages 4..7) |
+| 0x49 | `'I'` |     421 |  0.09 % | **I**ndex (page 1 is typically this) |
+| 0x47 | `'G'` |      96 |  0.02 % | unknown |
+
+The page trailer is the **only** fully-structural region observed on
+pages 1..N so far. Combined with C.5 it gives a parser the complete
+page integrity+typing protocol without touching page contents. See
+[C.12](re/NOTES.md#c12--universal-12-byte-page-trailer-at-0xff00xffb--2026-04-19).
+
 ### 2.3 Underlying engine: SAP SQL Anywhere 17.0.4 build 2182
 
 Page 0 contains, starting at offset `0x401` and repeated (rolled) to
@@ -338,3 +375,8 @@ Reproduce with `re/template_clusters.py`.
   finds the most-frequent block on disk is all-zeros and the next
   most-frequent are literal ASCII fragments of the SAP copyright
   string. **Definitively no encryption layer**; §7 rewritten.
+- **2026-04-19 · C.12** — Universal 12-byte page trailer at
+  `0xFF0..0xFFB` (just before the CRC): `page_type` byte at 0xFF2
+  ('E'/'A'/'M'/'H'/'C'/'@'/'I'/'G'), two reserved-zero regions, and
+  per-type metadata bytes. Zero invariant failures across 456 409
+  pages / 112 files. See §2.2a.
