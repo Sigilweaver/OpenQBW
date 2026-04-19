@@ -144,6 +144,46 @@ Consequences for a parser:
 
 Reproduce with `re/sector_analysis.py`. See [C.13](re/NOTES.md#c13--pages-decompose-into-8--512-b-sectors-many-are-pure-ap-fill--2026-04-19).
 
+### 2.2c The AP fill is an additive keystream (C.14)
+
+Pages 1..N are **obfuscated, not encrypted**, by a deterministic
+per-sector arithmetic progression added mod 256 to the SAP SQL
+Anywhere plaintext:
+
+```
+stored[i] = ( base(page, sector) + i * step(page, sector) + plaintext[i] ) mod 256
+```
+
+- `base` and `step` are 8-bit constants depending on
+  `(page_number, sector_index)` only. They do **not** depend on
+  file identity, which is why ~14 % of pages are byte-identical
+  between unrelated files (C.8) and why the corpus clusters into
+  6 shipped templates (C.10).
+- Empty regions of an SA page carry `plaintext = 0`, so the stored
+  bytes reduce to the pure AP fill (C.13).
+- `step` is recovered as the modal adjacent byte difference of the
+  sector; `base` is then chosen to maximise AP match count. A
+  closed-form expression for `(base, step)` as a function of
+  `(page, sector)` is still open.
+
+Applying `plaintext[i] = (stored[i] − fill[i]) mod 256` to page 11
+of the Rock Castle sample recovers actual SA system procedure
+identifiers:
+
+```
+...0a sp_columns 01 50 03 ...
+...0b sp_password...
+...0d sp_addmessage 01 50 03 ...
+...0b sp_addlogin 01 50 03 ...
+```
+
+and a row-slot directory counting down from `0x0fca` to `0x01c2` —
+the canonical SA **page → slot → record** layout. That is direct
+evidence the payload is a genuine SAP SQL Anywhere 17.0.4 database.
+
+Reproduce with `re/fill_overlay.py`. See
+[C.14](re/NOTES.md#c14--the-ap-fill-is-an-additive-keystream-plaintext-recovered--2026-04-19).
+
 ### 2.3 Underlying engine: SAP SQL Anywhere 17.0.4 build 2182
 
 Page 0 contains, starting at offset `0x401` and repeated (rolled) to
@@ -325,8 +365,14 @@ layout once decryption is solved.
 
 ## 7. Encryption & obfuscation
 
-**None.** Three independent lines of evidence (C.8, C.10, C.11) rule
-out any cryptographic transformation of pages 1..N:
+There is **no keyed encryption layer**. Three independent lines of
+evidence (C.8, C.10, C.11) rule it out. But there *is* a lightweight
+obfuscation layer: an 8-bit per-sector arithmetic progression added
+mod 256 to the SA plaintext (C.14, §2.2c). Removing it is a
+purely-deterministic per-(page, sector) operation, not a key, and
+recovers genuine SAP SQL Anywhere 17.0.4 page contents.
+
+Evidence:
 
 1. **Pairwise file comparison.** 14 % of pages are byte-identical
    between two unrelated files; the XOR has entropy 0.25 bit/byte.
@@ -340,9 +386,15 @@ out any cryptographic transformation of pages 1..N:
    the SAP copyright string. Any deterministic keyed encryption
    (AES-ECB, XOR-with-fixed-keystream, …) would destroy this
    signature. (C.11.)
+4. **Plaintext recovery.** Subtracting the per-sector AP fill from
+   page 11 of Rock Castle reveals ASCII strings `sp_columns`,
+   `sp_password`, `sp_addmessage`, `sp_addlogin` and a monotonic-
+   decreasing u16 slot directory — real SA catalog data. (C.14.)
 
-The on-disk bytes of the payload are exactly the logical SAP SQL
-Anywhere 17 pages. No decryption key is required at any point.
+The on-disk bytes of the payload are the logical SAP SQL Anywhere 17
+pages, obfuscated by an additive per-sector arithmetic progression
+whose `(base, step)` is a function of `(page_number, sector_index)`
+alone. No secret key is required at any point.
 
 ## 8. Open questions
 
@@ -425,3 +477,9 @@ Reproduce with `re/template_clusters.py`.
   a function of `(page_number, sector_index)` — file-independent —
   which is consistent with C.8's pairwise-XOR observations. See
   §2.2b.
+- **2026-04-19 · C.14** — The AP fill is an **additive keystream**:
+  `stored[i] = (base + i·step + plaintext[i]) mod 256`. Subtracting
+  the per-sector AP recovers SAP SQL Anywhere plaintext — ASCII
+  procedure names (`sp_columns`, `sp_password`, `sp_addmessage`,
+  `sp_addlogin`) and a monotonic u16 slot directory on page 11 of
+  Rock Castle. §7 rewritten; §2.2c added.
