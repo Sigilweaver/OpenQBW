@@ -48,9 +48,40 @@ Whole-file facts (corpus-wide, 112/112 files):
 
 ### 2.1 Page-0 is the *superblock*
 
-Page 0 is the only page that contains plaintext structure. Pages 1..N
-are high-entropy (encrypted). Page 0 ends with several plaintext
-collation names — see §3.3.
+Page 0 is the only page that contains extensive plaintext structure.
+Pages 1..N are high-entropy (encrypted payload) but **every** page
+(including encrypted ones) ends with a 4-byte integrity footer — see
+§2.2.
+
+### 2.2 Universal per-page CRC-32 footer
+
+For **every** page of **every** file in the corpus (456,521 pages
+across 112 files) the final four bytes of the page are the
+zlib/IEEE CRC-32 of the first 4092 bytes of the same page, stored
+little-endian:
+
+```
+page[0x0FFC..0x1000] == u32_LE( zlib.crc32( page[0x0000..0x0FFC] ) )
+```
+
+100 % match, 0 failures. This holds for encrypted pages as well, which
+means the CRC is computed over the on-disk (ciphertext) bytes: the
+encryption layer runs *before* CRC stamping, so a parser can validate
+page integrity **without** knowing the encryption key. See [C.5](re/NOTES.md#c5--universal-page-footer-is-crc32-of-the-page-body--2026-04-19).
+
+### 2.3 Underlying engine: SAP SQL Anywhere 17.0.4 build 2182
+
+Page 0 contains, starting at offset `0x401` and repeated (rolled) to
+fill offsets `0x400..0x1000`, the fixed 38-byte SAP SQL Anywhere
+sector-fingerprint string
+
+```
+"2182 SAP SE, Copyright (c)2015 17.0.4."
+```
+
+…which pins the embedded engine to **SAP SQL Anywhere 17.0.4 build
+2182** (2015 release). The substring `"17.0.4.2182 SAP SE, Copyright
+(c)2015"` is present in page 0 of 112/112 files. See [C.6](re/NOTES.md#c6--sap-sql-anywhere-1704-build-2182-fingerprint--2026-04-19).
 
 ## 3. Page-0 superblock
 
@@ -100,10 +131,24 @@ metadata* and the hint counts the data pages after them.
 
 _Validate_ this once we have an explicit page-usage bitmap.
 
+### 3.2a  Middle zero band (0x040 – 0x162)
+
+Largely zero with a few file-specific bytes around offsets `0x06C`,
+`0x096`, `0x0A0`, `0x0B8`, `0x0C8`. Not yet decoded.
+
+### 3.2b  Secondary header block (0x2BC – 0x2E4)
+
+A second dense structure block, ~40 bytes long, containing two
+repeated 8-byte values (e.g. `31 9C 41 3F 90 92 B4 00` appears twice
+per file) and what looks like a UUID
+(`58 E1 D7 49 46 AD 44 6B A0 5A 9C 8B C4 5C EB C5` — version nibble
+`0x4` → UUIDv4). Function unknown. Candidates: LSN pair + instance
+UUID.
+
 ### 3.3 Plaintext collation / codepage block (≈ offsets 0x162 – 0x1FF)
 
-Near the end of the 4 KiB superblock there is a plaintext region that
-contains the SAP SQL Anywhere collation names:
+Near the middle of the 4 KiB superblock there is a plaintext region
+that contains the SAP SQL Anywhere collation names:
 
 ```
 0x0162  57 02 00 00 31 32 35 32 4c 41 54 49 4e 31 00 …    |W...1252LATIN1..|
@@ -123,17 +168,33 @@ Their presence in every `.QBW` at the same position is the strongest
 single piece of evidence that `.QBW` payload is an obfuscated SQL
 Anywhere database image.
 
+### 3.4 Page-0 copyright-fingerprint region (0x400 – 0xFFC)
+
+Offsets `0x400..0xFFC` (3 068 bytes) are a single deterministic
+pattern: the 38-byte string `"2182 SAP SE, Copyright (c)2015 17.0.4."`
+repeated as a rolling cycle. The byte at the very start of each
+0x200-aligned sector (`0x400`, `0x600`, `0x800`, `0xA00`, `0xC00`,
+`0xE00`) is a phase index that selects which rotation of the 38-byte
+string the sector starts at. Last four bytes (0x0FFC..0x1000) are the
+CRC-32 footer (§2.2).
+
 ## 4. Page 1 … N — encrypted payload
 
-Every page after page 0 observed so far is high-entropy. Cursory
-statistical inspection has not yet revealed an obvious per-page
-plaintext header. Hypotheses, all untested:
+Every page after page 0 observed so far is high-entropy (Shannon
+entropy near 8 bit/byte). Cursory statistical inspection has not yet
+revealed an obvious per-page plaintext header. Hypotheses, all
+untested:
 
 1. Pages are XOR-encrypted with a file-keyed keystream.
 2. Pages are encrypted with a block cipher (DES / 3DES / AES) keyed
    by a per-file value derivable from the superblock.
 3. Only a subset of pages (e.g. "data" pages, not "free" pages) are
    encrypted.
+
+Note: because the per-page CRC-32 footer (§2.2) is applied *after*
+encryption, the ciphertext is what's protected; an attacker can
+re-stamp a valid CRC after any modification. This is integrity-only,
+not authenticated encryption.
 
 Next experiments (see `re/`):
 
@@ -171,3 +232,8 @@ _Unknown._ See §4.
   4 KiB page size, `0xDA7ABA5E` magic, version triple `{3, 201, 12}`,
   plaintext collation block, conservation map of the first 64 bytes
   of the superblock.
+- **2026-04-19 · C.5–C.7** — Universal per-page CRC-32 footer
+  (456 521 / 456 521 pages pass). Engine fingerprinted as SAP SQL
+  Anywhere 17.0.4 build 2182 via the rolling copyright string at
+  page-0 offsets 0x400..0xFFC. Secondary page-0 structure block at
+  0x2BC identified.
