@@ -106,6 +106,44 @@ pages 1..N so far. Combined with C.5 it gives a parser the complete
 page integrity+typing protocol without touching page contents. See
 [C.12](re/NOTES.md#c12--universal-12-byte-page-trailer-at-0xff00xffb--2026-04-19).
 
+### 2.2b Pages decompose into 8 × 512-byte sectors; many sectors are pure fill (C.13)
+
+Each 4 KiB page is physically 8 sectors of 512 bytes. For every
+sector, either every adjacent byte-difference is a single constant
+`step` (mod 256) — in which case the sector is a **pure arithmetic-
+progression fill** carrying no information — or the sector carries
+real data. The choice is deterministic by page type:
+
+| page type | sectors 1..6 pure-fill % | real data lives in |
+|-----------|:------------------------:|--------------------|
+| `'C'` catalog | **100.0 %**         | sector 0 and sector 7 only |
+| `'H'` header  | **100.0 %**         | sector 0 and sector 7 only |
+| `'M'` map     | **94..100 %**       | sector 0 and sector 7 only |
+| `'I'` index   | sectors 0..4,6: 0 %, sector 5: 85.7 % | sectors 0..4, 6, 7 |
+| `'A'` alloc   | 46..60 %            | sparsely — bitmap overlays |
+| `'E'` extent  | 5..6 %              | nearly all 4080 body bytes |
+| `'@'` boot    | ~25..75 % (mixed)   | bootstrap pages 4..7 |
+
+(Measured on 10 772 data pages of Rock Castle Construction.)
+
+Consequences for a parser:
+
+1.  For `'C'`, `'H'`, `'M'` pages, only the first 512 B and the
+    last 512 B of the page (≈1008 B of payload, net of the trailer)
+    need to be parsed. The middle 3 KiB is fill.
+2.  The fill is a deterministic function of `(page_number,
+    sector_index)` — it is independent of the individual file —
+    which is what makes ~14 % of pages byte-identical between
+    unrelated files (§4.1) and rules out any per-file keying.
+3.  The first byte of consecutive pure-fill sectors within a page
+    increments by 1 (e.g. sectors 1..6 of page 4 start with
+    `0x31, 0x32, 0x33, 0x34, 0x35, 0x36`). The exact formula for
+    the AP `step` vs `(page, sector)` is not yet linear and is
+    open; a likely candidate is a rolling phase index into the
+    38-byte SAP copyright string (§3.4).
+
+Reproduce with `re/sector_analysis.py`. See [C.13](re/NOTES.md#c13--pages-decompose-into-8--512-b-sectors-many-are-pure-ap-fill--2026-04-19).
+
 ### 2.3 Underlying engine: SAP SQL Anywhere 17.0.4 build 2182
 
 Page 0 contains, starting at offset `0x401` and repeated (rolled) to
@@ -380,3 +418,10 @@ Reproduce with `re/template_clusters.py`.
   ('E'/'A'/'M'/'H'/'C'/'@'/'I'/'G'), two reserved-zero regions, and
   per-type metadata bytes. Zero invariant failures across 456 409
   pages / 112 files. See §2.2a.
+- **2026-04-19 · C.13** — Pages decompose into 8 physical 512-byte
+  sectors. For `'C'` / `'H'` / `'M'` pages, the middle 6 sectors
+  (3 KiB) are pure arithmetic-progression fill with no information;
+  real content lives only in sectors 0 and 7 (~1 KiB). The fill is
+  a function of `(page_number, sector_index)` — file-independent —
+  which is consistent with C.8's pairwise-XOR observations. See
+  §2.2b.
