@@ -64,14 +64,35 @@ impl AmountType {
         }
     }
 
-    /// Decode the 4 amount bytes into integer cents when the type byte is
-    /// one of the known cents-bearing types (`0x01`, `0x02`).
+    /// Decode the 4 amount bytes into UNSIGNED integer cents (the raw u24
+    /// LE in `raw[1..4]`). Preserves the original Phase 5 transaction-volume
+    /// baseline. Use [`AmountType::decode_cents_signed`] for the signed
+    /// (high-bit-of-byte-1) interpretation discovered in C.48.
     pub fn decode_cents(self, raw: &[u8; 4]) -> Option<u32> {
         match self {
             Self::Standard | Self::OneByteOne => {
                 let cents =
                     (raw[1] as u32) | ((raw[2] as u32) << 8) | ((raw[3] as u32) << 16);
                 Some(cents)
+            }
+            _ => None,
+        }
+    }
+
+    /// Decode the 4 amount bytes into SIGNED integer cents under the
+    /// high-bit-of-byte-1-is-sign convention (C.48 Track A). The magnitude
+    /// is `(raw[1] & 0x7F) | (raw[2] << 8) | (raw[3] << 16)` and the sign
+    /// is `-1` if `raw[1] & 0x80 != 0`. Returns `None` for types other than
+    /// `0x01` and `0x02` (type `0x03` is NOT a signed amount; its bytes
+    /// store enumerated reference codes - see C.48).
+    pub fn decode_cents_signed(self, raw: &[u8; 4]) -> Option<i32> {
+        match self {
+            Self::Standard | Self::OneByteOne => {
+                let mag = ((raw[1] & 0x7F) as i32)
+                    | ((raw[2] as i32) << 8)
+                    | ((raw[3] as i32) << 16);
+                let sign = if raw[1] & 0x80 != 0 { -1 } else { 1 };
+                Some(sign * mag)
             }
             _ => None,
         }
@@ -91,8 +112,12 @@ pub struct LineItem {
     pub item_qb_id: Option<String>,
     /// Amount-type classification.
     pub amount_type: AmountType,
-    /// Decoded cents value when [`AmountType::decode_cents`] applies.
+    /// Decoded UNSIGNED cents value when [`AmountType::decode_cents`]
+    /// applies. Preserves Phase 5 transaction-volume semantics.
     pub amount_cents: Option<u32>,
+    /// Decoded SIGNED cents value (high-bit-of-byte-1-is-sign) when
+    /// [`AmountType::decode_cents_signed`] applies. C.48 Track A.
+    pub amount_cents_signed: Option<i32>,
     /// Raw 4 bytes immediately following the float32(1.0) quantity.
     pub amount_raw: [u8; 4],
     /// SA17 transaction date stored as days since 1981-01-01, when discovered.
@@ -265,6 +290,7 @@ fn parse_anchor(body: &[u8], pn: u64, anchor_start: usize) -> LineItem {
     }
     let amount_type = AmountType::from_byte(amount_raw[0]);
     let amount_cents = amount_type.decode_cents(&amount_raw);
+    let amount_cents_signed = amount_type.decode_cents_signed(&amount_raw);
 
     // Forward search for date+counter pair: SA date as u32 LE in 13000..20000,
     // followed by 4-byte counter > 0.
@@ -309,6 +335,7 @@ fn parse_anchor(body: &[u8], pn: u64, anchor_start: usize) -> LineItem {
         item_qb_id,
         amount_type,
         amount_cents,
+        amount_cents_signed,
         amount_raw,
         txn_date_raw,
         counter,
@@ -359,6 +386,40 @@ mod tests {
         let raw = [0x03, 0xBF, 0x5F, 0x63];
         let t = AmountType::from_byte(raw[0]);
         assert_eq!(t.decode_cents(&raw), None);
+        assert_eq!(t.decode_cents_signed(&raw), None);
+    }
+
+    #[test]
+    fn signed_decode_positive() {
+        // C.48 example: 0x02 with high bit clear -> positive.
+        // raw = 02 40 2d 01 -> magnitude (0x40 & 0x7F)|(0x2D<<8)|(0x01<<16) = 0x012D40 = 77120
+        let raw = [0x02, 0x40, 0x2D, 0x01];
+        let t = AmountType::from_byte(raw[0]);
+        assert_eq!(t.decode_cents_signed(&raw), Some(77_120));
+    }
+
+    #[test]
+    fn signed_decode_negative_pairs_with_positive() {
+        // C.48 example: paired 2-line journal lines must sum to zero.
+        // line1: 02 40 2d 01 -> +77120
+        // line2: 02 c0 2d 01 -> -77120
+        let pos = [0x02, 0x40, 0x2D, 0x01];
+        let neg = [0x02, 0xC0, 0x2D, 0x01];
+        let t = AmountType::from_byte(pos[0]);
+        let a = t.decode_cents_signed(&pos).unwrap();
+        let b = t.decode_cents_signed(&neg).unwrap();
+        assert_eq!(a + b, 0);
+        assert_eq!(a, 77_120);
+        assert_eq!(b, -77_120);
+    }
+
+    #[test]
+    fn signed_decode_large_magnitude() {
+        // Verify magnitude reaches full 23-bit range.
+        // 02 7F FF FF -> +(0x7F | 0xFF00 | 0xFF0000) = 0xFFFF7F = 16_777_087
+        let raw = [0x02, 0x7F, 0xFF, 0xFF];
+        let t = AmountType::from_byte(raw[0]);
+        assert_eq!(t.decode_cents_signed(&raw), Some(16_777_087));
     }
 
     #[test]

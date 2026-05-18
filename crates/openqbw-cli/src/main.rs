@@ -228,37 +228,76 @@ fn run_verify(input: PathBuf, output: Option<PathBuf>) -> Result<()> {
     }
 
     println!();
-    println!("Journal sum-to-zero check (Phase 2.2, signed-amount):");
-    // Use the attribution-derived source table directly since header
-    // anchor coverage is incomplete (see C.47).
-    let mut stmt = conn.prepare(
-        "SELECT qb_id_parent, COALESCE(SUM(amount_cents), 0) as s
-         FROM transaction_line_items
-         WHERE source_table = 'abmc_general_journal_inventory_lineitem'
-         GROUP BY qb_id_parent",
+    println!("Journal sum-to-zero check (Phase 2.2, signed amounts, C.48 Track A):");
+    // Same-type 2-line journal pair-balance: the strictest case where the
+    // high-bit-of-byte-1 sign hypothesis is unambiguous. Acceptance target:
+    // 100% same-type pair-balance.
+    let pair_stats: (i64, i64) = conn.query_row(
+        "SELECT
+           COUNT(*) AS pairs,
+           SUM(CASE WHEN signed_sum = 0 THEN 1 ELSE 0 END) AS balanced
+         FROM (
+           SELECT qb_id_parent,
+                  SUM(amount_cents_signed) AS signed_sum,
+                  COUNT(*) AS n,
+                  COUNT(DISTINCT amount_type) AS types
+           FROM transaction_line_items
+           WHERE source_table = 'abmc_general_journal_inventory_lineitem'
+             AND amount_type IN (1, 2)
+             AND amount_cents_signed IS NOT NULL
+           GROUP BY qb_id_parent
+           HAVING n = 2 AND types = 1
+         )",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
-    let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
-    let mut total_j = 0u64;
-    let mut zero_j = 0u64;
-    for row in rows {
-        let (_qb, s) = row?;
-        total_j += 1;
-        if s == 0 {
-            zero_j += 1;
-        }
-    }
-    if total_j == 0 {
-        println!("  no journal-attributed parents found");
+    let (pairs, balanced) = pair_stats;
+    if pairs == 0 {
+        println!("  no same-type 2-line journal pairs found");
     } else {
-        let pct = (zero_j as f64) / (total_j as f64) * 100.0;
+        let pct = (balanced as f64) / (pairs as f64) * 100.0;
+        let ok = balanced == pairs;
         println!(
-            "  {}/{} journal-attributed parents sum to zero ({:.1}%)",
-            zero_j, total_j, pct,
-        );
-        println!(
-            "  note: amounts are currently UNSIGNED; sign-encoding is a Phase 2.2 follow-up."
+            "  same-type 2-line journal pairs: {}/{} balance ({:.1}%) {}",
+            balanced,
+            pairs,
+            pct,
+            if ok { "PASS" } else { "DIFF" },
         );
     }
+
+    // Broader (all journals) for visibility - not an acceptance criterion
+    // because 0x03 entries are not amount records (see C.48 Track A) and
+    // attribution is fuzzy (see C.47).
+    let all_stats: (i64, i64) = conn.query_row(
+        "SELECT
+           COUNT(*) AS p,
+           SUM(CASE WHEN signed_sum = 0 THEN 1 ELSE 0 END) AS bal
+         FROM (
+           SELECT qb_id_parent,
+                  COALESCE(SUM(amount_cents_signed), 0) AS signed_sum
+           FROM transaction_line_items
+           WHERE source_table = 'abmc_general_journal_inventory_lineitem'
+           GROUP BY qb_id_parent
+         )",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    let (allp, allb) = all_stats;
+    if allp > 0 {
+        println!(
+            "  all journal-attributed parents (signed sum incl. type-0x03 nulls): {}/{} ({:.1}%)",
+            allb,
+            allp,
+            (allb as f64) / (allp as f64) * 100.0,
+        );
+    }
+    println!(
+        "  note: type-0x03 entries are NOT signed amounts (727 distinct values across"
+    );
+    println!(
+        "        11,754 occurrences in Rock Castle - see NOTES.md C.48 Track A)."
+    );
 
     println!();
     println!("Overall: {}", stats.summary());
@@ -288,17 +327,18 @@ fn create_schema(conn: &Connection) -> Result<()> {
         );
 
         CREATE TABLE transaction_line_items (
-            qb_id_parent     TEXT NOT NULL,
-            line_number      INTEGER NOT NULL,
-            item_qb_id       TEXT,
-            amount_type      INTEGER NOT NULL,
-            amount_cents     INTEGER,
-            amount_raw_hex   TEXT NOT NULL,
-            txn_date_raw     INTEGER,
-            counter          INTEGER,
-            source_table     TEXT NOT NULL,
-            page_number      INTEGER NOT NULL,
-            page_offset      INTEGER NOT NULL,
+            qb_id_parent        TEXT NOT NULL,
+            line_number         INTEGER NOT NULL,
+            item_qb_id          TEXT,
+            amount_type         INTEGER NOT NULL,
+            amount_cents        INTEGER,
+            amount_cents_signed INTEGER,
+            amount_raw_hex      TEXT NOT NULL,
+            txn_date_raw        INTEGER,
+            counter             INTEGER,
+            source_table        TEXT NOT NULL,
+            page_number         INTEGER NOT NULL,
+            page_offset         INTEGER NOT NULL,
             PRIMARY KEY (qb_id_parent, line_number, source_table)
         );
 
@@ -400,9 +440,9 @@ fn insert_transaction_line_items(tx: &Transaction<'_>, items: &[LineItem]) -> Re
     let mut stmt = tx.prepare(
         "INSERT OR IGNORE INTO transaction_line_items \
          (qb_id_parent, line_number, item_qb_id, amount_type, amount_cents, \
-          amount_raw_hex, txn_date_raw, counter, source_table, \
+          amount_cents_signed, amount_raw_hex, txn_date_raw, counter, source_table, \
           page_number, page_offset) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )?;
     let mut line_no: BTreeMap<(String, String), i64> = BTreeMap::new();
     for li in items {
@@ -422,6 +462,7 @@ fn insert_transaction_line_items(tx: &Transaction<'_>, items: &[LineItem]) -> Re
             li.item_qb_id,
             type_byte,
             li.amount_cents,
+            li.amount_cents_signed,
             hex,
             li.txn_date_raw,
             li.counter,
