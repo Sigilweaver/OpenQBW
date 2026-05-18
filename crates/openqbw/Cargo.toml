@@ -1,0 +1,12 @@
+[package]
+name = "openqbw"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "QuickBooks .qbw file parser built on opensqlany page-store."
+
+[dependencies]
+opensqlany = { workspace = true }
+thiserror = { workspace = true }

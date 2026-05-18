@@ -1,0 +1,19 @@
+[package]
+name = "openqbw-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Command-line exporter for QuickBooks .qbw files."
+
+[[bin]]
+name = "openqbw"
+path = "src/main.rs"
+
+[dependencies]
+openqbw = { workspace = true }
+opensqlany = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+rusqlite = { workspace = true }
