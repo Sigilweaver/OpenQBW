@@ -17,6 +17,7 @@ use std::iter::FusedIterator;
 use opensqlany::{ApModel, PageStore, PageType, Result as SaResult};
 
 use crate::bv_recovery::{deobfuscate_with_bv, recover_bv_qb_data};
+use crate::page_attribution::PageAttribution;
 
 /// Number of days between the Unix epoch (1970-01-01) and the SA17 epoch (1981-01-01).
 /// SA stores dates as `u32` days since 1981-01-01.
@@ -98,6 +99,10 @@ pub struct LineItem {
     pub txn_date_raw: Option<u32>,
     /// SA17 transaction counter, when discovered.
     pub counter: Option<u32>,
+    /// Owning `SYSTABLE` name (e.g. `abmc_invoice_inventory_lineitem`) when
+    /// the line item's page was attributable. Populated by
+    /// [`iter_lineitems_with_attribution`]; `None` otherwise.
+    pub source_table: Option<String>,
 }
 
 impl LineItem {
@@ -113,27 +118,45 @@ impl LineItem {
 
 /// Yields every line item found in `store` by scanning each `E`-type page.
 ///
-/// Pages whose `bv` cannot be recovered are skipped silently.
+/// Pages whose `bv` cannot be recovered are skipped silently. Each yielded
+/// item has `source_table = None`.
 pub fn iter_lineitems<'a>(
     store: &'a PageStore,
     model: &'a ApModel,
 ) -> impl Iterator<Item = LineItem> + 'a {
-    LineItemIter::new(store, model)
+    LineItemIter::new(store, model, None)
+}
+
+/// Like [`iter_lineitems`], but tags each emitted item with the
+/// `SysTableEntry::name` of the table that the line item's source page
+/// is attributed to (via [`PageAttribution`]).
+pub fn iter_lineitems_with_attribution<'a>(
+    store: &'a PageStore,
+    model: &'a ApModel,
+    attribution: &'a PageAttribution,
+) -> impl Iterator<Item = LineItem> + 'a {
+    LineItemIter::new(store, model, Some(attribution))
 }
 
 struct LineItemIter<'a> {
     store: &'a PageStore,
     model: &'a ApModel,
+    attribution: Option<&'a PageAttribution>,
     pn: u64,
     n_pages: u64,
     buffer: Vec<LineItem>,
 }
 
 impl<'a> LineItemIter<'a> {
-    fn new(store: &'a PageStore, model: &'a ApModel) -> Self {
+    fn new(
+        store: &'a PageStore,
+        model: &'a ApModel,
+        attribution: Option<&'a PageAttribution>,
+    ) -> Self {
         Self {
             store,
             model,
+            attribution,
             pn: 1, // skip superblock (page 0)
             n_pages: store.page_count(),
             buffer: Vec::new(),
@@ -157,7 +180,16 @@ impl<'a> LineItemIter<'a> {
                 Some(bv) => deobfuscate_with_bv(raw, pn, bv),
                 None => self.model.deobfuscate_with_store(raw, pn, self.store),
             };
+            let before = self.buffer.len();
             scan_page(&plain[..PAGE_DATA_END], pn, &mut self.buffer);
+            if let Some(attr) = self.attribution {
+                if let Some(entry) = attr.attribute(pn) {
+                    let name = entry.name.clone();
+                    for li in &mut self.buffer[before..] {
+                        li.source_table = Some(name.clone());
+                    }
+                }
+            }
         }
         Ok(!self.buffer.is_empty())
     }
@@ -280,6 +312,7 @@ fn parse_anchor(body: &[u8], pn: u64, anchor_start: usize) -> LineItem {
         amount_raw,
         txn_date_raw,
         counter,
+        source_table: None,
     }
 }
 

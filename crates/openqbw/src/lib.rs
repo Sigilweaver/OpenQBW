@@ -19,10 +19,15 @@
 
 mod bv_recovery;
 mod lineitem;
+mod page_attribution;
 mod systable;
+mod transaction_header;
 
 pub use bv_recovery::{deobfuscate_with_bv, oracle_bv_e_page, recover_bv_qb_data};
 pub use lineitem::{
-    iter_lineitems, AmountType, LineItem, LineItemError, DATE_EPOCH_DAYS_BEFORE_UNIX,
+    iter_lineitems, iter_lineitems_with_attribution, AmountType, LineItem, LineItemError,
+    DATE_EPOCH_DAYS_BEFORE_UNIX,
 };
+pub use page_attribution::PageAttribution;
 pub use systable::{collect_unique, iter_systable_entries, scan_page as scan_systable_page, SysTableEntry};
+pub use transaction_header::{iter_transaction_headers, TransactionHeader};
