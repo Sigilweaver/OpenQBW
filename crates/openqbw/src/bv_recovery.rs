@@ -16,6 +16,25 @@ const TRAILER_START: usize = 0xFF0;
 const D5: u8 = 0xD5;
 const ZB: u8 = 0x0B;
 
+/// Compute the E-page oracle bv assuming `plain[0] == 0x00`.
+///
+/// All SA17 E-pages start with a null byte (the page header begins with the
+/// type/flag bytes after a zero filler). The AP cipher base for sector 0 is
+/// `base = bv + pn - bias` where `bias = 4 * ((pn % 16) / 2)`. With step
+/// zero at index zero, `stored[0] = base + plain[0]`, so:
+///
+/// ```text
+///   bv = (stored[0] - pn + bias) mod 256
+/// ```
+///
+/// This single-byte computation is reliable for SYSTABLE/SYSCOLUMN catalog
+/// pages where the QB anchor used by [`recover_bv_qb_data`] is absent.
+pub fn oracle_bv_e_page(pn: u64, raw_page: &[u8]) -> u8 {
+    let p16 = (pn % 16) as u8;
+    let bias = p16 / 2 * 4;
+    raw_page[0].wrapping_sub(pn as u8).wrapping_add(bias)
+}
+
 /// Try to recover the correct bv for E-page `pn` (zero-based) using the QB
 /// page-trailer anchor. Returns `Some(bv)` on success, `None` if no candidate
 /// bv decodes the anchor (page is not a QB user-data page).

@@ -19,8 +19,10 @@
 
 mod bv_recovery;
 mod lineitem;
+mod systable;
 
-pub use bv_recovery::{deobfuscate_with_bv, recover_bv_qb_data};
+pub use bv_recovery::{deobfuscate_with_bv, oracle_bv_e_page, recover_bv_qb_data};
 pub use lineitem::{
     iter_lineitems, AmountType, LineItem, LineItemError, DATE_EPOCH_DAYS_BEFORE_UNIX,
 };
+pub use systable::{collect_unique, iter_systable_entries, scan_page as scan_systable_page, SysTableEntry};
