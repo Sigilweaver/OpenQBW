@@ -248,7 +248,7 @@ fn run_verify(
     let pair_stats: (i64, i64) = conn.query_row(
         "SELECT
            COUNT(*) AS pairs,
-           SUM(CASE WHEN signed_sum = 0 THEN 1 ELSE 0 END) AS balanced
+           COALESCE(SUM(CASE WHEN signed_sum = 0 THEN 1 ELSE 0 END), 0) AS balanced
          FROM (
            SELECT qb_id_parent,
                   SUM(amount_cents_signed) AS signed_sum,
@@ -285,7 +285,7 @@ fn run_verify(
     let all_stats: (i64, i64) = conn.query_row(
         "SELECT
            COUNT(*) AS p,
-           SUM(CASE WHEN signed_sum = 0 THEN 1 ELSE 0 END) AS bal
+           COALESCE(SUM(CASE WHEN signed_sum = 0 THEN 1 ELSE 0 END), 0) AS bal
          FROM (
            SELECT qb_id_parent,
                   COALESCE(SUM(amount_cents_signed), 0) AS signed_sum
