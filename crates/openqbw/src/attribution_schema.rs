@@ -118,6 +118,15 @@ impl SchemaAttribution {
             if cols.is_empty() {
                 continue;
             }
+            // Confidence gate: if SYSTABLE declares N columns but we
+            // parsed fewer than half of them via the SYSCOLUMN bridge,
+            // the band would be degenerate. Skip rather than emit a
+            // band that no real page can satisfy.
+            if let Some(declared) = e.col_count {
+                if declared >= 2 && (cols.len() as u32) * 2 < declared as u32 {
+                    continue;
+                }
+            }
             let mut low: u32 = MIN_ROW_BODY_BYTES;
             let mut high: u32 = MIN_ROW_BODY_BYTES;
             for c in cols {
