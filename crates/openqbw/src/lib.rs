@@ -19,6 +19,7 @@
 
 mod attribution_content;
 mod bv_recovery;
+mod fkgraph;
 mod lineitem;
 mod opaque;
 mod page_attribution;
@@ -33,6 +34,7 @@ pub use bv_recovery::{
     deobfuscate_with_bv, oracle_bv_e_page, recover_bv_any, recover_bv_apage,
     recover_bv_brute, recover_bv_qb_data, APAGE_MAGIC,
 };
+pub use fkgraph::{build as build_fk_graph, stats as fk_graph_stats, FkEdge, FkGraphStats};
 pub use lineitem::{
     iter_lineitems, iter_lineitems_with_attribution, AmountType, LineItem, LineItemError,
     DATE_EPOCH_DAYS_BEFORE_UNIX,

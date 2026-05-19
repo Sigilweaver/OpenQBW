@@ -71,6 +71,15 @@ enum Cmd {
         /// Table name to inspect.
         table: String,
     },
+    /// Print heuristic foreign-key edges inferred from column names
+    /// matching `*_id` / `*_id_h` (Phase 6, WP-6B).
+    Fkgraph {
+        /// Input QBW file.
+        input: PathBuf,
+        /// Only print edges that resolved to a target table.
+        #[arg(long)]
+        resolved_only: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -84,6 +93,10 @@ fn main() -> Result<()> {
             strict_attribution,
         } => run_verify(input, output, strict_attribution),
         Cmd::Schema { input, table } => run_schema(input, table),
+        Cmd::Fkgraph {
+            input,
+            resolved_only,
+        } => run_fkgraph(input, resolved_only),
     }
 }
 
@@ -181,6 +194,40 @@ fn run_schema(input: PathBuf, table: String) -> Result<()> {
             c.domain_char as char,
             c.width,
             c.nulls_flag
+        );
+    }
+    Ok(())
+}
+
+fn run_fkgraph(input: PathBuf, resolved_only: bool) -> Result<()> {
+    let store = PageStore::open(&input)
+        .with_context(|| format!("opening {:?}", input))?;
+    let model = ApModel::learn(&store);
+    let edges = openqbw::build_fk_graph(&store, &model);
+    let s = openqbw::fk_graph_stats(&edges);
+    println!(
+        "edges={}  resolved={}  strong(>=900)={}  resolved_rate={:.1}%",
+        s.edges,
+        s.resolved,
+        s.strong,
+        if s.edges == 0 {
+            0.0
+        } else {
+            100.0 * s.resolved as f64 / s.edges as f64
+        }
+    );
+    println!(
+        "{:<40}  {:>4}  {:<28}  {:<40}  {:>5}",
+        "source_table", "col", "source_column", "target_table", "score"
+    );
+    for e in &edges {
+        if resolved_only && e.target_table.is_none() {
+            continue;
+        }
+        let tgt = e.target_table.clone().unwrap_or_else(|| "-".into());
+        println!(
+            "{:<40}  {:>4}  {:<28}  {:<40}  {:>5}",
+            e.source_table, e.source_column_id, e.source_column, tgt, e.score
         );
     }
     Ok(())
