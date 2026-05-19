@@ -63,6 +63,14 @@ enum Cmd {
         #[arg(long)]
         strict_attribution: bool,
     },
+    /// Print the columns of a table by joining SYSCOLUMN.owner_object_id
+    /// against SYSTABLE.data_root_page (Phase 6, WP-6A).
+    Schema {
+        /// Input QBW file.
+        input: PathBuf,
+        /// Table name to inspect.
+        table: String,
+    },
 }
 
 fn main() -> Result<()> {
@@ -75,6 +83,7 @@ fn main() -> Result<()> {
             output,
             strict_attribution,
         } => run_verify(input, output, strict_attribution),
+        Cmd::Schema { input, table } => run_schema(input, table),
     }
 }
 
@@ -146,6 +155,33 @@ fn run_catalog(input: PathBuf, user_only: bool) -> Result<()> {
         let root = e.data_root_page.map(|p| p.to_string()).unwrap_or_else(|| "-".into());
         let last = e.last_page.map(|p| p.to_string()).unwrap_or_else(|| "-".into());
         println!("{:>6}  {:>5}  {:>6}  {:>6}  {}", e.table_id, cols, root, last, e.name);
+    }
+    Ok(())
+}
+
+fn run_schema(input: PathBuf, table: String) -> Result<()> {
+    let store = PageStore::open(&input)
+        .with_context(|| format!("opening {:?}", input))?;
+    let model = ApModel::learn(&store);
+    let cols = openqbw::schema_for(&store, &model, &table);
+    if cols.is_empty() {
+        anyhow::bail!(
+            "no schema found for table {:?} (table may be unknown or its SYSTABLE \
+             row lacks a recoverable data_root_page)",
+            table
+        );
+    }
+    println!("table: {}  columns: {}", table, cols.len());
+    println!("{:>5}  {:<32}  {:>6}  {:>5}  {:>5}", "id", "name", "domain", "width", "nulls");
+    for c in &cols {
+        println!(
+            "{:>5}  {:<32}  {:>6}  {:>5}  {:>5}",
+            c.column_id,
+            c.name,
+            c.domain_char as char,
+            c.width,
+            c.nulls_flag
+        );
     }
     Ok(())
 }
