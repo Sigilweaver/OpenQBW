@@ -18,6 +18,7 @@
 #![warn(missing_docs)]
 
 mod attribution_content;
+mod attribution_schema;
 mod bv_recovery;
 mod date;
 mod fkgraph;
@@ -31,6 +32,10 @@ mod transaction_header;
 
 pub use attribution_content::{
     AttributionAgreement, ContentAttribution, RowSignature, SIG_LEN,
+};
+pub use attribution_schema::{
+    SchemaAttribution, ValidationStats, WidthBand, MIN_ROW_BODY_BYTES,
+    VARIABLE_COLUMN_UPPER_ALLOWANCE,
 };
 pub use bv_recovery::{
     deobfuscate_with_bv, oracle_bv_e_page, recover_bv_any, recover_bv_apage,

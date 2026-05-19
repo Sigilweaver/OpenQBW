@@ -86,6 +86,12 @@ enum Cmd {
         /// Input QBW file.
         input: PathBuf,
     },
+    /// Validate position-based page attribution against per-table
+    /// row-width bands derived from SYSCOLUMN (Phase 6, WP-6Z).
+    ValidateAttribution {
+        /// Input QBW file.
+        input: PathBuf,
+    },
 }
 
 fn main() -> Result<()> {
@@ -104,6 +110,7 @@ fn main() -> Result<()> {
             resolved_only,
         } => run_fkgraph(input, resolved_only),
         Cmd::Nulls { input } => run_nulls(input),
+        Cmd::ValidateAttribution { input } => run_validate_attribution(input),
     }
 }
 
@@ -237,6 +244,40 @@ fn run_fkgraph(input: PathBuf, resolved_only: bool) -> Result<()> {
             e.source_table, e.source_column_id, e.source_column, tgt, e.score
         );
     }
+    Ok(())
+}
+
+fn run_validate_attribution(input: PathBuf) -> Result<()> {
+    let store = PageStore::open(&input)
+        .with_context(|| format!("opening {:?}", input))?;
+    let model = ApModel::learn(&store);
+    let position = openqbw::PageAttribution::build(&store, &model);
+    let schema = openqbw::SchemaAttribution::build(&store, &model);
+    println!(
+        "tables with width bands: {}  total pages: {}",
+        schema.len(),
+        store.page_count()
+    );
+    let pairs = (1..store.page_count()).filter_map(|pn| {
+        position
+            .attribute(pn)
+            .map(|e| (pn, e.name.clone()))
+    });
+    let stats = schema.validate_corpus(&store, &model, pairs);
+    let total = stats.total().max(1);
+    println!(
+        "{:>10}  {:>10}  {:>10}  {:>10}  {:>10}",
+        "pass", "fail", "no_band", "unmeasured", "total"
+    );
+    println!(
+        "{:>10}  {:>10}  {:>10}  {:>10}  {:>10}",
+        stats.pass, stats.fail, stats.no_band, stats.unmeasured, stats.total()
+    );
+    println!(
+        "pass rate: {:.1}%  fail rate: {:.1}%",
+        100.0 * stats.pass as f64 / total as f64,
+        100.0 * stats.fail as f64 / total as f64,
+    );
     Ok(())
 }
 
