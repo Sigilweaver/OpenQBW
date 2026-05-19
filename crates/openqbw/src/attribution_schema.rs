@@ -38,6 +38,7 @@ use opensqlany::{ApModel, Page, PageStore, PageType, SlottedPage};
 use crate::bv_recovery::{deobfuscate_with_bv, recover_bv_qb_data};
 use crate::syscolumn::{iter_syscolumns, SysColumn};
 use crate::systable::iter_systable_entries;
+use crate::sysobject::bridge_owners_to_tables;
 
 /// Per-column variable-width allowance (bytes) added to the upper bound
 /// when the column's domain is variable-length (`Y`, `V`, `C`, `A`).
@@ -51,8 +52,8 @@ pub const MIN_ROW_BODY_BYTES: u32 = 4;
 /// A row-width band derived from a table's SYSCOLUMN schema.
 #[derive(Debug, Clone, Copy)]
 pub struct WidthBand {
-    /// SYSTABLE.data_root_page (== SYSCOLUMN.owner_object_id), used as
-    /// the table's stable identifier in this module.
+    /// SYSCOLUMN owner identifier (bridged to the table via the
+    /// `SYSOBJECT` catalog; see [`crate::sysobject`]).
     pub owner_object_id: u32,
     /// Lower bound on plausible row body length.
     pub low: u32,
@@ -99,30 +100,40 @@ impl SchemaAttribution {
     /// Build the width-band index by scanning SYSTABLE + SYSCOLUMN.
     pub fn build(store: &PageStore, model: &ApModel) -> Self {
         let entries = iter_systable_entries(store, model).collect::<Vec<_>>();
+        let columns: Vec<SysColumn> = iter_syscolumns(store, model).collect();
+
+        // Bridge SYSCOLUMN.owner_object_id -> SYSTABLE.name via the
+        // SYSOBJECT catalog (Phase 7, WP-7A). The prior Phase 6
+        // assumption that owner_object_id == data_root_page was wrong;
+        // it matched coincidentally on a small subset.
+        let owner_to_table = bridge_owners_to_tables(store, model, &columns, &entries);
+
+        // Group columns by owner.
         let mut cols_by_owner: BTreeMap<u32, Vec<SysColumn>> = BTreeMap::new();
-        for c in iter_syscolumns(store, model) {
-            cols_by_owner
-                .entry(c.owner_object_id)
-                .or_default()
-                .push(c);
+        for c in columns {
+            cols_by_owner.entry(c.owner_object_id).or_default().push(c);
+        }
+        // Index SYSTABLE entries by name.
+        let mut tables_by_name: BTreeMap<String, &crate::SysTableEntry> = BTreeMap::new();
+        for e in &entries {
+            tables_by_name.entry(e.name.clone()).or_insert(e);
         }
 
         let mut bands = BTreeMap::new();
-        for e in entries {
-            let Some(root) = e.data_root_page else {
+        for (owner, cols) in &cols_by_owner {
+            let Some(table_name) = owner_to_table.get(owner) else {
                 continue;
             };
-            let Some(cols) = cols_by_owner.get(&root) else {
+            let Some(table) = tables_by_name.get(table_name) else {
                 continue;
             };
             if cols.is_empty() {
                 continue;
             }
             // Confidence gate: if SYSTABLE declares N columns but we
-            // parsed fewer than half of them via the SYSCOLUMN bridge,
-            // the band would be degenerate. Skip rather than emit a
-            // band that no real page can satisfy.
-            if let Some(declared) = e.col_count {
+            // parsed fewer than half of them via SYSCOLUMN, skip rather
+            // than emit a degenerate band no real page can satisfy.
+            if let Some(declared) = table.col_count {
                 if declared >= 2 && (cols.len() as u32) * 2 < declared as u32 {
                     continue;
                 }
@@ -135,16 +146,14 @@ impl SchemaAttribution {
                     low = low.saturating_add(w);
                     high = high.saturating_add(w);
                 } else {
-                    // Variable-width: at least one length byte, at most
-                    // declared width + upper allowance.
                     low = low.saturating_add(1);
                     high = high.saturating_add(w.max(VARIABLE_COLUMN_UPPER_ALLOWANCE));
                 }
             }
             bands.insert(
-                e.name.clone(),
+                table_name.clone(),
                 WidthBand {
-                    owner_object_id: root,
+                    owner_object_id: *owner,
                     low,
                     high,
                     column_count: cols.len() as u32,

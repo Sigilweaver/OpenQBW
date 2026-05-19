@@ -27,6 +27,7 @@ mod nullability;
 mod opaque;
 mod page_attribution;
 mod syscolumn;
+mod sysobject;
 mod systable;
 mod transaction_header;
 
@@ -53,6 +54,7 @@ pub use lineitem::{
 pub use nullability::{histogram as nulls_flag_histogram, NullsFlagBucket};
 pub use opaque::{is_opaque_high_entropy, OPAQUE_ENTROPY_THRESHOLD};
 pub use page_attribution::PageAttribution;
+pub use sysobject::{bridge_owners_to_tables, SYSOBJECT_NAME_OFFSET};
 pub use systable::{collect_unique, iter_systable_entries, scan_page as scan_systable_page, SysTableEntry};
 pub use syscolumn::{
     collect_unique as collect_unique_syscolumns, iter_syscolumns, schema_for,

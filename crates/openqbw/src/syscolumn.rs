@@ -8,7 +8,10 @@
 //! [<default_len u8> <default>]?           -- optional, may be absent
 //! 01 52 00 01 00 00 00 00                  -- 8-byte fixed tag
 //! <row_id u32 LE>                          -- per-row id (ignored)
-//! <owner_object_id u32 LE>                 -- joins to SYSTABLE.data_root_page
+//! <owner_object_id u32 LE>                 -- SA17 object_id; bridged
+//!                                          --   to a table name via the
+//!                                          --   SYSOBJECT catalog
+//!                                          --   (see [`crate::sysobject`]).
 //! <column_id u32 LE>                       -- ordinal within the table
 //! <nulls_flag u8> <pad u8>
 //! 01 <domain_char u8> <width u8>
@@ -19,9 +22,11 @@
 //! length-prefixed string. The first match whose declared length byte sits
 //! immediately before a printable identifier wins.
 //!
-//! Owners are bridged to user-visible table names by joining
-//! [`SysColumn::owner_object_id`] against
-//! [`crate::SysTableEntry::data_root_page`].
+//! Owners are bridged to user-visible table names through the
+//! `SYSOBJECT` catalog (Phase 7, WP-7A). The earlier Phase 6 attempt
+//! to join [`SysColumn::owner_object_id`] against
+//! [`crate::SysTableEntry::data_root_page`] was wrong: the two are
+//! independent integer namespaces (see `re/NOTES.md` C.49).
 
 use std::collections::BTreeMap;
 use std::iter::FusedIterator;
@@ -46,7 +51,8 @@ const DEFAULT_PEELS: [usize; 7] = [0, 1, 2, 3, 4, 8, 16];
 pub struct SysColumn {
     /// Column name (ASCII identifier).
     pub name: String,
-    /// SA17 owner id. Joins to [`crate::SysTableEntry::data_root_page`].
+    /// SA17 object_id. Bridged to a table name via the `SYSOBJECT`
+    /// catalog (see [`crate::sysobject`]).
     pub owner_object_id: u32,
     /// Ordinal position of this column inside its owning table.
     pub column_id: u32,
@@ -181,27 +187,25 @@ pub fn collect_unique(store: &PageStore, model: &ApModel) -> Vec<SysColumn> {
 }
 
 /// Return all columns for the table named `table_name`, ordered by
-/// `column_id`. The bridge is via
-/// [`crate::SysTableEntry::data_root_page`] = [`SysColumn::owner_object_id`].
+/// `column_id`. The bridge is via the `SYSOBJECT` catalog
+/// (see [`crate::sysobject::bridge_owners_to_tables`]).
 ///
-/// Returns an empty vector if the table is unknown or has no
-/// recoverable `data_root_page`.
+/// Returns an empty vector if the table cannot be bridged to a
+/// SYSCOLUMN owner.
 pub fn schema_for(
     store: &PageStore,
     model: &ApModel,
     table_name: &str,
 ) -> Vec<SysColumn> {
-    let Some(entry) = crate::collect_unique(store, model)
+    let columns: Vec<SysColumn> = iter_syscolumns(store, model).collect();
+    let tables = crate::iter_systable_entries(store, model).collect::<Vec<_>>();
+    let bridge = crate::sysobject::bridge_owners_to_tables(store, model, &columns, &tables);
+    let Some((&owner, _)) = bridge.iter().find(|(_, n)| n.as_str() == table_name) else {
+        return Vec::new();
+    };
+    let mut cols: Vec<SysColumn> = columns
         .into_iter()
-        .find(|e| e.name == table_name)
-    else {
-        return Vec::new();
-    };
-    let Some(root) = entry.data_root_page else {
-        return Vec::new();
-    };
-    let mut cols: Vec<SysColumn> = iter_syscolumns(store, model)
-        .filter(|c| c.owner_object_id == root)
+        .filter(|c| c.owner_object_id == owner)
         .collect();
     cols.sort_by_key(|c| c.column_id);
     cols.dedup_by(|a, b| a.column_id == b.column_id && a.name == b.name);
