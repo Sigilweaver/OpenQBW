@@ -80,6 +80,12 @@ enum Cmd {
         #[arg(long)]
         resolved_only: bool,
     },
+    /// Print a histogram of SYSCOLUMN.nulls_flag bytes with sample
+    /// columns per value (Phase 6, WP-6D).
+    Nulls {
+        /// Input QBW file.
+        input: PathBuf,
+    },
 }
 
 fn main() -> Result<()> {
@@ -97,6 +103,7 @@ fn main() -> Result<()> {
             input,
             resolved_only,
         } => run_fkgraph(input, resolved_only),
+        Cmd::Nulls { input } => run_nulls(input),
     }
 }
 
@@ -229,6 +236,21 @@ fn run_fkgraph(input: PathBuf, resolved_only: bool) -> Result<()> {
             "{:<40}  {:>4}  {:<28}  {:<40}  {:>5}",
             e.source_table, e.source_column_id, e.source_column, tgt, e.score
         );
+    }
+    Ok(())
+}
+
+fn run_nulls(input: PathBuf) -> Result<()> {
+    let store = PageStore::open(&input)
+        .with_context(|| format!("opening {:?}", input))?;
+    let model = ApModel::learn(&store);
+    let buckets = openqbw::nulls_flag_histogram(&store, &model);
+    let total: usize = buckets.iter().map(|b| b.count).sum();
+    println!("total syscolumn rows: {}  distinct nulls_flag values: {}", total, buckets.len());
+    println!("{:>6}  {:>8}  {}", "byte", "count", "sample_columns");
+    for b in &buckets {
+        let samples = b.sample_columns.join(", ");
+        println!("0x{:02x}    {:>8}  {}", b.flag, b.count, samples);
     }
     Ok(())
 }

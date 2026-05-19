@@ -22,6 +22,7 @@ mod bv_recovery;
 mod date;
 mod fkgraph;
 mod lineitem;
+mod nullability;
 mod opaque;
 mod page_attribution;
 mod syscolumn;
@@ -44,6 +45,7 @@ pub use lineitem::{
     iter_lineitems, iter_lineitems_with_attribution, AmountType, LineItem, LineItemError,
     DATE_EPOCH_DAYS_BEFORE_UNIX,
 };
+pub use nullability::{histogram as nulls_flag_histogram, NullsFlagBucket};
 pub use opaque::{is_opaque_high_entropy, OPAQUE_ENTROPY_THRESHOLD};
 pub use page_attribution::PageAttribution;
 pub use systable::{collect_unique, iter_systable_entries, scan_page as scan_systable_page, SysTableEntry};
