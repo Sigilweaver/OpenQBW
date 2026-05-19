@@ -19,9 +19,7 @@ use opensqlany::{ApModel, PageStore, PageType, Result as SaResult};
 use crate::bv_recovery::{deobfuscate_with_bv, recover_bv_qb_data};
 use crate::page_attribution::PageAttribution;
 
-/// Number of days between the Unix epoch (1970-01-01) and the SA17 epoch (1981-01-01).
-/// SA stores dates as `u32` days since 1981-01-01.
-pub const DATE_EPOCH_DAYS_BEFORE_UNIX: i64 = 4017;
+pub use crate::date::DATE_EPOCH_DAYS_BEFORE_UNIX;
 
 const PAGE_DATA_END: usize = 0xFE0;
 const ANCHOR_LEN: usize = 25;
