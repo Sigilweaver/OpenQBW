@@ -19,6 +19,7 @@
 
 mod bv_recovery;
 mod lineitem;
+mod opaque;
 mod page_attribution;
 mod systable;
 mod transaction_header;
@@ -31,6 +32,7 @@ pub use lineitem::{
     iter_lineitems, iter_lineitems_with_attribution, AmountType, LineItem, LineItemError,
     DATE_EPOCH_DAYS_BEFORE_UNIX,
 };
+pub use opaque::{is_opaque_high_entropy, OPAQUE_ENTROPY_THRESHOLD};
 pub use page_attribution::PageAttribution;
 pub use systable::{collect_unique, iter_systable_entries, scan_page as scan_systable_page, SysTableEntry};
 pub use transaction_header::{iter_transaction_headers, TransactionHeader};

@@ -11,7 +11,10 @@
 //!
 //! Emits a histogram + 5 sample page numbers per class for follow-up.
 
-use openqbw::{deobfuscate_with_bv, oracle_bv_e_page, recover_bv_brute, recover_bv_qb_data};
+use openqbw::{
+    deobfuscate_with_bv, is_opaque_high_entropy, oracle_bv_e_page, recover_bv_brute,
+    recover_bv_qb_data,
+};
 use opensqlany::{ApModel, Page, PageStore, PageType, SlottedPage};
 use std::collections::BTreeMap;
 
@@ -27,6 +30,7 @@ enum Class {
     DecodedEmptyBrute,
     DecodedEmptyModel,
     UniformCipher,
+    OpaqueHighEntropy,
     DecodeFailed,
 }
 
@@ -42,6 +46,7 @@ fn class_label(c: Class) -> String {
         Class::DecodedEmptyBrute => "decoded_empty_brute".into(),
         Class::DecodedEmptyModel => "decoded_empty_model".into(),
         Class::UniformCipher => "uniform_cipher".into(),
+        Class::OpaqueHighEntropy => "opaque_high_entropy".into(),
         Class::DecodeFailed => "decode_failed".into(),
     }
 }
@@ -144,6 +149,14 @@ fn classify(pn: u64, page: &Page<'_>, model: &ApModel, store: &PageStore) -> Cla
         return Class::DecodedEmptyModel;
     }
 
+    // 6. None of the bv recovery tiers produced structured plaintext. If
+    //    the page body is uniformly random it is opaque (likely a
+    //    compressed/encrypted blob page); otherwise treat as a true decode
+    //    failure that warrants further investigation.
+    if is_opaque_high_entropy(raw) {
+        return Class::OpaqueHighEntropy;
+    }
+
     Class::DecodeFailed
 }
 
@@ -175,6 +188,7 @@ fn main() -> anyhow::Result<()> {
     let mut grand_decoded = 0u64;
     let mut grand_provably_empty = 0u64;
     let mut grand_non_e_meta = 0u64;
+    let mut grand_opaque = 0u64;
     let mut grand_failed = 0u64;
     for (cls, pages) in &hist {
         let n = pages.len();
@@ -192,6 +206,7 @@ fn main() -> anyhow::Result<()> {
             | Class::DecodedEmptyModel => grand_decoded += n as u64,
             Class::UniformCipher => grand_provably_empty += n as u64,
             Class::NonEMeta(_) => grand_non_e_meta += n as u64,
+            Class::OpaqueHighEntropy => grand_opaque += n as u64,
             Class::DecodeFailed => grand_failed += n as u64,
         }
     }
@@ -199,8 +214,9 @@ fn main() -> anyhow::Result<()> {
     println!("  decoded_ok        : {} ({:.1}%)", grand_decoded, grand_decoded as f64 / total_f * 100.0);
     println!("  provably_empty    : {} ({:.1}%)", grand_provably_empty, grand_provably_empty as f64 / total_f * 100.0);
     println!("  non_e_meta        : {} ({:.1}%)", grand_non_e_meta, grand_non_e_meta as f64 / total_f * 100.0);
+    println!("  opaque_high_entropy: {} ({:.1}%)", grand_opaque, grand_opaque as f64 / total_f * 100.0);
     println!("  decode_failed     : {} ({:.1}%)", grand_failed, grand_failed as f64 / total_f * 100.0);
-    let classified = grand_decoded + grand_provably_empty + grand_non_e_meta;
+    let classified = grand_decoded + grand_provably_empty + grand_non_e_meta + grand_opaque;
     println!("  Gate 1 coverage   : {}/{} = {:.2}%", classified, total, classified as f64 / total_f * 100.0);
 
     Ok(())
