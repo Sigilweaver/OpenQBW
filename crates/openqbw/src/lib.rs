@@ -23,7 +23,10 @@ mod page_attribution;
 mod systable;
 mod transaction_header;
 
-pub use bv_recovery::{deobfuscate_with_bv, oracle_bv_e_page, recover_bv_qb_data};
+pub use bv_recovery::{
+    deobfuscate_with_bv, oracle_bv_e_page, recover_bv_any, recover_bv_brute,
+    recover_bv_qb_data,
+};
 pub use lineitem::{
     iter_lineitems, iter_lineitems_with_attribution, AmountType, LineItem, LineItemError,
     DATE_EPOCH_DAYS_BEFORE_UNIX,

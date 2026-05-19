@@ -11,7 +11,7 @@
 //!
 //! Emits a histogram + 5 sample page numbers per class for follow-up.
 
-use openqbw::{deobfuscate_with_bv, oracle_bv_e_page, recover_bv_qb_data};
+use openqbw::{deobfuscate_with_bv, oracle_bv_e_page, recover_bv_brute, recover_bv_qb_data};
 use opensqlany::{ApModel, Page, PageStore, PageType, SlottedPage};
 use std::collections::BTreeMap;
 
@@ -20,9 +20,11 @@ enum Class {
     NonEMeta(u8),
     DecodedRowsQb,
     DecodedRowsOracle,
+    DecodedRowsBrute,
     DecodedRowsModel,
     DecodedEmptyQb,
     DecodedEmptyOracle,
+    DecodedEmptyBrute,
     DecodedEmptyModel,
     UniformCipher,
     DecodeFailed,
@@ -33,9 +35,11 @@ fn class_label(c: Class) -> String {
         Class::NonEMeta(t) => format!("non_e_meta:{:#04x}", t),
         Class::DecodedRowsQb => "decoded_rows_qb".into(),
         Class::DecodedRowsOracle => "decoded_rows_oracle".into(),
+        Class::DecodedRowsBrute => "decoded_rows_brute".into(),
         Class::DecodedRowsModel => "decoded_rows_model".into(),
         Class::DecodedEmptyQb => "decoded_empty_qb".into(),
         Class::DecodedEmptyOracle => "decoded_empty_oracle".into(),
+        Class::DecodedEmptyBrute => "decoded_empty_brute".into(),
         Class::DecodedEmptyModel => "decoded_empty_model".into(),
         Class::UniformCipher => "uniform_cipher".into(),
         Class::DecodeFailed => "decode_failed".into(),
@@ -120,7 +124,18 @@ fn classify(pn: u64, page: &Page<'_>, model: &ApModel, store: &PageStore) -> Cla
         return Class::DecodedEmptyOracle;
     }
 
-    // 4. Model fallback.
+    // 4. Brute-force bv search (max zero count).
+    if let Some(bv) = recover_bv_brute(pn, raw) {
+        let plain = deobfuscate_with_bv(raw, pn, bv);
+        if try_parse(pn, &plain) {
+            return Class::DecodedRowsBrute;
+        }
+        if looks_decoded(&plain) {
+            return Class::DecodedEmptyBrute;
+        }
+    }
+
+    // 5. Model fallback.
     let plain = model.deobfuscate_with_store(raw, pn, store);
     if try_parse(pn, &plain) {
         return Class::DecodedRowsModel;
@@ -169,9 +184,11 @@ fn main() -> anyhow::Result<()> {
         match cls {
             Class::DecodedRowsQb
             | Class::DecodedRowsOracle
+            | Class::DecodedRowsBrute
             | Class::DecodedRowsModel
             | Class::DecodedEmptyQb
             | Class::DecodedEmptyOracle
+            | Class::DecodedEmptyBrute
             | Class::DecodedEmptyModel => grand_decoded += n as u64,
             Class::UniformCipher => grand_provably_empty += n as u64,
             Class::NonEMeta(_) => grand_non_e_meta += n as u64,
