@@ -229,6 +229,93 @@ pub fn recover_bv_brute(pn: u64, raw: &[u8]) -> Option<u8> {
     }
 }
 
+/// C.37 plaintext magic shared by every regular A-page (SA17 allocation/
+/// free-space map B-tree). The 8-byte sequence appears at a varying offset
+/// (typically `0xC0..0xF7`) inside the page body and is part of the SA17
+/// page-level metadata block.
+pub const APAGE_MAGIC: [u8; 8] = [0x24, 0x04, 0x31, 0x00, 0xB4, 0x02, 0x19, 0x00];
+
+/// Recover the page bv for an A-page (allocation/free-space map) using the
+/// C.37 magic anchor.
+///
+/// A-pages share the AP fill obfuscation with E-pages but their first
+/// decoded byte is not zero, so [`oracle_bv_e_page`] is wrong and
+/// [`recover_bv_qb_data`] (which searches the C.36 `[rc, 0, 0xD5, 0x0B]`
+/// anchor) can miss when the A-page's metadata block layout puts the
+/// `[0xD5, 0x0B]` byte pair at an unusual offset.
+///
+/// This oracle searches for the 8-byte plaintext magic
+/// `24 04 31 00 b4 02 19 00` (see [`APAGE_MAGIC`]) at any position in the
+/// decoded body. For each candidate bv in `0..=255` the page is decoded
+/// using sector-local steps recovered via the base-independent histogram
+/// peak in [`recover_step`]; if the magic appears the bv is returned.
+///
+/// Returns `None` for pages that do not contain the magic at any bv
+/// (page 3655 of Rock Castle, the residual high-entropy opaque pages,
+/// any non-A-page).
+pub fn recover_bv_apage(pn: u64, raw_page: &[u8]) -> Option<u8> {
+    if raw_page.len() != PAGE {
+        return None;
+    }
+    let p16 = (pn % 16) as u8;
+    let bias = p16 / 2 * 4;
+
+    // Precompute c_table[si][i] = raw[i] - i*step using the step that
+    // maximises the per-sector histogram peak. The peak count is
+    // base-invariant, so the step recovered with `base = 0` is the true
+    // sector step regardless of the (still-unknown) bv.
+    let mut c_table: [Vec<u8>; SECTORS] = Default::default();
+    for si in 0..SECTORS {
+        let off = si * SECTOR;
+        let end = if si == SECTORS - 1 { TRAILER_START } else { off + SECTOR };
+        let sec = &raw_page[off..end];
+        let step = recover_step(sec, 0);
+        let mut c = vec![0u8; sec.len()];
+        for (i, &b) in sec.iter().enumerate() {
+            c[i] = b.wrapping_sub((i as u8).wrapping_mul(step));
+        }
+        c_table[si] = c;
+    }
+
+    let mut plain = [0u8; TRAILER_START];
+    for bv in 0u16..=255 {
+        let bv = bv as u8;
+        let mut cursor = 0usize;
+        for si in 0..SECTORS {
+            let c = &c_table[si];
+            let base = bv
+                .wrapping_add(pn as u8)
+                .wrapping_add(si as u8)
+                .wrapping_sub(bias);
+            for (i, &cb) in c.iter().enumerate() {
+                plain[cursor + i] = cb.wrapping_sub(base);
+            }
+            cursor += c.len();
+        }
+        if contains_subseq(&plain, &APAGE_MAGIC) {
+            return Some(bv);
+        }
+    }
+    None
+}
+
+/// Linear scan for a contiguous byte subsequence.
+fn contains_subseq(hay: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() || hay.len() < needle.len() {
+        return false;
+    }
+    let limit = hay.len() - needle.len();
+    let n0 = needle[0];
+    let mut i = 0;
+    while i <= limit {
+        if hay[i] == n0 && &hay[i..i + needle.len()] == needle {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
 /// Cascade of bv-recovery oracles in order of decreasing confidence.
 ///
 /// 1. `recover_bv_qb_data`  -  C.36 anchor (highest confidence, ~42% of
@@ -390,5 +477,94 @@ mod tests {
         }
         let recovered = recover_bv_any(pn, &raw).expect("some bv");
         assert_eq!(recovered, bv);
+    }
+
+    /// Encode a synthetic A-page: zero-step per sector, magic anchor at
+    /// `magic_offset`, sprinkled non-zero bytes so the page is dense.
+    fn synth_apage(pn: u64, bv: u8, magic_offset: usize) -> [u8; PAGE] {
+        let p16 = (pn % 16) as u8;
+        let bias = p16 / 2 * 4;
+        let mut plain = vec![0u8; PAGE];
+        // Sprinkle non-zero filler resembling repeating B-tree records so
+        // `recover_step` peaks at 0 (zero-step encoding).
+        for i in 0..TRAILER_START {
+            // Pattern dominated by 0x00 with occasional non-zero bytes so
+            // plaintext zero is still the dominant byte and `recover_step`
+            // returns 0.
+            if i % 28 == 0 {
+                plain[i] = 0x60;
+            } else if i % 28 == 1 {
+                plain[i] = 0x80;
+            }
+        }
+        // Plant the C.37 magic.
+        plain[magic_offset..magic_offset + APAGE_MAGIC.len()]
+            .copy_from_slice(&APAGE_MAGIC);
+        // Trailer: A-page rc, type byte 0x41 ('A').
+        plain[TRAILER_START] = 0x05;
+        plain[TRAILER_START + 1] = 0x00;
+        plain[TRAILER_START + 2] = 0x41;
+
+        let mut stored = [0u8; PAGE];
+        stored[TRAILER_START..].copy_from_slice(&plain[TRAILER_START..]);
+        for si in 0..SECTORS {
+            let off = si * SECTOR;
+            let end = if si == SECTORS - 1 { TRAILER_START } else { off + SECTOR };
+            let base = bv
+                .wrapping_add(pn as u8)
+                .wrapping_add(si as u8)
+                .wrapping_sub(bias);
+            for i in off..end {
+                // step = 0 per sector.
+                stored[i] = plain[i].wrapping_add(base);
+            }
+        }
+        stored
+    }
+
+    #[test]
+    fn apage_recovers_known_bv() {
+        let pn = 3599u64;
+        let bv = 66u8;
+        let raw = synth_apage(pn, bv, 0xC4);
+        let recovered = recover_bv_apage(pn, &raw).expect("apage returns Some");
+        assert_eq!(recovered, bv);
+    }
+
+    #[test]
+    fn apage_handles_magic_near_sector_boundary() {
+        // Place the 8-byte magic so it spans the sector 0 / sector 1 boundary
+        // at offset 0x200.
+        let pn = 3620u64;
+        let bv = 244u8;
+        let raw = synth_apage(pn, bv, 0x1FE);
+        let recovered = recover_bv_apage(pn, &raw).expect("apage returns Some");
+        assert_eq!(recovered, bv);
+    }
+
+    #[test]
+    fn apage_returns_none_when_magic_absent() {
+        // Page without the C.37 magic: a random-bytes page.
+        let mut raw = [0u8; PAGE];
+        let mut x = 0xDEADBEEFu32;
+        for b in raw.iter_mut() {
+            x = x.wrapping_mul(0x85ebca6b).wrapping_add(1);
+            *b = (x >> 24) as u8;
+        }
+        assert!(recover_bv_apage(123, &raw).is_none());
+    }
+
+    #[test]
+    fn apage_rejects_wrong_size() {
+        let raw = [0u8; PAGE - 1];
+        assert!(recover_bv_apage(1, &raw).is_none());
+    }
+
+    #[test]
+    fn apage_magic_constant_unchanged() {
+        assert_eq!(
+            APAGE_MAGIC,
+            [0x24, 0x04, 0x31, 0x00, 0xB4, 0x02, 0x19, 0x00]
+        );
     }
 }

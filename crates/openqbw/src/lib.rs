@@ -25,8 +25,8 @@ mod systable;
 mod transaction_header;
 
 pub use bv_recovery::{
-    deobfuscate_with_bv, oracle_bv_e_page, recover_bv_any, recover_bv_brute,
-    recover_bv_qb_data,
+    deobfuscate_with_bv, oracle_bv_e_page, recover_bv_any, recover_bv_apage,
+    recover_bv_brute, recover_bv_qb_data, APAGE_MAGIC,
 };
 pub use lineitem::{
     iter_lineitems, iter_lineitems_with_attribution, AmountType, LineItem, LineItemError,
