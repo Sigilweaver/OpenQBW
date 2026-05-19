@@ -17,6 +17,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+mod attribution_content;
 mod bv_recovery;
 mod lineitem;
 mod opaque;
@@ -24,6 +25,9 @@ mod page_attribution;
 mod systable;
 mod transaction_header;
 
+pub use attribution_content::{
+    AttributionAgreement, ContentAttribution, RowSignature, SIG_LEN,
+};
 pub use bv_recovery::{
     deobfuscate_with_bv, oracle_bv_e_page, recover_bv_any, recover_bv_apage,
     recover_bv_brute, recover_bv_qb_data, APAGE_MAGIC,

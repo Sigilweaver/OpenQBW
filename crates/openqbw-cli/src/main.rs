@@ -14,8 +14,8 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use openqbw::{
-    iter_lineitems_with_attribution, iter_transaction_headers, AmountType, LineItem,
-    PageAttribution, SysTableEntry, TransactionHeader,
+    iter_lineitems_with_attribution, iter_transaction_headers, AmountType, ContentAttribution,
+    LineItem, PageAttribution, SysTableEntry, TransactionHeader,
 };
 use opensqlany::{ApModel, PageStore};
 use rusqlite::{params, Connection, Transaction};
@@ -57,6 +57,11 @@ enum Cmd {
         /// Optional output SQLite path. Defaults to a temp file.
         #[arg(long)]
         output: Option<PathBuf>,
+        /// Also build a content-signature attribution map and report
+        /// per-page agreement against the default position-based
+        /// attribution.
+        #[arg(long)]
+        strict_attribution: bool,
     },
 }
 
@@ -65,7 +70,11 @@ fn main() -> Result<()> {
     match cli.cmd {
         Cmd::Export { input, output } => run_export(input, output).map(|_| ()),
         Cmd::Catalog { input, user_only } => run_catalog(input, user_only),
-        Cmd::Verify { input, output } => run_verify(input, output),
+        Cmd::Verify {
+            input,
+            output,
+            strict_attribution,
+        } => run_verify(input, output, strict_attribution),
     }
 }
 
@@ -141,7 +150,11 @@ fn run_catalog(input: PathBuf, user_only: bool) -> Result<()> {
     Ok(())
 }
 
-fn run_verify(input: PathBuf, output: Option<PathBuf>) -> Result<()> {
+fn run_verify(
+    input: PathBuf,
+    output: Option<PathBuf>,
+    strict_attribution: bool,
+) -> Result<()> {
     let out = match output {
         Some(p) => p,
         None => std::env::temp_dir().join(format!(
@@ -149,7 +162,7 @@ fn run_verify(input: PathBuf, output: Option<PathBuf>) -> Result<()> {
             std::process::id()
         )),
     };
-    let stats = run_export(input, out.clone())?;
+    let stats = run_export(input.clone(), out.clone())?;
     println!();
     println!("=== verification report ===");
 
@@ -298,6 +311,46 @@ fn run_verify(input: PathBuf, output: Option<PathBuf>) -> Result<()> {
     println!(
         "        11,754 occurrences in Rock Castle - see NOTES.md C.48 Track A)."
     );
+
+    if strict_attribution {
+        println!();
+        println!("=== content-signature attribution (--strict-attribution) ===");
+        let store = PageStore::open(&input)
+            .with_context(|| format!("re-opening {:?}", input))?;
+        let model = ApModel::learn(&store);
+        let content = ContentAttribution::build(&store, &model);
+        let position = PageAttribution::build(&store, &model);
+        println!(
+            "  unique signatures: {}  ambiguous: {}  skipped roots: {}",
+            content.len(),
+            content.ambiguous_count(),
+            content.skipped_count(),
+        );
+
+        // Collect the distinct E-page numbers that contributed at least
+        // one line item, so the comparison runs over the pages we
+        // actually attribute in production.
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT page_number FROM transaction_line_items ORDER BY page_number",
+        )?;
+        let pages: Vec<u64> = stmt
+            .query_map([], |r| r.get::<_, i64>(0))?
+            .filter_map(|r| r.ok())
+            .map(|n| n as u64)
+            .collect();
+        let agree = content.compare(&store, &model, &position, pages.iter().copied());
+        let total = agree.total().max(1);
+        println!(
+            "  pages compared: {}  agree: {} ({:.2}%)  disagree: {}  only_position: {}  only_content: {}  neither: {}",
+            agree.total(),
+            agree.agree,
+            (agree.agree as f64) * 100.0 / (total as f64),
+            agree.disagree,
+            agree.only_position,
+            agree.only_content,
+            agree.neither,
+        );
+    }
 
     println!();
     println!("Overall: {}", stats.summary());
