@@ -103,7 +103,7 @@ impl SchemaAttribution {
         let columns: Vec<SysColumn> = iter_syscolumns(store, model).collect();
 
         // Bridge SYSCOLUMN.owner_object_id -> SYSTABLE.name via the
-        // SYSOBJECT catalog (Phase 7, WP-7A). The prior Phase 6
+        // SYSOBJECT catalog (Phase 6, WP-6Z.2). The prior
         // assumption that owner_object_id == data_root_page was wrong;
         // it matched coincidentally on a small subset.
         let owner_to_table = bridge_owners_to_tables(store, model, &columns, &entries);

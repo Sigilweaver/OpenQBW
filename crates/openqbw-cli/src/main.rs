@@ -63,8 +63,9 @@ enum Cmd {
         #[arg(long)]
         strict_attribution: bool,
     },
-    /// Print the columns of a table by joining SYSCOLUMN.owner_object_id
-    /// against SYSTABLE.data_root_page (Phase 6, WP-6A).
+    /// Print the columns of a table. SYSCOLUMN.owner_object_id is
+    /// bridged to SYSTABLE.name via the SYSOBJECT catalog
+    /// (Phase 6, WP-6Z.2).
     Schema {
         /// Input QBW file.
         input: PathBuf,

@@ -23,10 +23,10 @@
 //! immediately before a printable identifier wins.
 //!
 //! Owners are bridged to user-visible table names through the
-//! `SYSOBJECT` catalog (Phase 7, WP-7A). The earlier Phase 6 attempt
+//! `SYSOBJECT` catalog (Phase 6, WP-6Z.2). The earlier WP-6A attempt
 //! to join [`SysColumn::owner_object_id`] against
 //! [`crate::SysTableEntry::data_root_page`] was wrong: the two are
-//! independent integer namespaces (see `re/NOTES.md` C.49).
+//! independent integer namespaces (see `re/NOTES.md` C.52).
 
 use std::collections::BTreeMap;
 use std::iter::FusedIterator;

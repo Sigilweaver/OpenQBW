@@ -1,6 +1,6 @@
-//! `SYSOBJECT` catalog row parser (Phase 7, WP-7A).
+//! `SYSOBJECT` catalog row parser (Phase 6, WP-6Z.2).
 //!
-//! Phase 6 assumed [`crate::SysColumn::owner_object_id`] joined to
+//! Phase 6 (WP-6A, WP-6Z) assumed [`crate::SysColumn::owner_object_id`] joined to
 //! [`crate::SysTableEntry::data_root_page`]. That assumption is wrong:
 //! the two fields are independent integer namespaces and match only
 //! by coincidence on a small subset of tables (18 of 535 owners on
