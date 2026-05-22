@@ -66,6 +66,7 @@ fn find_metadata_offset(plain: &[u8], pn: u64) -> Option<usize> {
 }
 
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
 struct Meta {
     v06_07: u16,
     v12_13: u16,
@@ -89,12 +90,7 @@ fn read_metadata(plain: &[u8], pn: u64) -> Option<Meta> {
     })
 }
 
-fn decode_page(
-    raw: &[u8],
-    pn: u64,
-    model: &ApModel,
-    store: &PageStore,
-) -> (Vec<u8>, &'static str) {
+fn decode_page(raw: &[u8], pn: u64, model: &ApModel, store: &PageStore) -> (Vec<u8>, &'static str) {
     if let Some(bv) = recover_bv_qb_data(pn, raw) {
         (deobfuscate_with_bv(raw, pn, bv), "qb_anchor")
     } else {
@@ -129,7 +125,10 @@ fn main() -> anyhow::Result<()> {
         }
     }
     println!("# SYSTABLE entries: {}", unique.len());
-    println!("# Ground-truth data_root_page E-pages: {}", root_to_table.len());
+    println!(
+        "# Ground-truth data_root_page E-pages: {}",
+        root_to_table.len()
+    );
 
     // Decode every E-page, extract metadata
     let mut e_pages = 0u64;
@@ -169,7 +168,10 @@ fn main() -> anyhow::Result<()> {
     for (&pn, m) in &page_to_meta {
         cluster_v06.entry(m.v06_07).or_default().push(pn);
         cluster_v12.entry(m.v12_13).or_default().push(pn);
-        cluster_both.entry((m.v06_07, m.v12_13)).or_default().push(pn);
+        cluster_both
+            .entry((m.v06_07, m.v12_13))
+            .or_default()
+            .push(pn);
     }
     println!();
     println!("## Cluster cardinality");
@@ -214,8 +216,7 @@ fn main() -> anyhow::Result<()> {
     // Show ALL v12_13 clusters with owners
     println!();
     println!("## All v12_13 clusters");
-    let mut v12_sizes: Vec<(u16, usize)> =
-        cluster_v12.iter().map(|(k, v)| (*k, v.len())).collect();
+    let mut v12_sizes: Vec<(u16, usize)> = cluster_v12.iter().map(|(k, v)| (*k, v.len())).collect();
     v12_sizes.sort_by_key(|&(_, sz)| std::cmp::Reverse(sz));
     for (v, sz) in v12_sizes {
         let pages = &cluster_v12[&v];
@@ -225,8 +226,7 @@ fn main() -> anyhow::Result<()> {
                 owners.insert(*tid, name.as_str());
             }
         }
-        let owners_str: Vec<String> =
-            owners.iter().map(|(t, n)| format!("{}={}", t, n)).collect();
+        let owners_str: Vec<String> = owners.iter().map(|(t, n)| format!("{}={}", t, n)).collect();
         println!(
             "  v12_13={:#06x}  pages={:>5}  roots_owned: {:?}",
             v, sz, owners_str
@@ -277,7 +277,13 @@ fn main() -> anyhow::Result<()> {
             let hex: Vec<String> = chunk.iter().map(|b| format!("{:02x}", b)).collect();
             let ascii: String = chunk
                 .iter()
-                .map(|&b| if (0x20..0x7f).contains(&b) { b as char } else { '.' })
+                .map(|&b| {
+                    if (0x20..0x7f).contains(&b) {
+                        b as char
+                    } else {
+                        '.'
+                    }
+                })
                 .collect();
             println!("    {:04x}: {:<47}  {}", chunk_off, hex.join(" "), ascii);
         }

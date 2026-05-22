@@ -101,9 +101,7 @@ pub fn bridge_owners_to_tables(
         let mut i = SYSOBJECT_NAME_OFFSET;
         while i + 1 < plain.len() {
             let nlen = plain[i] as usize;
-            if (NAME_LEN_MIN..=NAME_LEN_MAX).contains(&nlen)
-                && i + 1 + nlen <= plain.len()
-            {
+            if (NAME_LEN_MIN..=NAME_LEN_MAX).contains(&nlen) && i + 1 + nlen <= plain.len() {
                 let s = &plain[i + 1..i + 1 + nlen];
                 if looks_like_identifier(s)
                     && let Ok(name) = std::str::from_utf8(s)

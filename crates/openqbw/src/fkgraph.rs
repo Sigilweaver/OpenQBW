@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 
 use opensqlany::{ApModel, PageStore};
 
-use crate::{iter_syscolumns, SysColumn, SysTableEntry};
+use crate::{SysColumn, SysTableEntry, iter_syscolumns};
 
 /// One inferred foreign-key edge.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -179,7 +179,10 @@ mod tests {
 
     #[test]
     fn exact_match_beats_substring() {
-        assert!(match_score("invoice", "abmc_invoice") > match_score("invoice", "abmc_invoice_lineitem"));
+        assert!(
+            match_score("invoice", "abmc_invoice")
+                > match_score("invoice", "abmc_invoice_lineitem")
+        );
     }
 
     #[test]

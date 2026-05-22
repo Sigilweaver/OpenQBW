@@ -7,10 +7,10 @@
 //! date/counter pair.
 //!
 //! See `OpenQBW/re/NOTES.md §C.40` for the typed-amount byte semantics:
-//!   * `0x01`, `0x02` — `[type][u24 LE cents]`
-//!   * `0x03`         — deferred (raw bytes recorded but not converted)
-//!   * `0x00`         — non-amount marker (record skipped or carries
-//!                       date/counter only)
+//!   - `0x01`, `0x02` -- `[type][u24 LE cents]`
+//!   - `0x03`         -- deferred (raw bytes recorded but not converted)
+//!   - `0x00`         -- non-amount marker (record skipped or carries
+//!     date/counter only)
 
 use std::iter::FusedIterator;
 
@@ -69,8 +69,7 @@ impl AmountType {
     pub fn decode_cents(self, raw: &[u8; 4]) -> Option<u32> {
         match self {
             Self::Standard | Self::OneByteOne => {
-                let cents =
-                    (raw[1] as u32) | ((raw[2] as u32) << 8) | ((raw[3] as u32) << 16);
+                let cents = (raw[1] as u32) | ((raw[2] as u32) << 8) | ((raw[3] as u32) << 16);
                 Some(cents)
             }
             _ => None,
@@ -86,9 +85,8 @@ impl AmountType {
     pub fn decode_cents_signed(self, raw: &[u8; 4]) -> Option<i32> {
         match self {
             Self::Standard | Self::OneByteOne => {
-                let mag = ((raw[1] & 0x7F) as i32)
-                    | ((raw[2] as i32) << 8)
-                    | ((raw[3] as i32) << 16);
+                let mag =
+                    ((raw[1] & 0x7F) as i32) | ((raw[2] as i32) << 8) | ((raw[3] as i32) << 16);
                 let sign = if raw[1] & 0x80 != 0 { -1 } else { 1 };
                 Some(sign * mag)
             }
@@ -276,10 +274,9 @@ fn scan_page(body: &[u8], pn: u64, out: &mut Vec<LineItem>) {
 
 fn parse_anchor(body: &[u8], pn: u64, anchor_start: usize) -> LineItem {
     let id_start = anchor_start + 5;
-    let invoice_id =
-        std::str::from_utf8(&body[id_start..id_start + QB_ID_LEN])
-            .expect("anchor guarded by is_base62")
-            .to_owned();
+    let invoice_id = std::str::from_utf8(&body[id_start..id_start + QB_ID_LEN])
+        .expect("anchor guarded by is_base62")
+        .to_owned();
 
     let payload_start = anchor_start + ANCHOR_LEN;
     let mut amount_raw = [0u8; 4];
@@ -297,12 +294,7 @@ fn parse_anchor(body: &[u8], pn: u64, anchor_start: usize) -> LineItem {
     let end = (payload_start + 64).min(body.len().saturating_sub(8));
     for off in (payload_start + 4)..end {
         let d = u32::from_le_bytes([body[off], body[off + 1], body[off + 2], body[off + 3]]);
-        let c = u32::from_le_bytes([
-            body[off + 4],
-            body[off + 5],
-            body[off + 6],
-            body[off + 7],
-        ]);
+        let c = u32::from_le_bytes([body[off + 4], body[off + 5], body[off + 6], body[off + 7]]);
         if (13_000..20_000).contains(&d) && c > 0 && c < 1_000_000 {
             txn_date_raw = Some(d);
             counter = Some(c);
@@ -319,9 +311,7 @@ fn parse_anchor(body: &[u8], pn: u64, anchor_start: usize) -> LineItem {
         if id_off + QB_ID_LEN <= back_slice.len() {
             let id_bytes = &back_slice[id_off..id_off + QB_ID_LEN];
             if is_base62(id_bytes) {
-                item_qb_id = Some(
-                    std::str::from_utf8(id_bytes).unwrap().to_owned(),
-                );
+                item_qb_id = Some(std::str::from_utf8(id_bytes).unwrap().to_owned());
             }
         }
     }
@@ -435,11 +425,9 @@ mod tests {
         // 5-byte parent prefix
         body[anchor_offset..anchor_offset + 5].copy_from_slice(&PARENT_PREFIX);
         // QB-ID
-        body[anchor_offset + 5..anchor_offset + 5 + QB_ID_LEN]
-            .copy_from_slice(b"0000000000001QBm");
+        body[anchor_offset + 5..anchor_offset + 5 + QB_ID_LEN].copy_from_slice(b"0000000000001QBm");
         // float32(1.0)
-        body[anchor_offset + 5 + QB_ID_LEN..anchor_offset + ANCHOR_LEN]
-            .copy_from_slice(&F32_ONE);
+        body[anchor_offset + 5 + QB_ID_LEN..anchor_offset + ANCHOR_LEN].copy_from_slice(&F32_ONE);
         // amount bytes: type 0x02, cents 0x040F40 = 265536
         body[anchor_offset + ANCHOR_LEN..anchor_offset + ANCHOR_LEN + 4]
             .copy_from_slice(&[0x02, 0x40, 0x0F, 0x04]);

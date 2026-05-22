@@ -7,6 +7,7 @@
 //! subtracting it from C and looking for the anchor.
 //!
 //! See `OpenQBW/re/NOTES.md §C.36` for the empirical derivation.
+#![allow(clippy::needless_range_loop)] // parallel-indexed C/hist/step tables
 
 const PAGE: usize = 4096;
 const SECTOR: usize = 512;
@@ -51,15 +52,17 @@ pub fn recover_bv_qb_data(pn: u64, raw_page: &[u8]) -> Option<u8> {
     let bias = p16 / 2 * 4;
 
     // Oracle bv assumes plain[0] == 0x00 (typical for SA17 page headers).
-    let oracle_bv = raw_page[0]
-        .wrapping_sub(pn as u8)
-        .wrapping_add(bias);
+    let oracle_bv = raw_page[0].wrapping_sub(pn as u8).wrapping_add(bias);
 
     // Precompute C[si][i] using oracle-derived step per sector.
     let mut c_table: [Vec<u8>; SECTORS] = Default::default();
     for si in 0..SECTORS {
         let off = si * SECTOR;
-        let end = if si == SECTORS - 1 { TRAILER_START } else { off + SECTOR };
+        let end = if si == SECTORS - 1 {
+            TRAILER_START
+        } else {
+            off + SECTOR
+        };
         let sec = &raw_page[off..end];
 
         let oracle_base = oracle_bv
@@ -120,11 +123,7 @@ fn anchor_present_with_bv(c_table: &[Vec<u8>; SECTORS], bv: u8, rc: u8) -> bool 
     let limit = plain.len() - 4;
     let mut i = 0;
     while i <= limit {
-        if plain[i] == rc
-            && plain[i + 1] == 0
-            && plain[i + 2] == D5
-            && plain[i + 3] == ZB
-        {
+        if plain[i] == rc && plain[i + 1] == 0 && plain[i + 2] == D5 && plain[i + 3] == ZB {
             return true;
         }
         i += 1;
@@ -267,7 +266,11 @@ pub fn recover_bv_apage(pn: u64, raw_page: &[u8]) -> Option<u8> {
     let mut c_table: [Vec<u8>; SECTORS] = Default::default();
     for si in 0..SECTORS {
         let off = si * SECTOR;
-        let end = if si == SECTORS - 1 { TRAILER_START } else { off + SECTOR };
+        let end = if si == SECTORS - 1 {
+            TRAILER_START
+        } else {
+            off + SECTOR
+        };
         let sec = &raw_page[off..end];
         let step = recover_step(sec, 0);
         let mut c = vec![0u8; sec.len()];
@@ -340,10 +343,7 @@ pub fn recover_bv_any(pn: u64, raw: &[u8]) -> Option<u8> {
     // the decoded plaintext.
     let obv = oracle_bv_e_page(pn, raw);
     let plain = deobfuscate_with_bv(raw, pn, obv);
-    let zeros = plain[..TRAILER_START]
-        .iter()
-        .filter(|&&b| b == 0)
-        .count();
+    let zeros = plain[..TRAILER_START].iter().filter(|&&b| b == 0).count();
     if zeros * 100 / TRAILER_START >= 5 {
         return Some(obv);
     }
@@ -363,7 +363,11 @@ pub fn deobfuscate_with_bv(raw: &[u8], pn: u64, bv: u8) -> Vec<u8> {
 
     for si in 0..SECTORS {
         let off = si * SECTOR;
-        let end = if si == SECTORS - 1 { TRAILER_START } else { off + SECTOR };
+        let end = if si == SECTORS - 1 {
+            TRAILER_START
+        } else {
+            off + SECTOR
+        };
         let sec = &raw[off..end];
         let base = bv
             .wrapping_add(pn as u8)
@@ -405,7 +409,11 @@ mod tests {
         stored[TRAILER_START..].copy_from_slice(&plain[TRAILER_START..]);
         for si in 0..SECTORS {
             let off = si * SECTOR;
-            let end = if si == SECTORS - 1 { TRAILER_START } else { off + SECTOR };
+            let end = if si == SECTORS - 1 {
+                TRAILER_START
+            } else {
+                off + SECTOR
+            };
             let step = step_per_sec[si];
             let base = bv
                 .wrapping_add(pn as u8)
@@ -466,7 +474,11 @@ mod tests {
         raw[TRAILER_START..].copy_from_slice(&plain[TRAILER_START..]);
         for si in 0..SECTORS {
             let off = si * SECTOR;
-            let end = if si == SECTORS - 1 { TRAILER_START } else { off + SECTOR };
+            let end = if si == SECTORS - 1 {
+                TRAILER_START
+            } else {
+                off + SECTOR
+            };
             let base = bv
                 .wrapping_add(pn as u8)
                 .wrapping_add(si as u8)
@@ -498,8 +510,7 @@ mod tests {
             }
         }
         // Plant the C.37 magic.
-        plain[magic_offset..magic_offset + APAGE_MAGIC.len()]
-            .copy_from_slice(&APAGE_MAGIC);
+        plain[magic_offset..magic_offset + APAGE_MAGIC.len()].copy_from_slice(&APAGE_MAGIC);
         // Trailer: A-page rc, type byte 0x41 ('A').
         plain[TRAILER_START] = 0x05;
         plain[TRAILER_START + 1] = 0x00;
@@ -509,7 +520,11 @@ mod tests {
         stored[TRAILER_START..].copy_from_slice(&plain[TRAILER_START..]);
         for si in 0..SECTORS {
             let off = si * SECTOR;
-            let end = if si == SECTORS - 1 { TRAILER_START } else { off + SECTOR };
+            let end = if si == SECTORS - 1 {
+                TRAILER_START
+            } else {
+                off + SECTOR
+            };
             let base = bv
                 .wrapping_add(pn as u8)
                 .wrapping_add(si as u8)

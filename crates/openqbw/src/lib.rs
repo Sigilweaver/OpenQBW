@@ -27,37 +27,42 @@ mod nullability;
 mod opaque;
 mod page_attribution;
 mod syscolumn;
+mod sysindex;
 mod sysobject;
 mod systable;
 mod transaction_header;
 
-pub use attribution_content::{
-    AttributionAgreement, ContentAttribution, RowSignature, SIG_LEN,
-};
+pub use attribution_content::{AttributionAgreement, ContentAttribution, RowSignature, SIG_LEN};
 pub use attribution_schema::{
-    SchemaAttribution, ValidationStats, WidthBand, MIN_ROW_BODY_BYTES,
-    VARIABLE_COLUMN_UPPER_ALLOWANCE,
+    MIN_ROW_BODY_BYTES, SchemaAttribution, VARIABLE_COLUMN_UPPER_ALLOWANCE, ValidationStats,
+    WidthBand,
 };
 pub use bv_recovery::{
-    deobfuscate_with_bv, oracle_bv_e_page, recover_bv_any, recover_bv_apage,
-    recover_bv_brute, recover_bv_qb_data, APAGE_MAGIC,
+    APAGE_MAGIC, deobfuscate_with_bv, oracle_bv_e_page, recover_bv_any, recover_bv_apage,
+    recover_bv_brute, recover_bv_qb_data,
 };
 pub use date::{
-    sa_day_to_unix_day, sa_day_to_unix_seconds, unix_day_to_sa_day, SA_DAY_MAX_PLAUSIBLE,
-    SA_DAY_MIN_PLAUSIBLE,
+    SA_DAY_MAX_PLAUSIBLE, SA_DAY_MIN_PLAUSIBLE, sa_day_to_unix_day, sa_day_to_unix_seconds,
+    unix_day_to_sa_day,
 };
-pub use fkgraph::{build as build_fk_graph, stats as fk_graph_stats, FkEdge, FkGraphStats};
+pub use fkgraph::{FkEdge, FkGraphStats, build as build_fk_graph, stats as fk_graph_stats};
 pub use lineitem::{
-    iter_lineitems, iter_lineitems_with_attribution, AmountType, LineItem, LineItemError,
-    DATE_EPOCH_DAYS_BEFORE_UNIX,
+    AmountType, DATE_EPOCH_DAYS_BEFORE_UNIX, LineItem, LineItemError, iter_lineitems,
+    iter_lineitems_with_attribution,
 };
-pub use nullability::{histogram as nulls_flag_histogram, NullsFlagBucket};
-pub use opaque::{is_opaque_high_entropy, OPAQUE_ENTROPY_THRESHOLD};
+pub use nullability::{NullsFlagBucket, histogram as nulls_flag_histogram};
+pub use opaque::{OPAQUE_ENTROPY_THRESHOLD, is_opaque_high_entropy};
 pub use page_attribution::PageAttribution;
-pub use sysobject::{bridge_owners_to_tables, SYSOBJECT_NAME_OFFSET};
-pub use systable::{collect_unique, iter_systable_entries, scan_page as scan_systable_page, SysTableEntry};
 pub use syscolumn::{
-    collect_unique as collect_unique_syscolumns, iter_syscolumns, schema_for,
-    scan_page as scan_syscolumn_page, SysColumn, SYSCOLUMN_TAG,
+    SYSCOLUMN_TAG, SysColumn, collect_unique as collect_unique_syscolumns, iter_syscolumns,
+    scan_page as scan_syscolumn_page, schema_for,
 };
-pub use transaction_header::{iter_transaction_headers, TransactionHeader};
+pub use sysindex::{
+    AuditOutcome, CrossValidation, DISAGREE_SAMPLE_LIMIT, SYSINDEX_CREATOR, SysIndexEntry,
+    collect_unique as collect_unique_sysindex, iter_sysindex, scan_page as scan_sysindex_page,
+};
+pub use sysobject::{SYSOBJECT_NAME_OFFSET, bridge_owners_to_tables};
+pub use systable::{
+    SysTableEntry, collect_unique, iter_systable_entries, scan_page as scan_systable_page,
+};
+pub use transaction_header::{TransactionHeader, iter_transaction_headers};

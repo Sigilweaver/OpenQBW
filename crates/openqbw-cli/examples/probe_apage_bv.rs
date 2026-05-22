@@ -42,10 +42,7 @@ fn main() {
             (Some(_), Some(_)) => {
                 both_disagree += 1;
                 if both_disagree <= 6 {
-                    println!(
-                        "pn={pn:6}: apage={:?} qb={:?} (disagree)",
-                        bv_a, bv_q
-                    );
+                    println!("pn={pn:6}: apage={:?} qb={:?} (disagree)", bv_a, bv_q);
                 }
             }
             (Some(_), None) => {
@@ -76,8 +73,7 @@ fn main() {
     println!("neither         : {neither}");
     let recovered = both_agree + both_disagree + only_apage + only_qb;
     if total_a > 0 {
-        let pct_apage =
-            (both_agree + both_disagree + only_apage) as f64 * 100.0 / total_a as f64;
+        let pct_apage = (both_agree + both_disagree + only_apage) as f64 * 100.0 / total_a as f64;
         let pct_qb = (both_agree + both_disagree + only_qb) as f64 * 100.0 / total_a as f64;
         let pct_any = recovered as f64 * 100.0 / total_a as f64;
         println!("apage coverage  : {pct_apage:6.2}%");

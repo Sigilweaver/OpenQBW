@@ -10,10 +10,7 @@
 //! Output is per-table: file -> (root_pn, root_type, header_bytes_hex_16,
 //! v06_07, v12_13, row_count_field).
 
-use openqbw::{
-    deobfuscate_with_bv, iter_systable_entries, recover_bv_qb_data,
-    SysTableEntry,
-};
+use openqbw::{SysTableEntry, deobfuscate_with_bv, iter_systable_entries, recover_bv_qb_data};
 use opensqlany::{ApModel, PageStore, PageType};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -139,7 +136,10 @@ fn main() -> anyhow::Result<()> {
 
     println!("\n## File summary");
     for (l, t, w) in &file_stats {
-        println!("  {:<55} user_tables_with_e_root={:>4} meta_found={:>4}", l, t, w);
+        println!(
+            "  {:<55} user_tables_with_e_root={:>4} meta_found={:>4}",
+            l, t, w
+        );
     }
 
     // Tables present in ALL files.
@@ -150,7 +150,11 @@ fn main() -> anyhow::Result<()> {
         .filter(|(_, r)| r.per_file.len() == n_files)
         .map(|(n, _)| n)
         .collect();
-    println!("\n## Common tables (in all {} files): {}", n_files, common.len());
+    println!(
+        "\n## Common tables (in all {} files): {}",
+        n_files,
+        common.len()
+    );
 
     // Field stability analysis: for each common table, check whether
     // v06_07, v12_13, v14, row_count, header16 are stable across files.
@@ -172,20 +176,51 @@ fn main() -> anyhow::Result<()> {
         let v12: Vec<u16> = profs.iter().map(|p| p.v12_13).collect();
         let v14: Vec<u8> = profs.iter().map(|p| p.v14).collect();
         let h16: Vec<[u8; 16]> = profs.iter().map(|p| p.header16).collect();
-        let h4: Vec<[u8; 4]> = profs.iter().map(|p| [p.header16[0], p.header16[1], p.header16[2], p.header16[3]]).collect();
-        if v06.iter().all(|&v| v == v06[0]) { stable_v06_07 += 1; }
-        if v12.iter().all(|&v| v == v12[0]) { stable_v12_13 += 1; }
-        if v14.iter().all(|&v| v == v14[0]) { stable_v14 += 1; }
-        if h16.iter().all(|h| h == &h16[0]) { stable_header16 += 1; }
-        if h4.iter().all(|h| h == &h4[0]) { stable_header4 += 1; }
+        let h4: Vec<[u8; 4]> = profs
+            .iter()
+            .map(|p| [p.header16[0], p.header16[1], p.header16[2], p.header16[3]])
+            .collect();
+        if v06.iter().all(|&v| v == v06[0]) {
+            stable_v06_07 += 1;
+        }
+        if v12.iter().all(|&v| v == v12[0]) {
+            stable_v12_13 += 1;
+        }
+        if v14.iter().all(|&v| v == v14[0]) {
+            stable_v14 += 1;
+        }
+        if h16.iter().all(|h| h == &h16[0]) {
+            stable_header16 += 1;
+        }
+        if h4.iter().all(|h| h == &h4[0]) {
+            stable_header4 += 1;
+        }
     }
 
-    println!("\n## Cross-file stability ({} common tables with metadata in all files)", tables_meta_all);
-    println!("  v06_07 stable per-table:   {}/{}", stable_v06_07, tables_meta_all);
-    println!("  v12_13 stable per-table:   {}/{}", stable_v12_13, tables_meta_all);
-    println!("  v14    stable per-table:   {}/{}", stable_v14,    tables_meta_all);
-    println!("  header[0..4] stable:       {}/{}", stable_header4, tables_meta_all);
-    println!("  header[0..16] stable:      {}/{}", stable_header16, tables_meta_all);
+    println!(
+        "\n## Cross-file stability ({} common tables with metadata in all files)",
+        tables_meta_all
+    );
+    println!(
+        "  v06_07 stable per-table:   {}/{}",
+        stable_v06_07, tables_meta_all
+    );
+    println!(
+        "  v12_13 stable per-table:   {}/{}",
+        stable_v12_13, tables_meta_all
+    );
+    println!(
+        "  v14    stable per-table:   {}/{}",
+        stable_v14, tables_meta_all
+    );
+    println!(
+        "  header[0..4] stable:       {}/{}",
+        stable_header4, tables_meta_all
+    );
+    println!(
+        "  header[0..16] stable:      {}/{}",
+        stable_header16, tables_meta_all
+    );
 
     // Detail dump: per-table v06_07/v12_13 across files for the first 12
     // common tables that have meta in all files (sanity check).
@@ -193,11 +228,26 @@ fn main() -> anyhow::Result<()> {
     let mut shown = 0;
     for name in &common {
         let row = &data[*name];
-        if !row.per_file.values().all(|p| p.found) { continue; }
-        if shown >= 12 { break; }
-        let v06s: Vec<String> = labels.iter().map(|l| format!("{:04x}", row.per_file[l].v06_07)).collect();
-        let v12s: Vec<String> = labels.iter().map(|l| format!("{:04x}", row.per_file[l].v12_13)).collect();
-        println!("  {:<44} v06=[{}]  v12=[{}]", name, v06s.join(" "), v12s.join(" "));
+        if !row.per_file.values().all(|p| p.found) {
+            continue;
+        }
+        if shown >= 12 {
+            break;
+        }
+        let v06s: Vec<String> = labels
+            .iter()
+            .map(|l| format!("{:04x}", row.per_file[l].v06_07))
+            .collect();
+        let v12s: Vec<String> = labels
+            .iter()
+            .map(|l| format!("{:04x}", row.per_file[l].v12_13))
+            .collect();
+        println!(
+            "  {:<44} v06=[{}]  v12=[{}]",
+            name,
+            v06s.join(" "),
+            v12s.join(" ")
+        );
         shown += 1;
     }
 
@@ -216,10 +266,14 @@ fn main() -> anyhow::Result<()> {
             }
             bytes
         };
-        if first.is_empty() { continue; }
+        if first.is_empty() {
+            continue;
+        }
         let v0 = first[0];
         for b in &first {
-            if *b != v0 { continue 'pos; }
+            if *b != v0 {
+                continue 'pos;
+            }
         }
         universal_positions.push((pos, v0));
     }

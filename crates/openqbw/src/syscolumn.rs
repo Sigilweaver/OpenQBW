@@ -87,10 +87,7 @@ fn find_name_before(body: &[u8], tag_pos: usize) -> Option<String> {
                 continue;
             }
             let s = &body[len_off + 1..len_off + 1 + name_len];
-            if !s
-                .iter()
-                .all(|&b| b.is_ascii_alphanumeric() || b == b'_')
-            {
+            if !s.iter().all(|&b| b.is_ascii_alphanumeric() || b == b'_') {
                 continue;
             }
             if !(s[0].is_ascii_alphabetic() || s[0] == b'_') {
@@ -110,7 +107,7 @@ fn parse_rows_in_body(body: &[u8], pn: u64, out: &mut Vec<SysColumn>) {
     }
     let mut i = 0usize;
     while i + SYSCOLUMN_TAG.len() + 17 <= n {
-        if &body[i..i + SYSCOLUMN_TAG.len()] != &SYSCOLUMN_TAG {
+        if body[i..i + SYSCOLUMN_TAG.len()] != SYSCOLUMN_TAG {
             i += 1;
             continue;
         }
@@ -123,12 +120,7 @@ fn parse_rows_in_body(body: &[u8], pn: u64, out: &mut Vec<SysColumn>) {
             break;
         }
         let owner = u32::from_le_bytes([body[p], body[p + 1], body[p + 2], body[p + 3]]);
-        let col_id = u32::from_le_bytes([
-            body[p + 4],
-            body[p + 5],
-            body[p + 6],
-            body[p + 7],
-        ]);
+        let col_id = u32::from_le_bytes([body[p + 4], body[p + 5], body[p + 6], body[p + 7]]);
         let nulls_flag = body[p + 8];
         if body[p + 10] != 0x01 {
             i += SYSCOLUMN_TAG.len();
@@ -192,11 +184,7 @@ pub fn collect_unique(store: &PageStore, model: &ApModel) -> Vec<SysColumn> {
 ///
 /// Returns an empty vector if the table cannot be bridged to a
 /// SYSCOLUMN owner.
-pub fn schema_for(
-    store: &PageStore,
-    model: &ApModel,
-    table_name: &str,
-) -> Vec<SysColumn> {
+pub fn schema_for(store: &PageStore, model: &ApModel, table_name: &str) -> Vec<SysColumn> {
     let columns: Vec<SysColumn> = iter_syscolumns(store, model).collect();
     let tables = crate::iter_systable_entries(store, model).collect::<Vec<_>>();
     let bridge = crate::sysobject::bridge_owners_to_tables(store, model, &columns, &tables);
@@ -286,6 +274,7 @@ mod tests {
     /// Build a synthetic SYSCOLUMN row body:
     ///   <name_len><name>[<def_len><def>]<tag><row_id><owner><col_id>
     ///   <nulls><pad>01<domain><width>
+    #[allow(clippy::too_many_arguments)]
     fn synth_row(
         name: &str,
         default: Option<&str>,

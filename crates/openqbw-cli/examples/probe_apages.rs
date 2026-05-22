@@ -24,10 +24,7 @@
 //!      references, and reports how cleanly the collected set matches the
 //!      ground-truth "E-pages between data_root and last_page" envelope.
 
-use openqbw::{
-    deobfuscate_with_bv, iter_systable_entries, recover_bv_qb_data,
-    SysTableEntry,
-};
+use openqbw::{SysTableEntry, deobfuscate_with_bv, iter_systable_entries, recover_bv_qb_data};
 use opensqlany::{ApModel, PageStore, PageType};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -207,9 +204,11 @@ fn main() -> anyhow::Result<()> {
     for (_, _, s) in a_meta.values() {
         *seq_hist.entry(*s).or_default() += 1;
     }
-    println!("# distinct seq bytes: {} sample: {:?}",
-             seq_hist.len(),
-             seq_hist.iter().take(10).collect::<Vec<_>>());
+    println!(
+        "# distinct seq bytes: {} sample: {:?}",
+        seq_hist.len(),
+        seq_hist.iter().take(10).collect::<Vec<_>>()
+    );
 
     // Build reverse chain: predecessor map. For each A-page B whose meta says
     // next_pn = C, record predecessor[C] = B. Chain heads are A-pages with no
@@ -299,10 +298,7 @@ fn main() -> anyhow::Result<()> {
         let mut best_stride = 0usize;
         let mut best_offset = 0usize;
         let last = e.last_page.unwrap_or(root).max(root);
-        let envelope: BTreeSet<u32> = e_pages
-            .range(root..=last)
-            .copied()
-            .collect();
+        let envelope: BTreeSet<u32> = e_pages.range(root..=last).copied().collect();
         for (si, &stride) in strides.iter().enumerate() {
             // Try offsets 0..stride
             for offset in 0..stride.min(8) {
@@ -344,7 +340,10 @@ fn main() -> anyhow::Result<()> {
         );
     }
 
-    println!("\n# SYSTABLE entries with A-page data_root: {}", a_root_count);
+    println!(
+        "\n# SYSTABLE entries with A-page data_root: {}",
+        a_root_count
+    );
 
     Ok(())
 }

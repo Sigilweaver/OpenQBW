@@ -161,7 +161,9 @@ fn classify(pn: u64, page: &Page<'_>, model: &ApModel, store: &PageStore) -> Cla
 }
 
 fn main() -> anyhow::Result<()> {
-    let path = std::env::args().nth(1).expect("usage: probe_decode_coverage <file.qbw>");
+    let path = std::env::args()
+        .nth(1)
+        .expect("usage: probe_decode_coverage <file.qbw>");
     let store = PageStore::open(&path)?;
     let model = ApModel::learn(&store);
     let total = store.page_count();
@@ -194,7 +196,13 @@ fn main() -> anyhow::Result<()> {
         let n = pages.len();
         let sample: Vec<u64> = pages.iter().take(5).copied().collect();
         let pct = (n as f64) / total_f * 100.0;
-        println!("  {:<26}  {:>6} pages  ({:5.1}%)  sample={:?}", class_label(*cls), n, pct, sample);
+        println!(
+            "  {:<26}  {:>6} pages  ({:5.1}%)  sample={:?}",
+            class_label(*cls),
+            n,
+            pct,
+            sample
+        );
         match cls {
             Class::DecodedRowsQb
             | Class::DecodedRowsOracle
@@ -211,13 +219,38 @@ fn main() -> anyhow::Result<()> {
         }
     }
     println!("  ---");
-    println!("  decoded_ok        : {} ({:.1}%)", grand_decoded, grand_decoded as f64 / total_f * 100.0);
-    println!("  provably_empty    : {} ({:.1}%)", grand_provably_empty, grand_provably_empty as f64 / total_f * 100.0);
-    println!("  non_e_meta        : {} ({:.1}%)", grand_non_e_meta, grand_non_e_meta as f64 / total_f * 100.0);
-    println!("  opaque_high_entropy: {} ({:.1}%)", grand_opaque, grand_opaque as f64 / total_f * 100.0);
-    println!("  decode_failed     : {} ({:.1}%)", grand_failed, grand_failed as f64 / total_f * 100.0);
+    println!(
+        "  decoded_ok        : {} ({:.1}%)",
+        grand_decoded,
+        grand_decoded as f64 / total_f * 100.0
+    );
+    println!(
+        "  provably_empty    : {} ({:.1}%)",
+        grand_provably_empty,
+        grand_provably_empty as f64 / total_f * 100.0
+    );
+    println!(
+        "  non_e_meta        : {} ({:.1}%)",
+        grand_non_e_meta,
+        grand_non_e_meta as f64 / total_f * 100.0
+    );
+    println!(
+        "  opaque_high_entropy: {} ({:.1}%)",
+        grand_opaque,
+        grand_opaque as f64 / total_f * 100.0
+    );
+    println!(
+        "  decode_failed     : {} ({:.1}%)",
+        grand_failed,
+        grand_failed as f64 / total_f * 100.0
+    );
     let classified = grand_decoded + grand_provably_empty + grand_non_e_meta + grand_opaque;
-    println!("  Gate 1 coverage   : {}/{} = {:.2}%", classified, total, classified as f64 / total_f * 100.0);
+    println!(
+        "  Gate 1 coverage   : {}/{} = {:.2}%",
+        classified,
+        total,
+        classified as f64 / total_f * 100.0
+    );
 
     Ok(())
 }

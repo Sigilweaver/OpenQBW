@@ -36,9 +36,9 @@ use std::collections::BTreeMap;
 use opensqlany::{ApModel, Page, PageStore, PageType, SlottedPage};
 
 use crate::bv_recovery::{deobfuscate_with_bv, recover_bv_qb_data};
-use crate::syscolumn::{iter_syscolumns, SysColumn};
-use crate::systable::iter_systable_entries;
+use crate::syscolumn::{SysColumn, iter_syscolumns};
 use crate::sysobject::bridge_owners_to_tables;
+use crate::systable::iter_systable_entries;
 
 /// Per-column variable-width allowance (bytes) added to the upper bound
 /// when the column's domain is variable-length (`Y`, `V`, `C`, `A`).

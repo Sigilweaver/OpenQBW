@@ -333,8 +333,7 @@ mod tests {
         let mut body = vec![0xAAu8; PAGE_DATA_END];
         let anchor = 64;
         body[anchor..anchor + 3].copy_from_slice(&HEADER_PREFIX);
-        body[anchor + 3..anchor + 3 + QB_ID_LEN]
-            .copy_from_slice(b"0000000000001QBm");
+        body[anchor + 3..anchor + 3 + QB_ID_LEN].copy_from_slice(b"0000000000001QBm");
         // Place a (date, counter) pair just after the QB-ID.
         let after = anchor + 3 + QB_ID_LEN;
         body[after..after + 4].copy_from_slice(&15511u32.to_le_bytes());
@@ -356,8 +355,7 @@ mod tests {
         let anchor = 64;
         body[anchor..anchor + 3].copy_from_slice(&HEADER_PREFIX);
         // Contains '!' which is not base62.
-        body[anchor + 3..anchor + 3 + QB_ID_LEN]
-            .copy_from_slice(b"0000000000001QB!");
+        body[anchor + 3..anchor + 3 + QB_ID_LEN].copy_from_slice(b"0000000000001QB!");
         let mut out = Vec::new();
         scan_page(&body, 3628, "abmc_invoice_header", &mut out);
         assert!(out.is_empty());
@@ -369,12 +367,10 @@ mod tests {
         let mut body = vec![0u8; PAGE_DATA_END];
         let first = 16;
         body[first..first + 3].copy_from_slice(&HEADER_PREFIX);
-        body[first + 3..first + 3 + QB_ID_LEN]
-            .copy_from_slice(b"0000000000001QBm");
+        body[first + 3..first + 3 + QB_ID_LEN].copy_from_slice(b"0000000000001QBm");
         let second = first + 3 + QB_ID_LEN;
         body[second..second + 3].copy_from_slice(&HEADER_PREFIX);
-        body[second + 3..second + 3 + QB_ID_LEN]
-            .copy_from_slice(b"0000000000001QBn");
+        body[second + 3..second + 3 + QB_ID_LEN].copy_from_slice(b"0000000000001QBn");
         let mut out = Vec::new();
         scan_page(&body, 3628, "abmc_invoice_header", &mut out);
         assert_eq!(out.len(), 2);

@@ -43,7 +43,7 @@ fn top_bytes(bytes: &[u8], k: usize) -> Vec<(u8, u32)> {
         .enumerate()
         .map(|(i, &c)| (i as u8, c))
         .collect();
-    v.sort_by(|a, b| b.1.cmp(&a.1));
+    v.sort_by_key(|&(_, c)| std::cmp::Reverse(c));
     v.truncate(k);
     v
 }
@@ -68,12 +68,7 @@ fn longest_run(bytes: &[u8]) -> usize {
 
 /// Apply the same cascade probe_decode_coverage uses; return Some(plain) if
 /// any tier succeeds at >=5% zeros, else None.
-fn try_decode(
-    pn: u64,
-    raw: &[u8],
-    model: &ApModel,
-    store: &PageStore,
-) -> Option<Vec<u8>> {
+fn try_decode(pn: u64, raw: &[u8], model: &ApModel, store: &PageStore) -> Option<Vec<u8>> {
     let looks = |p: &[u8]| {
         let body = &p[..0xFF0];
         let zeros = body.iter().filter(|&&b| b == 0).count();
@@ -117,7 +112,9 @@ fn try_decode(
 }
 
 fn main() -> anyhow::Result<()> {
-    let path = std::env::args().nth(1).expect("usage: probe_failed_pages <qbw>");
+    let path = std::env::args()
+        .nth(1)
+        .expect("usage: probe_failed_pages <qbw>");
     let store = PageStore::open(&path)?;
     let model = ApModel::learn(&store);
 
@@ -142,7 +139,9 @@ fn main() -> anyhow::Result<()> {
     }
     eprintln!(
         "{}: {} E-pages, {} failed to decode",
-        path, total_e_pages, failed.len()
+        path,
+        total_e_pages,
+        failed.len()
     );
 
     // Aggregate fingerprints.
@@ -182,10 +181,7 @@ fn main() -> anyhow::Result<()> {
                     .map(|(b, c)| format!("{:#04x}x{}", b, c))
                     .collect::<Vec<_>>()
             );
-            println!(
-                "    body[0..64]={:02x?}",
-                &body[..64]
-            );
+            println!("    body[0..64]={:02x?}", &body[..64]);
             // Trailer 0xFF0..=0xFFB
             println!(
                 "    trailer[0xFF0..0xFFC]={:02x?}  type=0x{:02x}",
@@ -202,7 +198,12 @@ fn main() -> anyhow::Result<()> {
     }
     println!("entropy bucket (bin width 0.5):");
     for (b, c) in &entropy_buckets {
-        println!("  [{:.1}, {:.1})  {} pages", *b as f64 / 2.0, (*b as f64 + 1.0) / 2.0, c);
+        println!(
+            "  [{:.1}, {:.1})  {} pages",
+            *b as f64 / 2.0,
+            (*b as f64 + 1.0) / 2.0,
+            c
+        );
     }
     println!("longest-run buckets:");
     for (b, c) in &run_buckets {
@@ -245,7 +246,11 @@ fn main() -> anyhow::Result<()> {
             block,
             neighbors
                 .iter()
-                .map(|(s, b)| format!("{}:{}", s, b.map(|x| format!("0x{:02x}", x)).unwrap_or("?".into())))
+                .map(|(s, b)| format!(
+                    "{}:{}",
+                    s,
+                    b.map(|x| format!("0x{:02x}", x)).unwrap_or("?".into())
+                ))
                 .collect::<Vec<_>>(),
             rescued.map(|b| format!("0x{:02x}", b))
         );

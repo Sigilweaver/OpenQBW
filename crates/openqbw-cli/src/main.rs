@@ -6,6 +6,7 @@
 //! openqbw export  <input.qbw> <output.db>   # multi-transaction SQLite export
 //! openqbw catalog <input.qbw>               # SYSTABLE listing
 //! openqbw verify  <input.qbw>               # validation summary
+//! openqbw indexes <input.qbw>               # SYSINDEX listing + attribution audit
 //! ```
 
 use std::collections::{BTreeMap, HashMap};
@@ -14,17 +15,21 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use openqbw::{
-    iter_lineitems_with_attribution, iter_transaction_headers, AmountType, ContentAttribution,
-    LineItem, PageAttribution, SysTableEntry, TransactionHeader,
+    AmountType, ContentAttribution, CrossValidation, LineItem, PageAttribution, SysIndexEntry,
+    SysTableEntry, TransactionHeader, iter_lineitems_with_attribution, iter_transaction_headers,
 };
 use opensqlany::{ApModel, PageStore};
-use rusqlite::{params, Connection, Transaction};
+use rusqlite::{Connection, Transaction, params};
 
 const PHASE5_INVOICE_TOTAL_CENTS: i64 = 39_991_479_278;
 const PHASE5_INVOICE_COUNT: i64 = 13_375;
 
 #[derive(Parser, Debug)]
-#[command(name = "openqbw", version, about = "QuickBooks .qbw inspector and exporter")]
+#[command(
+    name = "openqbw",
+    version,
+    about = "QuickBooks .qbw inspector and exporter"
+)]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -93,6 +98,19 @@ enum Cmd {
         /// Input QBW file.
         input: PathBuf,
     },
+    /// List the SYSINDEX catalog and cross-validate the position
+    /// attribution against SYSINDEX `root_page` ground truth
+    /// (Phase 6, WP-6Z.3).
+    Indexes {
+        /// Input QBW file.
+        input: PathBuf,
+        /// Show only foreign-key indexes (names starting with `fkey_`).
+        #[arg(long)]
+        fk_only: bool,
+        /// Show only the cross-validation summary (no per-index rows).
+        #[arg(long)]
+        summary_only: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -112,17 +130,20 @@ fn main() -> Result<()> {
         } => run_fkgraph(input, resolved_only),
         Cmd::Nulls { input } => run_nulls(input),
         Cmd::ValidateAttribution { input } => run_validate_attribution(input),
+        Cmd::Indexes {
+            input,
+            fk_only,
+            summary_only,
+        } => run_indexes(input, fk_only, summary_only),
     }
 }
 
 fn run_export(input: PathBuf, output: PathBuf) -> Result<ExportStats> {
     if output.exists() {
-        std::fs::remove_file(&output)
-            .with_context(|| format!("removing existing {:?}", output))?;
+        std::fs::remove_file(&output).with_context(|| format!("removing existing {:?}", output))?;
     }
 
-    let store = PageStore::open(&input)
-        .with_context(|| format!("opening {:?}", input))?;
+    let store = PageStore::open(&input).with_context(|| format!("opening {:?}", input))?;
     let model = ApModel::learn(&store);
     let attribution = PageAttribution::build(&store, &model);
 
@@ -134,8 +155,7 @@ fn run_export(input: PathBuf, output: PathBuf) -> Result<ExportStats> {
         iter_transaction_headers(&store, &model, &attribution).collect();
     headers.sort_by_key(|h| (h.page_number, h.page_offset));
 
-    let mut conn = Connection::open(&output)
-        .with_context(|| format!("opening {:?}", output))?;
+    let mut conn = Connection::open(&output).with_context(|| format!("opening {:?}", output))?;
     create_schema(&conn)?;
 
     {
@@ -152,8 +172,7 @@ fn run_export(input: PathBuf, output: PathBuf) -> Result<ExportStats> {
 }
 
 fn run_catalog(input: PathBuf, user_only: bool) -> Result<()> {
-    let store = PageStore::open(&input)
-        .with_context(|| format!("opening {:?}", input))?;
+    let store = PageStore::open(&input).with_context(|| format!("opening {:?}", input))?;
     let model = ApModel::learn(&store);
 
     let mut entries: Vec<SysTableEntry> = openqbw::collect_unique(&store, &model);
@@ -172,24 +191,38 @@ fn run_catalog(input: PathBuf, user_only: bool) -> Result<()> {
         total,
         user.len(),
     );
-    println!("{:>6}  {:>5}  {:>6}  {:>6}  {}", "tid", "cols", "root", "last", "name");
+    println!(
+        "{:>6}  {:>5}  {:>6}  {:>6}  name",
+        "tid", "cols", "root", "last"
+    );
     let iter: Box<dyn Iterator<Item = &SysTableEntry>> = if user_only {
         Box::new(user.into_iter())
     } else {
         Box::new(entries.iter())
     };
     for e in iter {
-        let cols = e.col_count.map(|c| c.to_string()).unwrap_or_else(|| "-".into());
-        let root = e.data_root_page.map(|p| p.to_string()).unwrap_or_else(|| "-".into());
-        let last = e.last_page.map(|p| p.to_string()).unwrap_or_else(|| "-".into());
-        println!("{:>6}  {:>5}  {:>6}  {:>6}  {}", e.table_id, cols, root, last, e.name);
+        let cols = e
+            .col_count
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "-".into());
+        let root = e
+            .data_root_page
+            .map(|p| p.to_string())
+            .unwrap_or_else(|| "-".into());
+        let last = e
+            .last_page
+            .map(|p| p.to_string())
+            .unwrap_or_else(|| "-".into());
+        println!(
+            "{:>6}  {:>5}  {:>6}  {:>6}  {}",
+            e.table_id, cols, root, last, e.name
+        );
     }
     Ok(())
 }
 
 fn run_schema(input: PathBuf, table: String) -> Result<()> {
-    let store = PageStore::open(&input)
-        .with_context(|| format!("opening {:?}", input))?;
+    let store = PageStore::open(&input).with_context(|| format!("opening {:?}", input))?;
     let model = ApModel::learn(&store);
     let cols = openqbw::schema_for(&store, &model, &table);
     if cols.is_empty() {
@@ -200,23 +233,21 @@ fn run_schema(input: PathBuf, table: String) -> Result<()> {
         );
     }
     println!("table: {}  columns: {}", table, cols.len());
-    println!("{:>5}  {:<32}  {:>6}  {:>5}  {:>5}", "id", "name", "domain", "width", "nulls");
+    println!(
+        "{:>5}  {:<32}  {:>6}  {:>5}  {:>5}",
+        "id", "name", "domain", "width", "nulls"
+    );
     for c in &cols {
         println!(
             "{:>5}  {:<32}  {:>6}  {:>5}  {:>5}",
-            c.column_id,
-            c.name,
-            c.domain_char as char,
-            c.width,
-            c.nulls_flag
+            c.column_id, c.name, c.domain_char as char, c.width, c.nulls_flag
         );
     }
     Ok(())
 }
 
 fn run_fkgraph(input: PathBuf, resolved_only: bool) -> Result<()> {
-    let store = PageStore::open(&input)
-        .with_context(|| format!("opening {:?}", input))?;
+    let store = PageStore::open(&input).with_context(|| format!("opening {:?}", input))?;
     let model = ApModel::learn(&store);
     let edges = openqbw::build_fk_graph(&store, &model);
     let s = openqbw::fk_graph_stats(&edges);
@@ -248,9 +279,73 @@ fn run_fkgraph(input: PathBuf, resolved_only: bool) -> Result<()> {
     Ok(())
 }
 
+fn run_indexes(input: PathBuf, fk_only: bool, summary_only: bool) -> Result<()> {
+    let store = PageStore::open(&input).with_context(|| format!("opening {:?}", input))?;
+    let model = ApModel::learn(&store);
+    let entries: Vec<SysIndexEntry> = openqbw::collect_unique_sysindex(&store, &model);
+    let tables: Vec<SysTableEntry> = openqbw::collect_unique(&store, &model);
+    let position = PageAttribution::build(&store, &model);
+    let audit = CrossValidation::run(&entries, &position, &tables);
+
+    let fk_count = entries.iter().filter(|e| e.is_foreign_key()).count();
+    println!(
+        "sysindex entries: {} (fk: {})  distinct (table_id,root_page) pairs: {}",
+        entries.len(),
+        fk_count,
+        audit.distinct_roots,
+    );
+    print_audit_summary(&audit);
+
+    if summary_only {
+        return Ok(());
+    }
+
+    let mut name_by_tid: BTreeMap<u32, String> = BTreeMap::new();
+    for t in &tables {
+        name_by_tid
+            .entry(t.table_id)
+            .or_insert_with(|| t.name.clone());
+    }
+    println!();
+    println!("{:>8}  {:>8}  {:<40}  index_name", "tid", "root", "owner");
+    for e in &entries {
+        if fk_only && !e.is_foreign_key() {
+            continue;
+        }
+        let owner = name_by_tid
+            .get(&e.table_id)
+            .cloned()
+            .unwrap_or_else(|| "<orphan>".into());
+        println!(
+            "{:>8}  {:>8}  {:<40}  {}",
+            e.table_id, e.root_page, owner, e.name
+        );
+    }
+    Ok(())
+}
+
+fn print_audit_summary(audit: &CrossValidation) {
+    println!(
+        "cross-validation: agree={} disagree={} missing={} orphan={}  agreement_rate={:.1}%",
+        audit.agree,
+        audit.disagree,
+        audit.missing,
+        audit.orphan_index,
+        audit.agreement_rate() * 100.0,
+    );
+    if !audit.disagree_samples.is_empty() {
+        println!("  disagreement samples (sysindex_table -> position_table @ root_page : index):");
+        for (tid, sysn, posn, root, idx) in &audit.disagree_samples {
+            println!(
+                "    tid={:<6} {:<32} -> {:<32} @ root={:<8} : {}",
+                tid, sysn, posn, root, idx
+            );
+        }
+    }
+}
+
 fn run_validate_attribution(input: PathBuf) -> Result<()> {
-    let store = PageStore::open(&input)
-        .with_context(|| format!("opening {:?}", input))?;
+    let store = PageStore::open(&input).with_context(|| format!("opening {:?}", input))?;
     let model = ApModel::learn(&store);
     let position = openqbw::PageAttribution::build(&store, &model);
     let schema = openqbw::SchemaAttribution::build(&store, &model);
@@ -259,11 +354,8 @@ fn run_validate_attribution(input: PathBuf) -> Result<()> {
         schema.len(),
         store.page_count()
     );
-    let pairs = (1..store.page_count()).filter_map(|pn| {
-        position
-            .attribute(pn)
-            .map(|e| (pn, e.name.clone()))
-    });
+    let pairs = (1..store.page_count())
+        .filter_map(|pn| position.attribute(pn).map(|e| (pn, e.name.clone())));
     let stats = schema.validate_corpus(&store, &model, pairs);
     let total = stats.total().max(1);
     println!(
@@ -272,7 +364,11 @@ fn run_validate_attribution(input: PathBuf) -> Result<()> {
     );
     println!(
         "{:>10}  {:>10}  {:>10}  {:>10}  {:>10}",
-        stats.pass, stats.fail, stats.no_band, stats.unmeasured, stats.total()
+        stats.pass,
+        stats.fail,
+        stats.no_band,
+        stats.unmeasured,
+        stats.total()
     );
     println!(
         "pass rate: {:.1}%  fail rate: {:.1}%",
@@ -283,13 +379,16 @@ fn run_validate_attribution(input: PathBuf) -> Result<()> {
 }
 
 fn run_nulls(input: PathBuf) -> Result<()> {
-    let store = PageStore::open(&input)
-        .with_context(|| format!("opening {:?}", input))?;
+    let store = PageStore::open(&input).with_context(|| format!("opening {:?}", input))?;
     let model = ApModel::learn(&store);
     let buckets = openqbw::nulls_flag_histogram(&store, &model);
     let total: usize = buckets.iter().map(|b| b.count).sum();
-    println!("total syscolumn rows: {}  distinct nulls_flag values: {}", total, buckets.len());
-    println!("{:>6}  {:>8}  {}", "byte", "count", "sample_columns");
+    println!(
+        "total syscolumn rows: {}  distinct nulls_flag values: {}",
+        total,
+        buckets.len()
+    );
+    println!("{:>6}  {:>8}  sample_columns", "byte", "count");
     for b in &buckets {
         let samples = b.sample_columns.join(", ");
         println!("0x{:02x}    {:>8}  {}", b.flag, b.count, samples);
@@ -297,17 +396,10 @@ fn run_nulls(input: PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn run_verify(
-    input: PathBuf,
-    output: Option<PathBuf>,
-    strict_attribution: bool,
-) -> Result<()> {
+fn run_verify(input: PathBuf, output: Option<PathBuf>, strict_attribution: bool) -> Result<()> {
     let out = match output {
         Some(p) => p,
-        None => std::env::temp_dir().join(format!(
-            "openqbw-verify-{}.sqlite",
-            std::process::id()
-        )),
+        None => std::env::temp_dir().join(format!("openqbw-verify-{}.sqlite", std::process::id())),
     };
     let stats = run_export(input.clone(), out.clone())?;
     println!();
@@ -323,7 +415,11 @@ fn run_verify(
          ORDER BY source_table",
     )?;
     let rows = stmt.query_map([], |r| {
-        Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?))
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, i64>(1)?,
+            r.get::<_, i64>(2)?,
+        ))
     })?;
     for row in rows {
         let (t, n, sum) = row?;
@@ -339,7 +435,11 @@ fn run_verify(
          ORDER BY type",
     )?;
     let rows = stmt.query_map([], |r| {
-        Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?))
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, i64>(1)?,
+            r.get::<_, i64>(2)?,
+        ))
     })?;
     for row in rows {
         let (t, n, sum) = row?;
@@ -357,8 +457,8 @@ fn run_verify(
         [],
         |r| r.get(0),
     )?;
-    let regression_ok = grand_total == PHASE5_INVOICE_TOTAL_CENTS
-        && parent_count == PHASE5_INVOICE_COUNT;
+    let regression_ok =
+        grand_total == PHASE5_INVOICE_TOTAL_CENTS && parent_count == PHASE5_INVOICE_COUNT;
     println!(
         "Phase 5 regression (universal anchor):  parents={}/{}  grand_total=${:.2}/${:.2}  {}",
         parent_count,
@@ -452,18 +552,32 @@ fn run_verify(
             (allb as f64) / (allp as f64) * 100.0,
         );
     }
-    println!(
-        "  note: type-0x03 entries are NOT signed amounts (727 distinct values across"
-    );
-    println!(
-        "        11,754 occurrences in Rock Castle - see NOTES.md C.48 Track A)."
-    );
+    println!("  note: type-0x03 entries are NOT signed amounts (727 distinct values across");
+    println!("        11,754 occurrences in Rock Castle - see NOTES.md C.48 Track A).");
+
+    println!();
+    println!("=== SYSINDEX cross-validation (WP-6Z.3) ===");
+    {
+        let store = PageStore::open(&input).with_context(|| format!("re-opening {:?}", input))?;
+        let model = ApModel::learn(&store);
+        let entries = openqbw::collect_unique_sysindex(&store, &model);
+        let tables: Vec<SysTableEntry> = openqbw::collect_unique(&store, &model);
+        let position = PageAttribution::build(&store, &model);
+        let audit = CrossValidation::run(&entries, &position, &tables);
+        let fk_count = entries.iter().filter(|e| e.is_foreign_key()).count();
+        println!(
+            "  sysindex entries: {} (fk: {})  distinct (tid,root) pairs: {}",
+            entries.len(),
+            fk_count,
+            audit.distinct_roots,
+        );
+        print_audit_summary(&audit);
+    }
 
     if strict_attribution {
         println!();
         println!("=== content-signature attribution (--strict-attribution) ===");
-        let store = PageStore::open(&input)
-            .with_context(|| format!("re-opening {:?}", input))?;
+        let store = PageStore::open(&input).with_context(|| format!("re-opening {:?}", input))?;
         let model = ApModel::learn(&store);
         let content = ContentAttribution::build(&store, &model);
         let position = PageAttribution::build(&store, &model);
@@ -615,8 +729,7 @@ fn insert_synthesized_transactions(
             .iter()
             .filter_map(|l| l.amount_cents.map(|c| c as i64))
             .sum();
-        let has_deferred =
-            lines.iter().any(|l| l.amount_type == AmountType::Deferred) as i64;
+        let has_deferred = lines.iter().any(|l| l.amount_type == AmountType::Deferred) as i64;
         let line_count = lines.len() as i64;
         if header_map.contains_key(&qb_id) {
             update_stmt.execute(params![line_count, total, has_deferred, qb_id])?;
@@ -630,7 +743,14 @@ fn insert_synthesized_transactions(
             .unwrap_or_default();
         let page = lines.first().map(|l| l.page_number as i64).unwrap_or(0);
         insert_stmt.execute(params![
-            qb_id, src, date, counter, line_count, total, has_deferred, page
+            qb_id,
+            src,
+            date,
+            counter,
+            line_count,
+            total,
+            has_deferred,
+            page
         ])?;
     }
     Ok(())

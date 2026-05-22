@@ -102,7 +102,7 @@ pub fn scan_page(body: &[u8], pn: u64, out: &mut Vec<SysTableEntry>) {
             break;
         }
         let name_len = body[pos + 20];
-        if name_len < NAME_LEN_MIN || name_len > NAME_LEN_MAX {
+        if !(NAME_LEN_MIN..=NAME_LEN_MAX).contains(&name_len) {
             pos += 1;
             continue;
         }

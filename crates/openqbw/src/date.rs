@@ -36,7 +36,7 @@ pub const SA_DAY_MAX_PLAUSIBLE: u32 = 80_000;
 /// Returns `None` for SA-days outside the plausible window
 /// `[SA_DAY_MIN_PLAUSIBLE, SA_DAY_MAX_PLAUSIBLE]`.
 pub fn sa_day_to_unix_day(sa_day: u32) -> Option<i64> {
-    if sa_day < SA_DAY_MIN_PLAUSIBLE || sa_day > SA_DAY_MAX_PLAUSIBLE {
+    if !(SA_DAY_MIN_PLAUSIBLE..=SA_DAY_MAX_PLAUSIBLE).contains(&sa_day) {
         return None;
     }
     Some(sa_day as i64 - DATE_EPOCH_DAYS_BEFORE_UNIX)

@@ -25,7 +25,7 @@ use std::collections::BTreeMap;
 
 use opensqlany::{ApModel, PageStore};
 
-use crate::systable::{collect_unique, SysTableEntry};
+use crate::systable::{SysTableEntry, collect_unique};
 
 /// Resolves page numbers to the `SYSTABLE` entry that most likely owns them.
 #[derive(Debug, Clone)]

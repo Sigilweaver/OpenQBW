@@ -16,10 +16,20 @@ use openqbw::{deobfuscate_with_bv, recover_bv_qb_data};
 use opensqlany::{ApModel, PageStore, PageType};
 
 fn hex_row(off: usize, row: &[u8]) -> String {
-    let hex: String = row.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ");
+    let hex: String = row
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect::<Vec<_>>()
+        .join(" ");
     let ascii: String = row
         .iter()
-        .map(|&b| if (0x20..0x7f).contains(&b) { b as char } else { '.' })
+        .map(|&b| {
+            if (0x20..0x7f).contains(&b) {
+                b as char
+            } else {
+                '.'
+            }
+        })
         .collect();
     format!("  {:04x}  {:<47}  |{}|", off, hex, ascii)
 }
@@ -88,12 +98,18 @@ fn main() -> anyhow::Result<()> {
         // Reduce noise: only report u32 values that look like real page
         // numbers AND have at least 3-byte stride symmetry, but keep it
         // simple here: print a histogram of which offsets have references.
-        println!("  # plausible u32 page refs (val < total_pages): {}", refs.len());
+        println!(
+            "  # plausible u32 page refs (val < total_pages): {}",
+            refs.len()
+        );
         if !refs.is_empty() {
             // Print first 20 refs as (offset, page).
-            let head = refs.iter().take(20)
+            let head = refs
+                .iter()
+                .take(20)
                 .map(|(o, v)| format!("({:#x}={})", o, v))
-                .collect::<Vec<_>>().join(", ");
+                .collect::<Vec<_>>()
+                .join(", ");
             println!("  first refs: {}", head);
             // Detect strides.
             let mut strides: std::collections::BTreeMap<usize, usize> = Default::default();
@@ -103,7 +119,12 @@ fn main() -> anyhow::Result<()> {
             }
             let mut sv: Vec<(usize, usize)> = strides.into_iter().collect();
             sv.sort_by_key(|(_, c)| std::cmp::Reverse(*c));
-            let top: String = sv.iter().take(6).map(|(s, c)| format!("(d={} n={})", s, c)).collect::<Vec<_>>().join(" ");
+            let top: String = sv
+                .iter()
+                .take(6)
+                .map(|(s, c)| format!("(d={} n={})", s, c))
+                .collect::<Vec<_>>()
+                .join(" ");
             println!("  ref stride hist: {}", top);
         }
     }

@@ -31,7 +31,7 @@ use opensqlany::{ApModel, Page, PageStore, PageType, SlottedPage};
 
 use crate::bv_recovery::{deobfuscate_with_bv, recover_bv_qb_data};
 use crate::page_attribution::PageAttribution;
-use crate::systable::{iter_systable_entries, SysTableEntry};
+use crate::systable::{SysTableEntry, iter_systable_entries};
 
 /// Length in bytes of the row-0 prefix used as a table signature.
 pub const SIG_LEN: usize = 12;
@@ -204,11 +204,7 @@ impl ContentAttribution {
 }
 
 /// Decode `page_number` and return the row-0 signature, if available.
-fn extract_signature(
-    store: &PageStore,
-    model: &ApModel,
-    page_number: u64,
-) -> Option<RowSignature> {
+fn extract_signature(store: &PageStore, model: &ApModel, page_number: u64) -> Option<RowSignature> {
     let page = store.page(page_number).ok()?;
     if page.trailer().page_type() != PageType::Extent {
         return None;
@@ -221,9 +217,7 @@ fn extract_signature(
     };
     let p = Page::from_bytes(page_number, &plain);
     let sp = SlottedPage::parse(p);
-    if sp.directory.is_none() {
-        return None;
-    }
+    sp.directory.as_ref()?;
     let rows = sp.row_bytes();
     let (_slot, first_row) = rows.first()?;
     Some(RowSignature::from_row(first_row))

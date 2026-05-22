@@ -14,9 +14,7 @@
 //!            Stability = how many distinct tables share each signature.
 //!            If most signatures are unique, WP-4A is viable.
 
-use openqbw::{
-    deobfuscate_with_bv, iter_systable_entries, recover_bv_qb_data, SysTableEntry,
-};
+use openqbw::{SysTableEntry, deobfuscate_with_bv, iter_systable_entries, recover_bv_qb_data};
 use opensqlany::{ApModel, Page, PageStore, PageType, SlottedPage};
 use std::collections::BTreeMap;
 
@@ -79,7 +77,10 @@ fn main() -> anyhow::Result<()> {
             continue;
         }
         let sig = row_signature(rows[0].1, SIG_LEN);
-        sig_to_tables.entry(sig.clone()).or_default().push(name.clone());
+        sig_to_tables
+            .entry(sig.clone())
+            .or_default()
+            .push(name.clone());
         if samples.len() < 12 {
             samples.push((name.clone(), root, sig.clone(), rows.len(), rows[0].1.len()));
         }
@@ -88,7 +89,11 @@ fn main() -> anyhow::Result<()> {
     println!("# E-page roots decoded: {}", decoded);
     println!("# roots with no slot directory: {}", no_slot);
     println!("# roots with empty rows: {}", empty_rows);
-    println!("# distinct row-0 signatures (len {}): {}", SIG_LEN, sig_to_tables.len());
+    println!(
+        "# distinct row-0 signatures (len {}): {}",
+        SIG_LEN,
+        sig_to_tables.len()
+    );
 
     let collisions: Vec<(usize, Vec<String>)> = sig_to_tables
         .iter()
@@ -98,12 +103,22 @@ fn main() -> anyhow::Result<()> {
     println!("# signatures shared by >1 table: {}", collisions.len());
 
     let unique_signatures = sig_to_tables.values().filter(|v| v.len() == 1).count();
-    println!("# tables with UNIQUE row-0 signature: {}", unique_signatures);
+    println!(
+        "# tables with UNIQUE row-0 signature: {}",
+        unique_signatures
+    );
 
     println!("\n## sample roots (table, root_pn, sig_hex, n_rows, row0_len)");
     for (name, root, sig, nrows, row0_len) in &samples {
-        let hex: String = sig.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ");
-        println!("  {:<42}  pn={:>5}  rows={:>3}  r0_len={:>4}  sig=[{}]", name, root, nrows, row0_len, hex);
+        let hex: String = sig
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect::<Vec<_>>()
+            .join(" ");
+        println!(
+            "  {:<42}  pn={:>5}  rows={:>3}  r0_len={:>4}  sig=[{}]",
+            name, root, nrows, row0_len, hex
+        );
     }
 
     println!("\n## top signature collisions (count >= 2)");
@@ -113,8 +128,17 @@ fn main() -> anyhow::Result<()> {
         .collect();
     sorted.sort_by_key(|(_, v)| std::cmp::Reverse(v.len()));
     for (sig, tabs) in sorted.iter().take(8) {
-        let hex: String = sig.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ");
-        println!("  sig=[{}] -> {} tables: {:?}", hex, tabs.len(), &tabs[..tabs.len().min(6)]);
+        let hex: String = sig
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect::<Vec<_>>()
+            .join(" ");
+        println!(
+            "  sig=[{}] -> {} tables: {:?}",
+            hex,
+            tabs.len(),
+            &tabs[..tabs.len().min(6)]
+        );
     }
 
     Ok(())
