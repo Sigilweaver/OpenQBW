@@ -1,8 +1,8 @@
 # Format overview
 
 This is a high-level orientation map. The detailed specification
-is in [SPECIFICATION.md](../SPECIFICATION.md), and the empirical
-notebook is in [re/NOTES.md](../re/NOTES.md).
+is in [SPECIFICATION.md](./specification.md), and the empirical
+notebook is in [re/NOTES.md](https://github.com/Sigilweaver/OpenQBW/blob/main/re/NOTES.md).
 
 ## Three layers
 
