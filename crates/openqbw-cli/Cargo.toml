@@ -4,7 +4,12 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
 authors.workspace = true
+keywords = ["quickbooks", "qbw", "cli", "accounting"]
+categories = ["command-line-utilities"]
 description = "Command-line exporter for QuickBooks .qbw files."
 
 [[bin]]
@@ -17,3 +22,6 @@ opensqlany = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
 rusqlite = { workspace = true }
+
+[lints]
+workspace = true

@@ -4,9 +4,18 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme.workspace = true
 authors.workspace = true
+keywords = ["quickbooks", "qbw", "accounting", "parser"]
+categories = ["parser-implementations"]
 description = "QuickBooks .qbw file parser built on opensqlany page-store."
 
 [dependencies]
 opensqlany = { workspace = true }
 thiserror = { workspace = true }
+
+[lints]
+workspace = true
