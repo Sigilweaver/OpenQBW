@@ -1,5 +1,8 @@
 # OpenQBW
 
+[![CI](https://github.com/Sigilweaver/OpenQBW/actions/workflows/ci.yml/badge.svg)](https://github.com/Sigilweaver/OpenQBW/actions/workflows/ci.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
 > Open specification and open-source parser for the **QuickBooks Desktop company file** format
 
 Intuit has announced end-of-life for QuickBooks Desktop, forcing small

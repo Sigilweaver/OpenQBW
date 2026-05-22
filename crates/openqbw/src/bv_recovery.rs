@@ -464,7 +464,7 @@ mod tests {
         let bv = 0xa3u8;
         let mut plain = vec![0u8; PAGE];
         plain[TRAILER_START] = 0x07; // trailer RC
-                                     // Anchor at offset 0x100 in sector 0 == [rc, 0, D5, 0B]
+        // Anchor at offset 0x100 in sector 0 == [rc, 0, D5, 0B]
         plain[0x100] = 0x07;
         plain[0x101] = 0x00;
         plain[0x102] = 0xD5;

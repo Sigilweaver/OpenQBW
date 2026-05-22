@@ -15,11 +15,11 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use openqbw::{
-    iter_lineitems_with_attribution, iter_transaction_headers, AmountType, ContentAttribution,
-    CrossValidation, LineItem, PageAttribution, SysIndexEntry, SysTableEntry, TransactionHeader,
+    AmountType, ContentAttribution, CrossValidation, LineItem, PageAttribution, SysIndexEntry,
+    SysTableEntry, TransactionHeader, iter_lineitems_with_attribution, iter_transaction_headers,
 };
 use opensqlany::{ApModel, PageStore};
-use rusqlite::{params, Connection, Transaction};
+use rusqlite::{Connection, Transaction, params};
 
 const PHASE5_INVOICE_TOTAL_CENTS: i64 = 39_991_479_278;
 const PHASE5_INVOICE_COUNT: i64 = 13_375;
