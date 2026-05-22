@@ -3,10 +3,12 @@
 //! Subcommands:
 //!
 //! ```text
-//! openqbw export  <input.qbw> <output.db>   # multi-transaction SQLite export
-//! openqbw catalog <input.qbw>               # SYSTABLE listing
-//! openqbw verify  <input.qbw>               # validation summary
-//! openqbw indexes <input.qbw>               # SYSINDEX listing + attribution audit
+//! openqbw export    <input.qbw> <output.db>   # multi-transaction SQLite export
+//! openqbw catalog   <input.qbw>               # SYSTABLE listing
+//! openqbw verify    <input.qbw>               # validation summary
+//! openqbw indexes   <input.qbw>               # SYSINDEX listing + attribution audit
+//! openqbw migrate   <input.qbw> --format=...  # data-liberation export (csv/sqlite/iif)
+//! openqbw forensics <input.qbw>               # file-level discovery summary
 //! ```
 
 use std::collections::{BTreeMap, HashMap};
@@ -111,6 +113,39 @@ enum Cmd {
         #[arg(long)]
         summary_only: bool,
     },
+    /// Data-liberation export: emit line items and transaction
+    /// headers in a portable format suitable for handing to a
+    /// different accounting product or for archival.
+    Migrate {
+        /// Input QBW file.
+        input: PathBuf,
+        /// Output destination. For `csv` this is a directory and
+        /// will be created if it does not exist; for `sqlite` and
+        /// `iif` it is a single output file.
+        #[arg(long)]
+        out: PathBuf,
+        /// Output format.
+        #[arg(long, value_enum, default_value_t = MigrateFormat::Csv)]
+        format: MigrateFormat,
+    },
+    /// File-level forensic discovery summary: size, page-type
+    /// histogram, table inventory, and high-level signals useful
+    /// for triage in audit or litigation contexts.
+    Forensics {
+        /// Input QBW file.
+        input: PathBuf,
+    },
+}
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+enum MigrateFormat {
+    /// One CSV file per output kind into a directory.
+    Csv,
+    /// A single SQLite database file (equivalent to `openqbw export`).
+    Sqlite,
+    /// Intuit Interchange Format (IIF), a tab-separated text format
+    /// importable by many accounting products.
+    Iif,
 }
 
 fn main() -> Result<()> {
@@ -135,6 +170,8 @@ fn main() -> Result<()> {
             fk_only,
             summary_only,
         } => run_indexes(input, fk_only, summary_only),
+        Cmd::Migrate { input, out, format } => run_migrate(input, out, format),
+        Cmd::Forensics { input } => run_forensics(input),
     }
 }
 
@@ -845,4 +882,317 @@ fn collect_export_stats(
         line_items: items.len() as i64,
         grand_total_cents: total,
     })
+}
+
+// =========================================================================
+// migrate -- data-liberation export
+// =========================================================================
+
+fn run_migrate(input: PathBuf, out: PathBuf, format: MigrateFormat) -> Result<()> {
+    match format {
+        MigrateFormat::Sqlite => run_export(input, out).map(|s| println!("{}", s.summary())),
+        MigrateFormat::Csv => run_migrate_csv(input, out),
+        MigrateFormat::Iif => run_migrate_iif(input, out),
+    }
+}
+
+fn collect_records(
+    input: &PathBuf,
+) -> Result<(Vec<LineItem>, Vec<TransactionHeader>, PageStore, ApModel)> {
+    let store = PageStore::open(input).with_context(|| format!("opening {:?}", input))?;
+    let model = ApModel::learn(&store);
+    let attribution = PageAttribution::build(&store, &model);
+    let mut items: Vec<LineItem> =
+        iter_lineitems_with_attribution(&store, &model, &attribution).collect();
+    items.sort_by_key(|li| (li.page_number, li.page_offset));
+    let mut headers: Vec<TransactionHeader> =
+        iter_transaction_headers(&store, &model, &attribution).collect();
+    headers.sort_by_key(|h| (h.page_number, h.page_offset));
+    Ok((items, headers, store, model))
+}
+
+/// Minimal CSV-field escaper: quote if the field contains comma, quote,
+/// CR, or LF, doubling embedded quotes.
+fn csv_field(s: &str) -> String {
+    if s.bytes().any(|b| matches!(b, b',' | b'"' | b'\n' | b'\r')) {
+        let mut out = String::with_capacity(s.len() + 2);
+        out.push('"');
+        for ch in s.chars() {
+            if ch == '"' {
+                out.push('"');
+            }
+            out.push(ch);
+        }
+        out.push('"');
+        out
+    } else {
+        s.to_string()
+    }
+}
+
+fn iso_date_from_unix_days(days: i64) -> String {
+    // 1970-01-01 was a Thursday; we want a calendar date. Use chrono-free
+    // implementation: 1970-01-01 + days.
+    // Simple algorithm via days-from-civil; good for the [1900, 2400] range.
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{:04}-{:02}-{:02}", y, m, d)
+}
+
+fn lineitem_date(li: &LineItem) -> String {
+    li.txn_date_days_since_unix()
+        .map(iso_date_from_unix_days)
+        .unwrap_or_default()
+}
+
+fn run_migrate_csv(input: PathBuf, out: PathBuf) -> Result<()> {
+    std::fs::create_dir_all(&out).with_context(|| format!("creating {:?}", out))?;
+    let (items, headers, store, model) = collect_records(&input)?;
+
+    // catalog.csv
+    let mut cat = std::fs::File::create(out.join("catalog.csv"))?;
+    use std::io::Write;
+    writeln!(cat, "table_id,name,column_count,data_root_page,last_page")?;
+    let mut tables: Vec<SysTableEntry> = openqbw::collect_unique(&store, &model);
+    tables.sort_by_key(|e| e.table_id);
+    for t in &tables {
+        writeln!(
+            cat,
+            "{},{},{},{},{}",
+            t.table_id,
+            csv_field(&t.name),
+            t.col_count.map(|c| c.to_string()).unwrap_or_default(),
+            t.data_root_page.map(|p| p.to_string()).unwrap_or_default(),
+            t.last_page.map(|p| p.to_string()).unwrap_or_default(),
+        )?;
+    }
+
+    // transactions.csv
+    let mut txf = std::fs::File::create(out.join("transactions.csv"))?;
+    writeln!(txf, "qb_id,txn_type,source_table,page_number,page_offset")?;
+    for h in &headers {
+        writeln!(
+            txf,
+            "{},{},{},{},{}",
+            csv_field(&h.qb_id),
+            csv_field(h.txn_type()),
+            csv_field(&h.source_table),
+            h.page_number,
+            h.page_offset,
+        )?;
+    }
+
+    // lineitems.csv
+    let mut lif = std::fs::File::create(out.join("lineitems.csv"))?;
+    writeln!(
+        lif,
+        "invoice_id,item_qb_id,amount_cents,amount_signed_cents,amount_decimal,txn_date,source_table,page_number,page_offset"
+    )?;
+    for li in &items {
+        let amt = li.amount_cents.map(|c| c.to_string()).unwrap_or_default();
+        let amts = li
+            .amount_cents_signed
+            .map(|c| c.to_string())
+            .unwrap_or_default();
+        let dec = li
+            .amount_cents
+            .map(|c| format!("{:.2}", c as f64 / 100.0))
+            .unwrap_or_default();
+        writeln!(
+            lif,
+            "{},{},{},{},{},{},{},{},{}",
+            csv_field(&li.invoice_id),
+            csv_field(li.item_qb_id.as_deref().unwrap_or("")),
+            amt,
+            amts,
+            dec,
+            lineitem_date(li),
+            csv_field(li.source_table.as_deref().unwrap_or("")),
+            li.page_number,
+            li.page_offset,
+        )?;
+    }
+
+    println!(
+        "openqbw migrate csv: out={:?} tables={} transactions={} lineitems={}",
+        out,
+        tables.len(),
+        headers.len(),
+        items.len(),
+    );
+    Ok(())
+}
+
+fn run_migrate_iif(input: PathBuf, out: PathBuf) -> Result<()> {
+    let (items, headers, _store, _model) = collect_records(&input)?;
+    use std::io::Write;
+    let mut f = std::fs::File::create(&out).with_context(|| format!("creating {:?}", out))?;
+
+    // IIF requires CRLF line endings for maximum compatibility with the
+    // Windows tools that consume it.
+    let nl = "\r\n";
+    write!(
+        f,
+        "!TRNS\tTRNSID\tTRNSTYPE\tDATE\tACCNT\tNAME\tAMOUNT\tMEMO{nl}"
+    )?;
+    write!(
+        f,
+        "!SPL\tSPLID\tTRNSTYPE\tDATE\tACCNT\tNAME\tAMOUNT\tMEMO{nl}"
+    )?;
+    write!(f, "!ENDTRNS{nl}")?;
+
+    // Bucket line items by parent invoice id. We emit one TRNS per parent
+    // group: in this build most parents are orphans (no matching header)
+    // because the WP-6Z work only parses the lineitem and a small slice of
+    // header tables. We still emit them as TRNS/SPL pairs so the IIF is
+    // useful for liberation. When a matching header exists, we use its
+    // txn_type; otherwise we default to GENERAL JOURNAL.
+    let mut by_parent: HashMap<&str, Vec<&LineItem>> = HashMap::new();
+    for li in &items {
+        by_parent
+            .entry(li.invoice_id.as_str())
+            .or_default()
+            .push(li);
+    }
+    let header_by_id: HashMap<&str, &TransactionHeader> =
+        headers.iter().map(|h| (h.qb_id.as_str(), h)).collect();
+    let mut parent_ids: Vec<&str> = by_parent.keys().copied().collect();
+    parent_ids.sort_unstable();
+
+    let mut trns_id: u64 = 1;
+    let mut spl_id: u64 = 1;
+    let mut written_txns = 0usize;
+    let mut written_lines = 0usize;
+
+    for parent_id in parent_ids {
+        let kids = by_parent.get(parent_id).cloned().unwrap_or_default();
+        if kids.is_empty() {
+            continue;
+        }
+        let sum_cents: i64 = kids
+            .iter()
+            .map(|li| li.amount_cents.unwrap_or(0) as i64)
+            .sum();
+        let date = kids
+            .iter()
+            .find_map(|li| li.txn_date_days_since_unix())
+            .map(iso_date_from_unix_days)
+            .unwrap_or_default();
+        let ttype = header_by_id
+            .get(parent_id)
+            .map(|h| h.txn_type().to_uppercase())
+            .unwrap_or_else(|| "GENERAL JOURNAL".to_string());
+        let amt = sum_cents as f64 / 100.0;
+        let memo = format_args!("qb_id={parent_id}").to_string();
+        write!(
+            f,
+            "TRNS\t{trns_id}\t{ttype}\t{date}\tAccounts Receivable\t\t{amt:.2}\t{memo}{nl}"
+        )?;
+        for li in &kids {
+            let amt = -(li.amount_cents.unwrap_or(0) as i64) as f64 / 100.0;
+            let date = lineitem_date(li);
+            let accnt = li.source_table.as_deref().unwrap_or("");
+            let memo = li.item_qb_id.as_deref().unwrap_or("");
+            write!(
+                f,
+                "SPL\t{spl_id}\t{ttype}\t{date}\t{accnt}\t\t{amt:.2}\t{memo}{nl}"
+            )?;
+            spl_id += 1;
+            written_lines += 1;
+        }
+        write!(f, "ENDTRNS{nl}")?;
+        trns_id += 1;
+        written_txns += 1;
+    }
+
+    println!(
+        "openqbw migrate iif: out={:?} transactions={} lineitems={}",
+        out, written_txns, written_lines
+    );
+    Ok(())
+}
+
+// =========================================================================
+// forensics -- file-level discovery
+// =========================================================================
+
+fn run_forensics(input: PathBuf) -> Result<()> {
+    let store = PageStore::open(&input).with_context(|| format!("opening {:?}", input))?;
+    let model = ApModel::learn(&store);
+    let attribution = PageAttribution::build(&store, &model);
+
+    let file_size = std::fs::metadata(&input)
+        .map(|m| m.len())
+        .unwrap_or_default();
+    let page_count = store.page_count();
+
+    println!("=== file ===");
+    println!("path        : {:?}", input);
+    println!(
+        "size        : {} bytes ({:.1} MiB)",
+        file_size,
+        file_size as f64 / 1024.0 / 1024.0
+    );
+    println!("pages       : {} (4096 B each)", page_count);
+    println!(
+        "ap learned  : {} / {} blocks ({:.1}%)",
+        model.learned_block_count(),
+        page_count.div_ceil(16),
+        100.0 * model.learned_block_count() as f64 / page_count.div_ceil(16).max(1) as f64,
+    );
+
+    let tables: Vec<SysTableEntry> = openqbw::collect_unique(&store, &model);
+    let user_tables: Vec<&SysTableEntry> =
+        tables.iter().filter(|t| !is_system_name(&t.name)).collect();
+    println!();
+    println!("=== catalog ===");
+    println!("tables total: {}", tables.len());
+    println!("tables user : {}", user_tables.len());
+
+    let items: Vec<LineItem> =
+        iter_lineitems_with_attribution(&store, &model, &attribution).collect();
+    let headers: Vec<TransactionHeader> =
+        iter_transaction_headers(&store, &model, &attribution).collect();
+
+    println!();
+    println!("=== business records ===");
+    println!("transaction headers : {}", headers.len());
+    println!("line items          : {}", items.len());
+
+    // Distinct invoice IDs in line items vs in headers; gaps suggest
+    // deleted parents.
+    use std::collections::HashSet;
+    let header_ids: HashSet<&str> = headers.iter().map(|h| h.qb_id.as_str()).collect();
+    let parent_ids: HashSet<&str> = items.iter().map(|li| li.invoice_id.as_str()).collect();
+    let orphan_parents = parent_ids.difference(&header_ids).count();
+    let childless_headers = header_ids.difference(&parent_ids).count();
+    let grand_total_cents: i64 = items
+        .iter()
+        .map(|li| li.amount_cents.unwrap_or(0) as i64)
+        .sum();
+
+    println!("distinct parent invoice ids : {}", parent_ids.len());
+    println!("orphan parents (no header)  : {}", orphan_parents);
+    println!("childless headers           : {}", childless_headers);
+    println!(
+        "lineitem grand total        : ${:.2}",
+        grand_total_cents as f64 / 100.0
+    );
+
+    if orphan_parents > 0 || childless_headers > 0 {
+        println!();
+        println!(
+            "note: a non-zero orphan count is a discovery signal -- the file \n      may contain partially-purged records or a parent table this \n      build does not parse yet."
+        );
+    }
+
+    Ok(())
 }
