@@ -25,4 +25,4 @@ business has already paid for stays accessible.
   Affected repository owners have been contacted directly. Out of caution
   the full downloaded corpus is kept private and is not redistributed.
 - QuickBooks® is a trademark of Intuit Inc. OpenQBW is independent.
-- License: AGPL-3.0-or-later. See [`LICENSE`](LICENSE).
+- License: Apache-2.0. See [`LICENSE`](LICENSE).
