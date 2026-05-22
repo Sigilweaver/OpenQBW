@@ -1,0 +1,17 @@
+[package]
+name = "openqbw-py"
+version.workspace = true
+edition = "2021"
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Python bindings for openqbw"
+
+[lib]
+name = "openqbw"
+crate-type = ["cdylib"]
+
+[dependencies]
+openqbw_rs = { package = "openqbw", path = "../openqbw", version = "0.1.0" }
+opensqlany = { workspace = true }
+pyo3 = { version = "0.22", features = ["extension-module", "abi3-py39"] }

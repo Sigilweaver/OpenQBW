@@ -71,6 +71,22 @@ $ ./target/release/openqbw --help
 
 Rust 1.85+ is required (workspace uses edition 2024).
 
+### Python bindings
+
+A PyO3-based extension lives in `crates/openqbw-py` and ships as a
+package named `openqbw`. To build and install into the active Python
+environment:
+
+```console
+$ pip install maturin
+$ cd crates/openqbw-py
+$ maturin develop --release
+$ python -c "import openqbw; r = openqbw.open('mybooks.qbw'); print(r.page_count, 'pages')"
+```
+
+See [crates/openqbw-py/README.md](crates/openqbw-py/README.md) for the
+full Python API.
+
 ## CLI quickstart
 
 ```console

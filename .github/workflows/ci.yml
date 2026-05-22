@@ -55,3 +55,45 @@ jobs:
       - name: test
         working-directory: OpenQBW
         run: cargo test --workspace --all-targets
+
+  python-wheel:
+    name: python wheel (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - name: Checkout OpenQBW
+        uses: actions/checkout@v4
+        with:
+          path: OpenQBW
+
+      - name: Checkout OpenSQLAnywhere (sibling path dep)
+        uses: actions/checkout@v4
+        with:
+          repository: Sigilweaver/OpenSQLAnywhere
+          path: OpenSQLAnywhere
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: OpenQBW
+
+      - name: Build wheel
+        working-directory: OpenQBW/crates/openqbw-py
+        run: |
+          python -m pip install --upgrade pip maturin
+          maturin build --release --strip
+
+      - name: Upload wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: openqbw-wheel-${{ matrix.os }}
+          path: OpenQBW/target/wheels/*.whl
+          if-no-files-found: error
