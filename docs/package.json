@@ -10,8 +10,7 @@
         "build:cloudflare": "docusaurus build --out-dir build/openqbw/docs",
         "clear": "docusaurus clear",
         "serve": "docusaurus serve",
-        "typecheck": "tsc",
-        "deploy": "bun run build:cloudflare && bunx wrangler deploy"
+        "typecheck": "tsc"
     },
     "dependencies": {
         "@docusaurus/core": "^3.9.2",

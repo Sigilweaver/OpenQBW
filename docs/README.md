@@ -12,8 +12,9 @@ bun run dev          # http://localhost:25815/openqbw/docs/
 
 ## Build and deploy
 
-CI auto-deploys on push to `main`. For a local deploy:
+Cloudflare deploys automatically via the GitHub App on push to `main`.
+To verify the build locally:
 
 ```sh
-bun run deploy
+bun run build:cloudflare
 ```
