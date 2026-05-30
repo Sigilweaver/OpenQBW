@@ -44,7 +44,7 @@ jobs:
   publish-pypi:
     name: publish wheel to PyPI (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    needs: publish
+    needs: publish-crates
     environment: pypi
     permissions:
       id-token: write   # PyPI trusted publishing
