@@ -20,7 +20,10 @@ unsafe_code = "forbid"
 
 [workspace.dependencies]
 openqbw = { path = "crates/openqbw", version = "0.1.0" }
-opensqlany = { path = "../OpenSQLAnywhere/crates/opensqlany", version = "0.1.0" }
+opensqlany = "0.1.0"
+# Local cross-repo dev: add a `.cargo/config.toml` with
+#   [patch.crates-io]
+#   opensqlany = { path = "../OpenSQLAnywhere/crates/opensqlany" }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
