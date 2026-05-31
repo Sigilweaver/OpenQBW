@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/openqbw", "crates/openqbw-cli", "crates/openqbw-py"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.87"
 license = "Apache-2.0"
@@ -19,7 +19,7 @@ categories = ["parser-implementations", "command-line-utilities"]
 unsafe_code = "forbid"
 
 [workspace.dependencies]
-openqbw = { path = "crates/openqbw", version = "0.1.0" }
+openqbw = { path = "crates/openqbw", version = "0.1.1" }
 opensqlany = "0.1.0"
 # Local cross-repo dev: add a `.cargo/config.toml` with
 #   [patch.crates-io]
