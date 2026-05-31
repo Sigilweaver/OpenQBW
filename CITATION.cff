@@ -1,0 +1,37 @@
+cff-version: 1.2.0
+title: "OpenQBW: A pure-Rust reader for QuickBooks QBW backup files"
+message: >
+  If you use OpenQBW in your research, please cite it using the metadata
+  below. Citation is encouraged and appreciated but not legally required.
+type: software
+authors:
+  - family-names: Riley
+    given-names: Nathan
+    orcid: "https://orcid.org/0009-0004-1579-7312"
+    website: "https://github.com/Sigilweaver"
+repository-code: "https://github.com/Sigilweaver/OpenQBW"
+url: "https://sigilweaver.app"
+abstract: >
+  OpenQBW is a standalone, cross-platform reader for Intuit QuickBooks QBW
+  backup files, implemented in pure Rust. Python bindings built on PyO3
+  integrate with Polars, PyArrow, and Pandas, exposing the QBW page,
+  table, and record structures without requiring an Intuit runtime.
+license: "Apache-2.0"
+license-url: "https://github.com/Sigilweaver/OpenQBW/blob/main/LICENSE"
+date-released: "2026-05-31"
+version: "0.1.0"
+keywords:
+  - QBW
+  - QuickBooks
+  - Intuit
+  - file format
+  - parser
+  - Apache Arrow
+  - Rust
+  - Python
+# Zenodo DOI - filled in after first GitHub-triggered Zenodo release.
+# After Zenodo mints the concept DOI, uncomment and replace the value below:
+# identifiers:
+#   - type: doi
+#     value: "10.5281/zenodo.XXXXXXXX"
+#     description: "Concept DOI (all versions) - Zenodo"
