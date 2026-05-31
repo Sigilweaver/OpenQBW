@@ -1,6 +1,7 @@
 # OpenQBW
 
 [![CI](https://github.com/Sigilweaver/OpenQBW/actions/workflows/ci.yml/badge.svg)](https://github.com/Sigilweaver/OpenQBW/actions/workflows/ci.yml)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20470597.svg)](https://doi.org/10.5281/zenodo.20470597)
 [![crates.io](https://img.shields.io/crates/v/openqbw.svg)](https://crates.io/crates/openqbw)
 [![PyPI](https://img.shields.io/pypi/v/openqbw.svg)](https://pypi.org/project/openqbw/)
 [![docs.rs](https://img.shields.io/docsrs/openqbw)](https://docs.rs/openqbw)
