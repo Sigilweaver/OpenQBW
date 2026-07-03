@@ -11,7 +11,7 @@
 //!
 //! # Status
 //!
-//! Prototype quality. See `OpenQBW/re/NOTES.md` (entries C.40–C.43) for the
+//! Prototype quality. See `OpenQBW/re/NOTES.md` (entries C.40-C.43) for the
 //! reverse-engineered record layout and remaining gaps.
 
 #![forbid(unsafe_code)]

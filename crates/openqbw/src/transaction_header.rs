@@ -13,7 +13,7 @@
 //!
 //! ## Anchor
 //!
-//! `0E 00 10 <16 base62>` — the SA17 type-tagged string header for a
+//! `0E 00 10 <16 base62>` - the SA17 type-tagged string header for a
 //! 16-byte ASCII field.
 //!
 //! Header pages are selected via [`PageAttribution`] by suffix-matching
@@ -34,7 +34,7 @@ const HEADER_SUFFIX: &str = "_header";
 /// A minimal transaction-header record.
 #[derive(Debug, Clone)]
 pub struct TransactionHeader {
-    /// Row QB-ID (16 base62 chars) — primary key of the transaction.
+    /// Row QB-ID (16 base62 chars) - primary key of the transaction.
     pub qb_id: String,
     /// Owning `SYSTABLE` name (e.g. `abmc_invoice_header`).
     pub source_table: String,

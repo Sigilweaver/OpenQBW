@@ -17,8 +17,8 @@
 //! metadata; see §C.33. We extract three fields:
 //!
 //! * `col_count` at trailer offset +6  (1 byte)
-//! * `data_root_page` at +34  (u32 LE) — first/leftmost leaf of the table B-tree
-//! * `last_page` at +50  (u32 LE)      — rightmost leaf
+//! * `data_root_page` at +34  (u32 LE) - first/leftmost leaf of the table B-tree
+//! * `last_page` at +50  (u32 LE) - rightmost leaf
 //!
 //! Rows are scanned across every decoded `E`-type page of the QBW file. The
 //! same QB-specific AP-cipher recovery is used as for line-item extraction

@@ -38,15 +38,15 @@ pub enum LineItemError {
 /// Classification of the amount-type byte in a line item.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AmountType {
-    /// `0x00` — placeholder. The four bytes are not a cents value.
+    /// `0x00` - placeholder. The four bytes are not a cents value.
     None,
-    /// `0x01` — `[0x01][u24 LE cents]` (provisional encoding).
+    /// `0x01` - `[0x01][u24 LE cents]` (provisional encoding).
     OneByteOne,
-    /// `0x02` — `[0x02][u24 LE cents]`.
+    /// `0x02` - `[0x02][u24 LE cents]`.
     Standard,
-    /// `0x03` — deferred. Encoding not yet known; only `raw` is populated.
+    /// `0x03` - deferred. Encoding not yet known; only `raw` is populated.
     Deferred,
-    /// Any other byte — likely an anchor false-positive or unrecognised tag.
+    /// Any other byte - likely an anchor false-positive or unrecognised tag.
     Other(u8),
 }
 
@@ -104,7 +104,7 @@ pub struct LineItem {
     pub page_number: u64,
     /// Byte offset within the decoded page body where the anchor starts.
     pub page_offset: usize,
-    /// Item QB-ID — the line item's own identifier, when discovered.
+    /// Item QB-ID - the line item's own identifier, when discovered.
     pub item_qb_id: Option<String>,
     /// Amount-type classification.
     pub amount_type: AmountType,

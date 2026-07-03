@@ -50,7 +50,7 @@ Whole-file facts (corpus-wide, 112/112 files):
 
 Page 0 is the only page that contains extensive plaintext structure.
 Pages 1..N are high-entropy (encrypted payload) but **every** page
-(including encrypted ones) ends with a 4-byte integrity footer — see
+(including encrypted ones) ends with a 4-byte integrity footer - see
 §2.2.
 
 ### 2.2 Universal per-page CRC-32 footer
@@ -71,8 +71,8 @@ page integrity **without** knowing the encryption key. See [C.5](https://github.
 
 ### 2.2a Universal 12-byte page trailer (C.12)
 
-The 12 bytes immediately before the CRC-32 footer — offsets
-`0xFF0..0xFFB` — have a fixed layout, proven by scanning all
+The 12 bytes immediately before the CRC-32 footer - offsets
+`0xFF0..0xFFB` - have a fixed layout, proven by scanning all
 456 409 non-zero pages across 112 files with **zero invariant
 failures**:
 
@@ -110,8 +110,8 @@ page integrity+typing protocol without touching page contents. See
 
 Each 4 KiB page is physically 8 sectors of 512 bytes. For every
 sector, either every adjacent byte-difference is a single constant
-`step` (mod 256) — in which case the sector is a **pure arithmetic-
-progression fill** carrying no information — or the sector carries
+`step` (mod 256) - in which case the sector is a **pure arithmetic-
+progression fill** carrying no information - or the sector carries
 real data. The choice is deterministic by page type:
 
 | page type | sectors 1..6 pure-fill % | real data lives in |
@@ -120,7 +120,7 @@ real data. The choice is deterministic by page type:
 | `'H'` header  | **100.0 %**         | sector 0 and sector 7 only |
 | `'M'` map     | **94..100 %**       | sector 0 and sector 7 only |
 | `'I'` index   | sectors 0..4,6: 0 %, sector 5: 85.7 % | sectors 0..4, 6, 7 |
-| `'A'` alloc   | 46..60 %            | sparsely — bitmap overlays |
+| `'A'` alloc   | 46..60 %            | sparsely - bitmap overlays |
 | `'E'` extent  | 5..6 %              | nearly all 4080 body bytes |
 | `'@'` boot    | ~25..75 % (mixed)   | bootstrap pages 4..7 |
 
@@ -132,7 +132,7 @@ Consequences for a parser:
     last 512 B of the page (≈1008 B of payload, net of the trailer)
     need to be parsed. The middle 3 KiB is fill.
 2.  The fill is a deterministic function of `(page_number,
-    sector_index)` — it is independent of the individual file —
+    sector_index)` - it is independent of the individual file - 
     which is what makes ~14 % of pages byte-identical between
     unrelated files (§4.1) and rules out any per-file keying.
 3.  The first byte of consecutive pure-fill sectors within a page
@@ -177,7 +177,7 @@ identifiers:
 ...0b sp_addlogin 01 50 03 ...
 ```
 
-and a row-slot directory counting down from `0x0fca` to `0x01c2` —
+and a row-slot directory counting down from `0x0fca` to `0x01c2` - 
 the canonical SA **page → slot → record** layout. That is direct
 evidence the payload is a genuine SAP SQL Anywhere 17.0.4 database.
 
@@ -194,7 +194,7 @@ sector-fingerprint string
 "2182 SAP SE, Copyright (c)2015 17.0.4."
 ```
 
-…which pins the embedded engine to **SAP SQL Anywhere 17.0.4 build
+...which pins the embedded engine to **SAP SQL Anywhere 17.0.4 build
 2182** (2015 release). The substring `"17.0.4.2182 SAP SE, Copyright
 (c)2015"` is present in page 0 of 112/112 files. See [C.6](https://github.com/Sigilweaver/OpenQBW/blob/main/re/NOTES.md#c6--sap-sql-anywhere-1704-build-2182-fingerprint--2026-04-19).
 
@@ -202,7 +202,7 @@ sector-fingerprint string
 
 The first 64 bytes of every `.QBW` are a fixed-layout header. Byte
 roles were determined by the conservation map below (`.` = byte is
-identical across all 112 files, `f` = 2–4 distinct values (flag),
+identical across all 112 files, `f` = 2-4 distinct values (flag),
 `V` = high-cardinality variable):
 
 ```
@@ -213,7 +213,7 @@ identical across all 112 files, `f` = 2–4 distinct values (flag),
 0x30   .  .  .  .  .  .  .  .  .  .  .  .  .  .  .  .
 ```
 
-### 3.1 Superblock header (offsets 0x00 – 0x2F)
+### 3.1 Superblock header (offsets 0x00 - 0x2F)
 
 | Offset | Size | Type     | Name                  | Notes |
 | -----: | ---: | -------- | --------------------- | ----- |
@@ -246,36 +246,36 @@ metadata* and the hint counts the data pages after them.
 
 _Validate_ this once we have an explicit page-usage bitmap.
 
-### 3.2a  Middle zero band (0x040 – 0x162)
+### 3.2a  Middle zero band (0x040 - 0x162)
 
 Largely zero with a few file-specific bytes around offsets `0x06C`,
 `0x096`, `0x0A0`, `0x0B8`, `0x0C8`. Not yet decoded.
 
-### 3.2b  Secondary header block (0x2BC – 0x2E4)
+### 3.2b  Secondary header block (0x2BC - 0x2E4)
 
 A second dense structure block, ~40 bytes long, containing two
 repeated 8-byte values (e.g. `31 9C 41 3F 90 92 B4 00` appears twice
 per file) and what looks like a UUID
-(`58 E1 D7 49 46 AD 44 6B A0 5A 9C 8B C4 5C EB C5` — version nibble
+(`58 E1 D7 49 46 AD 44 6B A0 5A 9C 8B C4 5C EB C5` - version nibble
 `0x4` → UUIDv4). Function unknown. Candidates: LSN pair + instance
 UUID.
 
-### 3.3 Plaintext collation / codepage block (≈ offsets 0x162 – 0x1FF)
+### 3.3 Plaintext collation / codepage block (≈ offsets 0x162 - 0x1FF)
 
 Near the middle of the 4 KiB superblock there is a plaintext region
 that contains the SAP SQL Anywhere collation names:
 
 ```
-0x0162  57 02 00 00 31 32 35 32 4c 41 54 49 4e 31 00 …    |W...1252LATIN1..|
-0x01B8  77 69 6e 64 6f 77 73 2d 31 32 35 32 00 …           |windows-1252..|
-0x01D4  55 43 41 00 …                                      |UCA..|
-0x01FC  55 54 46 2d …                                      |UTF-|  (probably UTF-8)
+0x0162  57 02 00 00 31 32 35 32 4c 41 54 49 4e 31 00 ...    |W...1252LATIN1..|
+0x01B8  77 69 6e 64 6f 77 73 2d 31 32 35 32 00 ...           |windows-1252..|
+0x01D4  55 43 41 00 ...                                      |UCA..|
+0x01FC  55 54 46 2d ...                                      |UTF-|  (probably UTF-8)
 ```
 
-- `1252LATIN1` — default / CHAR collation.
-- `windows-1252` — CHAR codepage label.
-- `UCA` — Unicode Collation Algorithm (alternate / NCHAR collation).
-- `UTF-8` (truncated in our window) — NCHAR codepage label.
+- `1252LATIN1` - default / CHAR collation.
+- `windows-1252` - CHAR codepage label.
+- `UCA` - Unicode Collation Algorithm (alternate / NCHAR collation).
+- `UTF-8` (truncated in our window) - NCHAR codepage label.
 
 These four strings, in this order, are the SAP SQL Anywhere "language
 / collation" record written verbatim into the ASA database header.
@@ -283,7 +283,7 @@ Their presence in every `.QBW` at the same position is the strongest
 single piece of evidence that `.QBW` payload is an obfuscated SQL
 Anywhere database image.
 
-### 3.4 Page-0 copyright-fingerprint region (0x400 – 0xFFC)
+### 3.4 Page-0 copyright-fingerprint region (0x400 - 0xFFC)
 
 Offsets `0x400..0xFFC` (3 068 bytes) are a single deterministic
 pattern: the 38-byte string `"2182 SAP SE, Copyright (c)2015 17.0.4."`
@@ -293,7 +293,7 @@ repeated as a rolling cycle. The byte at the very start of each
 string the sector starts at. Last four bytes (0x0FFC..0x1000) are the
 CRC-32 footer (§2.2).
 
-## 4. Page 1 … N — "encrypted" payload
+## 4. Page 1 ... N - "encrypted" payload
 
 Every page after page 0 observed so far is high-entropy (Shannon
 entropy near 8 bit/byte) in isolation.
@@ -332,7 +332,7 @@ Across the first 100 pages of that file the best-fit `(S, C)` pair
 covers up to **~13 %** of each page's bytes in tight runs. Candidate
 explanations (untested):
 
-- SAP SQL Anywhere's "free sector" / "unused slot" fill pattern —
+- SAP SQL Anywhere's "free sector" / "unused slot" fill pattern - 
   an on-disk marker pattern analogous to the page-0 copyright
   fingerprint, but numeric.
 - B-tree slot-offset arrays naturally forming arithmetic sequences
@@ -350,7 +350,7 @@ refutation/confirmation is the next milestone.
   layout (type, size, LSN, prev/next pointers).
 - Decode the SA `SYSTABLE` catalog root pointer, which in SA is at a
   known well-known offset in the superblock (candidate offsets 0x20,
-  0x24 of our page 0 — both vary per file).
+  0x24 of our page 0 - both vary per file).
 - Locate `SYSCOLUMN` / `SYSUSER` / `SYSDOMAIN` to validate that we
   are reading real SA structures.
 
@@ -364,21 +364,21 @@ tag immediately before the `table_name` column:
 <table_id u32_LE> 00 00 00 00  32-bit id, zero-padded to 8 bytes
 b1 0d 19 0d 00 00 00 00        fixed record tag
 <name_len u8> <name ASCII>
-…                              trailer (see below)
+...                              trailer (see below)
 ```
 
 The trailer immediately after the name contains monotone sequences
 of table-local fields. On consecutive rows of the SA system schema
 the `u32_LE` at offset +21 past the name increments by one per
 table, matching the SA `object_id` space; the `u16_LE` at offset +6
-(`4e 3c`, `4e 3e`, `4e 40`, `4e 42` …) also moves monotonically.
+(`4e 3c`, `4e 3e`, `4e 40`, `4e 42` ...) also moves monotonically.
 The `first_page` / `primary_root` page pointers defined by the SA17
 SYSTABLE schema have **not yet** been identified in the trailer; the
 exact variable-field layout is still open.
 
 Rows smaller than the SYSTABLE header padding, non-SYSTABLE tables,
-and rows in other system tables (SYSCOLUMN, SYSINDEX, …) have not
-been decoded yet — their record tags may differ.
+and rows in other system tables (SYSCOLUMN, SYSINDEX, ...) have not
+been decoded yet - their record tags may differ.
 
 ## 6. Slotted catalog pages
 
@@ -433,15 +433,15 @@ Evidence:
    byte-identical schema templates. Pages 0..200 are shipped
    identically with every new company file in the cluster. (C.10.)
 3. **Block analysis.** The most common 16-byte block on disk is
-   `00…00` (540 occurrences across 20 random files × 50 pages).
+   `00...00` (540 occurrences across 20 random files × 50 pages).
    The second-most-common blocks are literal ASCII fragments of
    the SAP copyright string. Any deterministic keyed encryption
-   (AES-ECB, XOR-with-fixed-keystream, …) would destroy this
+   (AES-ECB, XOR-with-fixed-keystream, ...) would destroy this
    signature. (C.11.)
 4. **Plaintext recovery.** Subtracting the per-sector AP fill from
    page 11 of Rock Castle reveals ASCII strings `sp_columns`,
    `sp_password`, `sp_addmessage`, `sp_addlogin` and a monotonic-
-   decreasing u16 slot directory — real SA catalog data. (C.14.)
+   decreasing u16 slot directory - real SA catalog data. (C.14.)
 
 The on-disk bytes of the payload are the logical SAP SQL Anywhere 17
 pages, obfuscated by an additive per-sector arithmetic progression
@@ -468,18 +468,18 @@ distribution + flavour:
 
 | files | hash prefix | composition |
 |------:|-------------|-------------|
-|    55 | `a68289bc…` | 11 files each from five QB distributions (2018, 2020, 2021, 2022, …) |
-|    24 | `8fc7be19…` | 4–5 files each from the same five distributions |
-|    20 | `a536c856…` | 4 files each from the same five distributions |
-|     8 | `1b4a8402…` | `Mastering QuickBooks for Contractors` only |
-|     3 | `ef33a71f…` | `Mastering QuickBooks for Contractors` only |
-|     2 | `298853cb…` | `UserBooks2018E-2` only |
+|    55 | `a68289bc...` | 11 files each from five QB distributions (2018, 2020, 2021, 2022, ...) |
+|    24 | `8fc7be19...` | 4-5 files each from the same five distributions |
+|    20 | `a536c856...` | 4 files each from the same five distributions |
+|     8 | `1b4a8402...` | `Mastering QuickBooks for Contractors` only |
+|     3 | `ef33a71f...` | `Mastering QuickBooks for Contractors` only |
+|     2 | `298853cb...` | `UserBooks2018E-2` only |
 
 Within each cluster, page 3 is **byte-identical**, as are many other
 pages in the 0..200 range. This is unmistakably a shipped
 schema/template image: every new company file is seeded from one of a
 small set of fresh SA databases that already contain the QuickBooks
-system catalog (SYSTABLE, indexes, stored procedures, …) and then the
+system catalog (SYSTABLE, indexes, stored procedures, ...) and then the
 user's data is written on top.
 
 Consequences for the parser:
@@ -494,50 +494,50 @@ Reproduce with `re/template_clusters.py`.
 
 ## 9. Change log
 
-- **2026-04-19 · C.1–C.4** — Initial specification: corpus survey,
+- **2026-04-19 · C.1-C.4** - Initial specification: corpus survey,
   4 KiB page size, `0xDA7ABA5E` magic, version triple `{3, 201, 12}`,
   plaintext collation block, conservation map of the first 64 bytes
   of the superblock.
-- **2026-04-19 · C.5–C.7** — Universal per-page CRC-32 footer
+- **2026-04-19 · C.5-C.7** - Universal per-page CRC-32 footer
   (456 521 / 456 521 pages pass). Engine fingerprinted as SAP SQL
   Anywhere 17.0.4 build 2182 via the rolling copyright string at
   page-0 offsets 0x400..0xFFC. Secondary page-0 structure block at
   0x2BC identified.
-- **2026-04-19 · C.8–C.9** — Pairwise file comparison shows the
+- **2026-04-19 · C.8-C.9** - Pairwise file comparison shows the
   per-(page, offset) ciphertext is **file-independent** (14 % of
   pages byte-identical across unrelated files; XOR residue has
   entropy 0.25 bit/byte). Arithmetic-progression residue of the
   form `byte[i] = (S·i + C) mod 256` observed in "empty" data
   pages. Working hypothesis: pages 1..N are plain SAP SQL Anywhere
   17 pages with no encryption layer.
-- **2026-04-19 · C.10** — Hashing page 3 of every file partitions the
+- **2026-04-19 · C.10** - Hashing page 3 of every file partitions the
   corpus into exactly **6 byte-identical template clusters** aligned
   with QB distribution/flavour. Proves the "system" pages are a
   shipped schema image seeded at company-file creation, not
   per-file-keyed ciphertext. See §8a.
-- **2026-04-19 · C.11** — 16-byte block analysis across 20 × 50 pages
+- **2026-04-19 · C.11** - 16-byte block analysis across 20 × 50 pages
   finds the most-frequent block on disk is all-zeros and the next
   most-frequent are literal ASCII fragments of the SAP copyright
   string. **Definitively no encryption layer**; §7 rewritten.
-- **2026-04-19 · C.12** — Universal 12-byte page trailer at
+- **2026-04-19 · C.12** - Universal 12-byte page trailer at
   `0xFF0..0xFFB` (just before the CRC): `page_type` byte at 0xFF2
   ('E'/'A'/'M'/'H'/'C'/'@'/'I'/'G'), two reserved-zero regions, and
   per-type metadata bytes. Zero invariant failures across 456 409
   pages / 112 files. See §2.2a.
-- **2026-04-19 · C.13** — Pages decompose into 8 physical 512-byte
+- **2026-04-19 · C.13** - Pages decompose into 8 physical 512-byte
   sectors. For `'C'` / `'H'` / `'M'` pages, the middle 6 sectors
   (3 KiB) are pure arithmetic-progression fill with no information;
   real content lives only in sectors 0 and 7 (~1 KiB). The fill is
-  a function of `(page_number, sector_index)` — file-independent —
+  a function of `(page_number, sector_index)` - file-independent - 
   which is consistent with C.8's pairwise-XOR observations. See
   §2.2b.
-- **2026-04-19 · C.14** — The AP fill is an **additive keystream**:
+- **2026-04-19 · C.14** - The AP fill is an **additive keystream**:
   `stored[i] = (base + i·step + plaintext[i]) mod 256`. Subtracting
-  the per-sector AP recovers SAP SQL Anywhere plaintext — ASCII
+  the per-sector AP recovers SAP SQL Anywhere plaintext - ASCII
   procedure names (`sp_columns`, `sp_password`, `sp_addmessage`,
   `sp_addlogin`) and a monotonic u16 slot directory on page 11 of
   Rock Castle. §7 rewritten; §2.2c added.
-- **2026-04-19 · C.15** — Bulk plaintext extraction. Deobfuscating
+- **2026-04-19 · C.15** - Bulk plaintext extraction. Deobfuscating
   the first 500 type-`E` pages of Rock Castle and filtering for
   printable ASCII runs ≥ 6 chars yields **9 503 unique strings**,
   including the full SAP SQL Anywhere system catalog (`SYSCOLUMN`,
@@ -548,16 +548,16 @@ Reproduce with `re/template_clusters.py`.
   `emp_Pay_Item_Id_Num`). This corroborates C.14 at corpus scale
   and confirms the payload is a genuine SA 17 database with an
   Intuit schema overlaid. Tool: `re/strings_plain.py`.
-- **2026-04-19 · C.16** — Catalog + UI pages located. On Rock
+- **2026-04-19 · C.16** - Catalog + UI pages located. On Rock
   Castle, page 2 (type `A`) is the SA **index catalog** (ISYS*
   names); page 340 (type `E`) holds the SA **system-table list**
   (SYSTABLE, SYSCOLUMN, SYSCATALOG, ...); pages 1328 / 1329 / 1337
-  carry QuickBooks **UI strings** — the Home-screen menu for
+  carry QuickBooks **UI strings** - the Home-screen menu for
   Company Center, Customer Center, Create Invoices, Pay Bills,
   Chart of Accounts etc., with references to `qbwin32.dll` and
   `qbw:centers?...` URLs. Row-data pages for QB entities begin at
   pn ≈ 1289. Tool: `re/find_string.py`.
-- **2026-04-19 · C.17** — Slotted-page directories parsed.
+- **2026-04-19 · C.17** - Slotted-page directories parsed.
   `re/page_layout.py` now locates the descending u16 row-offset array
   on deobfuscated SAP catalog pages even when the array is odd-aligned
   and preceded by a zero sentinel. Verified on Rock Castle:
@@ -565,15 +565,15 @@ Reproduce with `re/template_clusters.py`.
   340 (`E`) has 44 slots with 2 deleted entries. The prelude bytes
   immediately before the array contain the minimum row offset and the
   slot count, but other fields remain unidentified.
-- **2026-04-19 · C.18** — SYSTABLE row tag identified and catalog
+- **2026-04-19 · C.18** - SYSTABLE row tag identified and catalog
   scanned. `re/systable_scan.py` extracts `(table_id, name)` pairs
   from every deobfuscated `E` page matching the invariant tag
   `b1 0d 19 0d 00 00 00 00` preceded by `05 00 00 00` and the row
   `table_id u32_LE`. On `B22_Sample.qbw` the scan recovers 114
-  unique tables spread across 10 pages — all SA system/diagnostic
+  unique tables spread across 10 pages - all SA system/diagnostic
   catalog, no QuickBooks user tables. On two other files in the
   corpus (`B22_Chapter 3`, `B22_Chapter 5`) the tag appears on zero
   pages because `fill_overlay.recover_base` misfires on data-dense
   sectors. Page-walking to QB user tables is blocked on C.19.
   `fill_overlay.recover_base` also rewritten from O(256·n) to O(n)
-  via a residue histogram — ~40× speed-up on full-corpus scans.
+  via a residue histogram - ~40× speed-up on full-corpus scans.

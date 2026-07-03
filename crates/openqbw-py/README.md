@@ -44,7 +44,7 @@ for h in r.transactions()[:3]:
 - `path`, `page_count`, `file_size`
 
 `Reader` methods (each returns a list of dicts):
-- `tables()` — SYSTABLE catalog rows
-- `indexes()` — SYSINDEX entries
-- `line_items()` — invoice line items, attributed to source tables
-- `transactions()` — transaction headers
+- `tables()` - SYSTABLE catalog rows
+- `indexes()` - SYSINDEX entries
+- `line_items()` - invoice line items, attributed to source tables
+- `transactions()` - transaction headers

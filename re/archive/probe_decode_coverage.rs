@@ -73,9 +73,9 @@ fn try_parse(pn: u64, plain: &[u8]) -> bool {
 ///
 /// Encrypted/random data is uniformly distributed (~0.4% of any specific
 /// byte value). Decoded SA17 plaintext exhibits one of:
-///   * many zero bytes (length fields, padding, NULLs) — `zeros / 4080 >= 5%`
+///   * many zero bytes (length fields, padding, NULLs) - `zeros / 4080 >= 5%`
 ///   * a dominant low-value byte (e.g. 0x10 for some E-pages where the
-///     ciphertext step happens to make the modal plaintext byte non-zero) —
+///     ciphertext step happens to make the modal plaintext byte non-zero) - 
 ///     mode count >= 20% AND mode byte < 0x40.
 fn looks_decoded(plain: &[u8]) -> bool {
     let body = &plain[..0xFF0];
