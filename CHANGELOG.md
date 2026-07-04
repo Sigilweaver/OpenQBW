@@ -6,6 +6,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-07-04
+
+### Changed
+
+- Release workflow now builds and publishes a source distribution
+  (sdist) to PyPI alongside the wheels, enabling source-based
+  installs and conda-forge packaging.
+
 ## [0.1.1] - 2026-05-31
 
 ### Added
