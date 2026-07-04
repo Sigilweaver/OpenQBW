@@ -6,6 +6,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-07-04
+
+### Fixed
+
+- Bundle the `LICENSE` file into the sdist so source-based installs
+  and conda-forge packaging carry the license text.
+
 ## [0.1.2] - 2026-07-04
 
 ### Changed
