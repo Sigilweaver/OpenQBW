@@ -77,7 +77,7 @@ const config: Config = {
                     items: [
                         { label: 'OpenQBW', href: 'https://sigilweaver.app/openqbw/docs/' },
                         { label: 'OpenSQLAnywhere', href: 'https://sigilweaver.app/opensqlanywhere/docs/' },
-                        { label: 'OpenProteo', href: 'https://sigilweaver.app/openproteo/docs/' },
+                        { label: 'OpenMassSpec', href: 'https://sigilweaver.app/openmassspec/docs/' },
                         { label: 'All projects', href: 'https://sigilweaver.app/docs/' },
                     ],
                 },
