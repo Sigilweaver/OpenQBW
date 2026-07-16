@@ -21,6 +21,7 @@ const sidebars: SidebarsConfig = {
                 'use-cases',
                 'migration-guide',
                 'cli',
+                'python-api',
             ],
         },
         {
