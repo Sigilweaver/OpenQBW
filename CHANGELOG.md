@@ -6,6 +6,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Docs: Python API reference page (`python-api`) covering `openqbw.open`,
+  `Reader`, and its `tables()` / `indexes()` / `line_items()` /
+  `transactions()` methods, registered in the sidebar. Fixes #1. (@Nabejo)
+
 ## [0.1.4] - 2026-07-06
 
 ### Changed
