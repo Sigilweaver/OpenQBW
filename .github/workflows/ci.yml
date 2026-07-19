@@ -96,7 +96,7 @@ jobs:
           maturin build --release --strip
 
       - name: Upload wheel
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: openqbw-wheel-${{ matrix.os }}
           path: OpenQBW/target/wheels/*.whl
