@@ -21,4 +21,4 @@ crate-type = ["cdylib"]
 [dependencies]
 openqbw_rs = { package = "openqbw", path = "../openqbw", version = "0.1.0" }
 opensqlany = { workspace = true }
-pyo3 = { version = "0.22", features = ["extension-module", "abi3-py39"] }
+pyo3 = { version = "0.29", features = ["extension-module", "abi3-py39"] }

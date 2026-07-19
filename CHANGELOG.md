@@ -12,6 +12,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Reader`, and its `tables()` / `indexes()` / `line_items()` /
   `transactions()` methods, registered in the sidebar. Fixes #1. (@Nabejo)
 
+### Changed
+
+- Upgraded `pyo3` from 0.22 to 0.29, clearing RUSTSEC-2025-0020 and
+  RUSTSEC-2026-0177; the `--ignore` workarounds in the audit workflow
+  are removed accordingly.
+
 ## [0.1.4] - 2026-07-06
 
 ### Changed

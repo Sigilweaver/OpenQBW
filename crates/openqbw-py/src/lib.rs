@@ -3,7 +3,7 @@
 //! Exposes a small read-only API for opening a QBW file and iterating
 //! over its catalog, line items, transaction headers, and indexes.
 
-#![allow(clippy::useless_conversion)] // pyo3 0.22 macro expansions trigger this on clippy 1.95
+#![allow(clippy::useless_conversion)] // pyo3 macro expansions can trigger this on newer clippy
 
 use openqbw_rs::{
     collect_unique as collect_unique_systable, collect_unique_sysindex,
@@ -59,7 +59,7 @@ impl Reader {
         let entries: Vec<SysTableEntry> = collect_unique_systable(&self.store, &self.model);
         let mut out = Vec::with_capacity(entries.len());
         for e in entries {
-            let d = PyDict::new_bound(py);
+            let d = PyDict::new(py);
             d.set_item("table_id", e.table_id)?;
             d.set_item("name", e.name)?;
             d.set_item("col_count", e.col_count)?;
@@ -76,7 +76,7 @@ impl Reader {
         let entries: Vec<SysIndexEntry> = collect_unique_sysindex(&self.store, &self.model);
         let mut out = Vec::with_capacity(entries.len());
         for e in entries {
-            let d = PyDict::new_bound(py);
+            let d = PyDict::new(py);
             d.set_item("name", e.name)?;
             d.set_item("table_id", e.table_id)?;
             d.set_item("root_page", e.root_page)?;
@@ -93,7 +93,7 @@ impl Reader {
         let iter = iter_lineitems_with_attribution(&self.store, &self.model, &self.attribution);
         let mut out = Vec::new();
         for li in iter {
-            let d = PyDict::new_bound(py);
+            let d = PyDict::new(py);
             let date = li.txn_date_days_since_unix();
             d.set_item("invoice_id", li.invoice_id)?;
             d.set_item("item_qb_id", li.item_qb_id)?;
@@ -114,7 +114,7 @@ impl Reader {
             iter_transaction_headers(&self.store, &self.model, &self.attribution).collect();
         let mut out = Vec::with_capacity(iter.len());
         for h in iter {
-            let d = PyDict::new_bound(py);
+            let d = PyDict::new(py);
             d.set_item("qb_id", &h.qb_id)?;
             d.set_item("source_table", &h.source_table)?;
             d.set_item("txn_type", h.txn_type().to_string())?;

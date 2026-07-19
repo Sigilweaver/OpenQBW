@@ -29,9 +29,4 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: taiki-e/install-action@cargo-audit
-      # Advisories tracked in Sigilweaver/OpenQBW#2; remove these --ignore flags once
-      # that upgrade lands.
-      - run: >
-          cargo audit
-          --ignore RUSTSEC-2025-0020
-          --ignore RUSTSEC-2026-0177
+      - run: cargo audit
