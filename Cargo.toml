@@ -27,4 +27,4 @@ opensqlany = "0.1.0"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
-thiserror = "1"
+thiserror = "2"
