@@ -278,10 +278,10 @@ mod tests {
 
     #[test]
     fn fixed_width_domains_recognized() {
-        for d in [b'N', b'F', b'I', b'D', b'T', b'B'] {
+        for d in *b"NFIDTB" {
             assert!(is_fixed_width_domain(d));
         }
-        for d in [b'Y', b'V', b'C', b'A', b'X'] {
+        for d in *b"YVCAX" {
             assert!(!is_fixed_width_domain(d));
         }
     }

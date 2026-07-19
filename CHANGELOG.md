@@ -18,6 +18,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   RUSTSEC-2026-0177; the `--ignore` workarounds in the audit workflow
   are removed accordingly.
 
+### Fixed
+
+- CI was red on `main`: a newer `clippy` (rust 1.97) added the
+  `byte_char_slices` lint, which fired on two pre-existing test-only
+  byte-array literals in `attribution_schema.rs`. Rewrote them as byte
+  string literals per clippy's own suggestion. Unrelated to the pyo3
+  bump above - this was already broken before it.
+
 ## [0.1.4] - 2026-07-06
 
 ### Changed
