@@ -26,5 +26,5 @@ opensqlany = "0.1.0"
 #   opensqlany = { path = "../OpenSQLAnywhere/crates/opensqlany" }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 thiserror = "2"
