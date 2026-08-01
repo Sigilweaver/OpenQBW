@@ -60,6 +60,33 @@ jobs:
         working-directory: OpenQBW
         run: cargo test --workspace --all-targets
 
+  msrv:
+    name: MSRV check (1.95)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout OpenQBW
+        uses: actions/checkout@v7
+        with:
+          path: OpenQBW
+
+      - name: Checkout OpenSQLAnywhere (sibling path dep)
+        uses: actions/checkout@v7
+        with:
+          repository: Sigilweaver/OpenSQLAnywhere
+          path: OpenSQLAnywhere
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: OpenQBW
+
+      - name: cargo check (MSRV)
+        working-directory: OpenQBW
+        run: cargo check --workspace --all-targets
+
   python-wheel:
     name: python wheel (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

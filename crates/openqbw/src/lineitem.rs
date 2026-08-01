@@ -203,12 +203,12 @@ impl<'a> LineItemIter<'a> {
             };
             let before = self.buffer.len();
             scan_page(&plain[..PAGE_DATA_END], pn, &mut self.buffer);
-            if let Some(attr) = self.attribution {
-                if let Some(entry) = attr.attribute(pn) {
-                    let name = entry.name.clone();
-                    for li in &mut self.buffer[before..] {
-                        li.source_table = Some(name.clone());
-                    }
+            if let Some(attr) = self.attribution
+                && let Some(entry) = attr.attribute(pn)
+            {
+                let name = entry.name.clone();
+                for li in &mut self.buffer[before..] {
+                    li.source_table = Some(name.clone());
                 }
             }
         }

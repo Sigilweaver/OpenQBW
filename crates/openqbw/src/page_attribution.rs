@@ -69,10 +69,11 @@ impl PageAttribution {
         // record a last_page that is smaller than data_root_page; in
         // those cases the bound is not a true upper limit and is
         // ignored).
-        if let (Some(last), Some(root)) = (entry.last_page, entry.data_root_page) {
-            if last >= root && (page_number as u32) > last {
-                return None;
-            }
+        if let (Some(last), Some(root)) = (entry.last_page, entry.data_root_page)
+            && last >= root
+            && (page_number as u32) > last
+        {
+            return None;
         }
         Some(entry)
     }
