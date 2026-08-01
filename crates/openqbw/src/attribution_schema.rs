@@ -133,10 +133,11 @@ impl SchemaAttribution {
             // Confidence gate: if SYSTABLE declares N columns but we
             // parsed fewer than half of them via SYSCOLUMN, skip rather
             // than emit a degenerate band no real page can satisfy.
-            if let Some(declared) = table.col_count {
-                if declared >= 2 && (cols.len() as u32) * 2 < declared as u32 {
-                    continue;
-                }
+            if let Some(declared) = table.col_count
+                && declared >= 2
+                && (cols.len() as u32) * 2 < declared as u32
+            {
+                continue;
             }
             let mut low: u32 = MIN_ROW_BODY_BYTES;
             let mut high: u32 = MIN_ROW_BODY_BYTES;
