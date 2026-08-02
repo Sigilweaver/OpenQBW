@@ -20,6 +20,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `SysIndexIter`, `SysTableIter`, `SysColumnIter`, `TransactionHeaderIter`,
+  and `bridge_owners_to_tables` validated the E-page bv oracle
+  (`oracle_bv_e_page`) with a `candidate[0] == 0` check that is always
+  true by construction, regardless of whether the guessed bv is correct.
+  Whenever the higher-confidence C.36 anchor didn't fire, a wrong guess
+  was silently accepted, corrupting catalog and header page decoding and
+  cascading into wrong table attribution, orphaned parents, and an
+  inflated invoice total on some files. All five call sites now go
+  through `recover_bv_any`, which validates with an actual zero-density
+  check instead. Fixes #15. Root cause identified and diagnosed by
+  @pete-green.
 - CI was red on `main`: a newer `clippy` (rust 1.97) added the
   `byte_char_slices` lint, which fired on two pre-existing test-only
   byte-array literals in `attribution_schema.rs`. Rewrote them as byte

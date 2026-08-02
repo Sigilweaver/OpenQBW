@@ -29,7 +29,7 @@ use std::iter::FusedIterator;
 
 use opensqlany::{ApModel, PageStore, PageType, Result as SaResult};
 
-use crate::bv_recovery::{deobfuscate_with_bv, oracle_bv_e_page, recover_bv_qb_data};
+use crate::bv_recovery::{deobfuscate_with_bv, recover_bv_any};
 
 const PAGE_DATA_END: usize = 0xFF0;
 const NAME_LEN_MIN: u8 = 4;
@@ -219,21 +219,13 @@ impl<'a> SysTableIter<'a> {
             }
             let raw = page.bytes();
             // For SYSTABLE catalog pages the QB-data anchor is typically
-            // absent; fall back to the E-page oracle (plain[0]=0x00). Final
-            // fallback is the generic AP model (which may be off by 1).
-            let plain = if let Some(bv) = recover_bv_qb_data(pn, raw) {
+            // absent; fall back to the E-page oracle (validated by
+            // zero-density, see `recover_bv_any`). Final fallback is the
+            // generic AP model (which may be off by 1).
+            let plain = if let Some(bv) = recover_bv_any(pn, raw) {
                 deobfuscate_with_bv(raw, pn, bv)
             } else {
-                let bv = oracle_bv_e_page(pn, raw);
-                let candidate = deobfuscate_with_bv(raw, pn, bv);
-                // Sanity: SA17 E-pages begin with a null byte. If the oracle
-                // decoded plain[0] is non-zero, the page is unusual; fall
-                // through to the generic model.
-                if candidate[0] == 0 {
-                    candidate
-                } else {
-                    self.model.deobfuscate_with_store(raw, pn, self.store)
-                }
+                self.model.deobfuscate_with_store(raw, pn, self.store)
             };
             let mut found = Vec::new();
             scan_page(&plain, pn, &mut found);

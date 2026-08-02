@@ -39,7 +39,7 @@ use std::iter::FusedIterator;
 
 use opensqlany::{ApModel, PageStore, PageType, Result as SaResult};
 
-use crate::bv_recovery::{deobfuscate_with_bv, oracle_bv_e_page, recover_bv_qb_data};
+use crate::bv_recovery::{deobfuscate_with_bv, recover_bv_any};
 use crate::page_attribution::PageAttribution;
 use crate::systable::SysTableEntry;
 
@@ -201,16 +201,10 @@ impl<'a> SysIndexIter<'a> {
                 continue;
             }
             let raw = page.bytes();
-            let plain = if let Some(bv) = recover_bv_qb_data(pn, raw) {
+            let plain = if let Some(bv) = recover_bv_any(pn, raw) {
                 deobfuscate_with_bv(raw, pn, bv)
             } else {
-                let bv = oracle_bv_e_page(pn, raw);
-                let candidate = deobfuscate_with_bv(raw, pn, bv);
-                if candidate[0] == 0 {
-                    candidate
-                } else {
-                    self.model.deobfuscate_with_store(raw, pn, self.store)
-                }
+                self.model.deobfuscate_with_store(raw, pn, self.store)
             };
             let mut found = Vec::new();
             scan_page(&plain, pn, &mut found);

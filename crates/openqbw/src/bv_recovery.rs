@@ -456,6 +456,65 @@ mod tests {
     }
 
     #[test]
+    fn oracle_e_page_out0_is_always_zero_regardless_of_correctness() {
+        // Root-cause regression for OpenQBW#15: `oracle_bv_e_page`'s guess
+        // decodes plaintext byte 0 to exactly zero *by construction*, for
+        // any raw page content whatsoever, including pages where the
+        // "plain[0] == 0" assumption the oracle relies on is false. A
+        // caller that validates the guess by checking only
+        // `candidate[0] == 0` is therefore checking a tautology, not the
+        // page: it can never reject a wrong guess.
+        let pn = 999u64;
+        let mut raw = [0u8; PAGE];
+        let mut x = 0xdeadbeefu32;
+        for b in raw.iter_mut() {
+            x = x.wrapping_mul(0x85ebca6b).wrapping_add(1);
+            *b = (x >> 24) as u8;
+        }
+        let bv = oracle_bv_e_page(pn, &raw);
+        let decoded = deobfuscate_with_bv(&raw, pn, bv);
+        assert_eq!(
+            decoded[0], 0,
+            "oracle bv decodes byte 0 to zero for arbitrary input, so candidate[0]==0 proves nothing"
+        );
+    }
+
+    #[test]
+    fn recover_bv_any_rejects_wrong_oracle_guess_instead_of_trusting_candidate0() {
+        // A page whose true bv is 0x5a and whose true plaintext is mostly
+        // zero (like `synth_page`) but has a *non-zero* byte at plain[0],
+        // which is exactly the case `oracle_bv_e_page` assumes cannot
+        // happen. The naive guard (`candidate[0] == 0`, removed by the
+        // OpenQBW#15 fix) would have accepted the oracle's wrong guess
+        // outright. The validated cascade must not: it should either fall
+        // through to the brute-force oracle and land on the true bv, or
+        // return None, anything but silently trusting the wrong guess.
+        let pn = 999u64;
+        let true_bv = 0x5au8;
+        let steps = [0u8; SECTORS]; // zero step: pure additive obfuscation
+        let (mut raw, mut plain) = synth_page(pn, true_bv, steps);
+        plain[0] = 0x07; // violates the oracle's plain[0]==0 assumption
+        let p16 = (pn % 16) as u8;
+        let bias = p16 / 2 * 4;
+        let base0 = true_bv.wrapping_add(pn as u8).wrapping_sub(bias);
+        raw[0] = plain[0].wrapping_add(base0);
+
+        let oracle_guess = oracle_bv_e_page(pn, &raw);
+        assert_ne!(
+            oracle_guess, true_bv,
+            "test setup: the oracle guess must actually be wrong here"
+        );
+        let candidate = deobfuscate_with_bv(&raw, pn, oracle_guess);
+        assert_eq!(candidate[0], 0, "the tautology still holds for this page");
+
+        assert_eq!(
+            recover_bv_any(pn, &raw),
+            Some(true_bv),
+            "the validated cascade should fall through past the wrong oracle guess to brute-force and land on the true bv"
+        );
+    }
+
+    #[test]
     fn recover_bv_any_prefers_qb_anchor_when_present() {
         // Build a page with the QB anchor at a known offset.
         let pn = 77u64;

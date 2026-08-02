@@ -23,7 +23,7 @@ use std::iter::FusedIterator;
 
 use opensqlany::{ApModel, Page, PageStore, PageType, Result as SaResult, SlottedPage};
 
-use crate::bv_recovery::{deobfuscate_with_bv, oracle_bv_e_page, recover_bv_qb_data};
+use crate::bv_recovery::{deobfuscate_with_bv, recover_bv_any};
 use crate::page_attribution::PageAttribution;
 
 const PAGE_DATA_END: usize = 0xFF0;
@@ -240,18 +240,12 @@ impl<'a> TransactionHeaderIter<'a> {
             let raw = page.bytes();
             // Header pages may or may not carry the QB-data anchor.
             // Try the QB-specific recovery first, fall back to the
-            // E-page oracle (plain[0] == 0), and finally to the generic
-            // AP model.
-            let plain = if let Some(bv) = recover_bv_qb_data(pn, raw) {
+            // validated E-page oracle cascade, and finally to the
+            // generic AP model.
+            let plain = if let Some(bv) = recover_bv_any(pn, raw) {
                 deobfuscate_with_bv(raw, pn, bv)
             } else {
-                let bv = oracle_bv_e_page(pn, raw);
-                let candidate = deobfuscate_with_bv(raw, pn, bv);
-                if candidate[0] == 0 {
-                    candidate
-                } else {
-                    self.model.deobfuscate_with_store(raw, pn, self.store)
-                }
+                self.model.deobfuscate_with_store(raw, pn, self.store)
             };
             let before = self.buffer.len();
             // Prefer slotted-page row scan when a slot directory is
