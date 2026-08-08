@@ -23,6 +23,11 @@
 //! Rows are scanned across every decoded `E`-type page of the QBW file. The
 //! same QB-specific AP-cipher recovery is used as for line-item extraction
 //! (`recover_bv_qb_data` with fallback to the generic `ApModel`).
+//!
+//! `scan_page` anchors purely on the tag above and never assumes it marks
+//! the start of the underlying SA slotted-page row - which matters, because
+//! on at least one file it isn't: the row is length-prefixed and begins 34
+//! bytes before the tag (issue #16). See `SPECIFICATION.md` §5.
 
 use std::collections::BTreeMap;
 use std::iter::FusedIterator;

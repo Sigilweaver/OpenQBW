@@ -372,13 +372,28 @@ of table-local fields. On consecutive rows of the SA system schema
 the `u32_LE` at offset +21 past the name increments by one per
 table, matching the SA `object_id` space; the `u16_LE` at offset +6
 (`4e 3c`, `4e 3e`, `4e 40`, `4e 42` ...) also moves monotonically.
-The `first_page` / `primary_root` page pointers defined by the SA17
-SYSTABLE schema have **not yet** been identified in the trailer; the
-exact variable-field layout is still open.
+The trailer's `col_count` (+6), `data_root_page` (+34, first/leftmost
+leaf of the table's B-tree), and `last_page` (+50, rightmost leaf) are
+now identified and extracted (`crates/openqbw/src/systable.rs`); actual
+B-tree traversal from `data_root_page` is not implemented, so these
+still only drive the position-heuristic attribution in
+`page_attribution.rs`, not a real leaf walk. The rest of the trailer's
+variable-field layout past `last_page` is still open.
 
 Rows smaller than the SYSTABLE header padding, non-SYSTABLE tables,
 and rows in other system tables (SYSCOLUMN, SYSINDEX, ...) have not
 been decoded yet - their record tags may differ.
+
+Our reader anchors purely on the 21-byte tag (`05 00 00 00 <tid> 00
+00 00 00 <magic 4B> 00 00 00 00 <name_len>`) and scans forward from
+there; it never assumes the tag is the start of the underlying SA
+slotted-page row. That matters because it isn't: on a QuickBooks
+Enterprise 24.0 file, the row is length-prefixed and begins 34 bytes
+*before* the tag (openqbw#16, reported by @pete-green). A reader that
+assumed the tag was the row start would land mid-row. This doesn't
+affect the current tag-anchored scan, but matters for any future work
+that needs the row's true boundaries (e.g. computing row length from
+the slot array, per §6's open prelude-field questions).
 
 ## 6. Slotted catalog pages
 
@@ -450,8 +465,18 @@ alone. No secret key is required at any point.
 
 ## 8. Open questions
 
-1. What is `flags_06`? Why 0x09 vs 0x49 and nothing else?
-2. Is `version_a = 201` / `version_b = 12` an ASA schema version pair?
+1. ~~What is `flags_06`? Why 0x09 vs 0x49 and nothing else?~~ Partly
+   answered (openqbw#16, @pete-green): it's a bitfield over base `0x09`,
+   not an enum - `0x49 = 0x09|0x40` (bit 6), and a QuickBooks Enterprise
+   24.0 file adds `0x29 = 0x09|0x20` (bit 5). See
+   `opensqlany::Superblock::flags_06_variant_bits`. What any given bit
+   *means* is still unknown.
+2. ~~Is `version_a = 201` / `version_b = 12` an ASA schema version
+   pair?~~ Answered no (openqbw#16, @pete-green): the triple
+   (`version_a=201`, `version_b=12`, `format_major=3`) is identical
+   across every file tested from QuickBooks 2018 through Enterprise
+   2024, including different product editions - an engine-format
+   constant, not a version signal.
 3. Are pages 1..127 really reserved (§3.2), and what do they hold?
 4. Do `.TLG` files share the page-0 superblock, or do they use a
    completely different journal format?

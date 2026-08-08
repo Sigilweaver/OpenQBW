@@ -17,8 +17,9 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use openqbw::{
-    AmountType, ContentAttribution, CrossValidation, LineItem, PageAttribution, SysIndexEntry,
-    SysTableEntry, TransactionHeader, iter_lineitems_with_attribution, iter_transaction_headers,
+    AmountType, AttributionGap, ContentAttribution, CrossValidation, LineItem, PageAttribution,
+    SysIndexEntry, SysTableEntry, TransactionHeader, iter_lineitems_with_attribution,
+    iter_transaction_headers,
 };
 use opensqlany::{ApModel, PageStore};
 use rusqlite::{Connection, Transaction, params};
@@ -175,6 +176,26 @@ fn main() -> Result<()> {
     }
 }
 
+/// Print a diagnostic to stderr when page-to-table attribution has no
+/// usable entries, explaining why rather than leaving it to show up as
+/// silently-empty/unattributed output downstream.
+fn warn_on_attribution_gap(attribution: &PageAttribution) {
+    match attribution.gap() {
+        None => {}
+        Some(AttributionGap::NoCatalogRows) => {
+            eprintln!("warning: no SYSTABLE rows found; page-to-table attribution is unavailable");
+        }
+        Some(AttributionGap::AllRootsZeroed) => {
+            eprintln!(
+                "warning: SYSTABLE rows were found, but every data_root_page is zero, so \
+                 page-to-table attribution has no B-tree root to anchor on (seen on some \
+                 QuickBooks Enterprise 24.0 files - see openqbw#16). Attribution-dependent \
+                 output below will be empty; the table listing itself is unaffected."
+            );
+        }
+    }
+}
+
 fn run_export(input: PathBuf, output: PathBuf) -> Result<ExportStats> {
     if output.exists() {
         std::fs::remove_file(&output).with_context(|| format!("removing existing {:?}", output))?;
@@ -183,6 +204,7 @@ fn run_export(input: PathBuf, output: PathBuf) -> Result<ExportStats> {
     let store = PageStore::open(&input).with_context(|| format!("opening {:?}", input))?;
     let model = ApModel::learn(&store);
     let attribution = PageAttribution::build(&store, &model);
+    warn_on_attribution_gap(&attribution);
 
     let mut items: Vec<LineItem> =
         iter_lineitems_with_attribution(&store, &model, &attribution).collect();
@@ -214,6 +236,7 @@ fn run_catalog(input: PathBuf, user_only: bool) -> Result<()> {
 
     let mut entries: Vec<SysTableEntry> = openqbw::collect_unique(&store, &model);
     entries.sort_by_key(|e| e.table_id);
+    warn_on_attribution_gap(&PageAttribution::from_catalog(entries.clone()));
 
     let total = entries.len();
     let user: Vec<&SysTableEntry> = entries
@@ -902,6 +925,7 @@ fn collect_records(
     let store = PageStore::open(input).with_context(|| format!("opening {:?}", input))?;
     let model = ApModel::learn(&store);
     let attribution = PageAttribution::build(&store, &model);
+    warn_on_attribution_gap(&attribution);
     let mut items: Vec<LineItem> =
         iter_lineitems_with_attribution(&store, &model, &attribution).collect();
     items.sort_by_key(|li| (li.page_number, li.page_offset));

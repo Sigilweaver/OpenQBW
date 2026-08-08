@@ -52,7 +52,7 @@ pub use lineitem::{
 };
 pub use nullability::{NullsFlagBucket, histogram as nulls_flag_histogram};
 pub use opaque::{OPAQUE_ENTROPY_THRESHOLD, is_opaque_high_entropy};
-pub use page_attribution::PageAttribution;
+pub use page_attribution::{AttributionGap, PageAttribution};
 pub use syscolumn::{
     SYSCOLUMN_TAG, SysColumn, collect_unique as collect_unique_syscolumns, iter_syscolumns,
     scan_page as scan_syscolumn_page, schema_for,

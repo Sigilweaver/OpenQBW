@@ -27,23 +27,58 @@ use opensqlany::{ApModel, PageStore};
 
 use crate::systable::{SysTableEntry, collect_unique};
 
+/// Why [`PageAttribution`] has no usable entries, when it doesn't.
+///
+/// Distinguishing these matters: they call for different next steps, and
+/// look identical from `is_empty()` alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttributionGap {
+    /// No `SYSTABLE` rows were found in the store at all - the catalog scan
+    /// itself came up empty.
+    NoCatalogRows,
+    /// `SYSTABLE` rows were found, but every one has `data_root_page` absent
+    /// or zero, so there is no B-tree root to anchor the position heuristic
+    /// on. Observed on some QuickBooks Enterprise 24.0 files (openqbw#16):
+    /// the block/extent scan `collect_unique` already uses to find rows is
+    /// the only route to the data on these files, but per-page table
+    /// attribution isn't available without a real B-tree walk (not yet
+    /// implemented - see this module's doc comment).
+    AllRootsZeroed,
+}
+
 /// Resolves page numbers to the `SYSTABLE` entry that most likely owns them.
 #[derive(Debug, Clone)]
 pub struct PageAttribution {
     /// Entries sorted by `data_root_page` ascending. Only entries with a
     /// non-zero `data_root_page` are retained.
     by_root: Vec<SysTableEntry>,
+    gap: Option<AttributionGap>,
 }
 
 impl PageAttribution {
     /// Build an attribution map from a pre-collected, deduplicated catalog.
     pub fn from_catalog(catalog: Vec<SysTableEntry>) -> Self {
+        let total = catalog.len();
         let mut by_root: Vec<SysTableEntry> = catalog
             .into_iter()
             .filter(|e| matches!(e.data_root_page, Some(p) if p > 0))
             .collect();
+        let gap = if !by_root.is_empty() {
+            None
+        } else if total == 0 {
+            Some(AttributionGap::NoCatalogRows)
+        } else {
+            Some(AttributionGap::AllRootsZeroed)
+        };
         by_root.sort_by_key(|e| e.data_root_page.unwrap_or(0));
-        Self { by_root }
+        Self { by_root, gap }
+    }
+
+    /// Why attribution is unavailable, if it is. `None` whenever at least
+    /// one catalog entry has a usable `data_root_page` (the common case).
+    #[inline]
+    pub fn gap(&self) -> Option<AttributionGap> {
+        self.gap
     }
 
     /// Convenience: read SYSTABLE from `store`/`model` and build the map.
@@ -134,6 +169,26 @@ mod tests {
         let attr = PageAttribution::from_catalog(vec![]);
         assert!(attr.is_empty());
         assert!(attr.attribute(123).is_none());
+        assert_eq!(attr.gap(), Some(AttributionGap::NoCatalogRows));
+    }
+
+    #[test]
+    fn all_zero_roots_reports_distinct_gap() {
+        // Rows were found, but none carry a usable data_root_page - the
+        // situation reported against a QuickBooks Enterprise 24.0 file
+        // (openqbw#16), distinct from finding no rows at all.
+        let attr = PageAttribution::from_catalog(vec![
+            entry(1, "a", None, None),
+            entry(2, "b", Some(0), None),
+        ]);
+        assert!(attr.is_empty());
+        assert_eq!(attr.gap(), Some(AttributionGap::AllRootsZeroed));
+    }
+
+    #[test]
+    fn usable_roots_report_no_gap() {
+        let attr = PageAttribution::from_catalog(vec![entry(1, "a", Some(100), Some(200))]);
+        assert_eq!(attr.gap(), None);
     }
 
     #[test]

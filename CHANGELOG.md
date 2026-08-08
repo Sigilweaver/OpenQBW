@@ -11,6 +11,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Docs: Python API reference page (`python-api`) covering `openqbw.open`,
   `Reader`, and its `tables()` / `indexes()` / `line_items()` /
   `transactions()` methods, registered in the sidebar. Fixes #1. (@Nabejo)
+- `PageAttribution::gap()` and `AttributionGap`, distinguishing "no
+  SYSTABLE rows found" from "SYSTABLE rows found, but every
+  `data_root_page` is zero" - the latter observed on a QuickBooks
+  Enterprise 24.0 file, where it means there's no B-tree root to anchor
+  the position-heuristic attribution on (the block/extent scan
+  `collect_unique` uses to find rows is unaffected and is already the
+  only route to the data on these files). The CLI's `export`, `catalog`,
+  and `migrate --format=csv/iif` commands now print a diagnostic
+  explaining which case applies instead of leaving it to show up as
+  silently-empty attribution downstream. Partially addresses #16.
+  Reported by @pete-green.
+- `SPECIFICATION.md` §8: answered two of the file's long-standing open
+  questions from the same report - `flags_06` is a bitfield over base
+  `0x09` (not an enum of magic values; a QuickBooks Enterprise 24.0 file
+  adds a third value, `0x29 = 0x09|0x20`, fitting the same pattern as
+  the original `0x49 = 0x09|0x40`), and `version_a`/`version_b` are not
+  an ASA schema version pair - the triple is an invariant engine-format
+  constant across QuickBooks 2018 through Enterprise 2024. The bitfield
+  accessor itself (`Superblock::flags_06_variant_bits`) lives upstream
+  in `opensqlany` and will be available here once this repo picks up
+  its next release. §5 also gained a note on SYSTABLE row anchoring: on
+  the same file the row is length-prefixed and begins 34 bytes before
+  the tag our reader scans for, which doesn't affect the current
+  tag-anchored scan but matters for any future work needing the row's
+  true boundaries. Remainder of #16.
 
 ### Changed
 
