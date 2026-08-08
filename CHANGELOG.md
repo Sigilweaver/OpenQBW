@@ -36,6 +36,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the tag our reader scans for, which doesn't affect the current
   tag-anchored scan but matters for any future work needing the row's
   true boundaries. Remainder of #16.
+- `SPECIFICATION.md` §8b: preserved @pete-green's dead-ends writeup
+  from building an independent decoder against the same file (#17) -
+  the still-open multi-page `LONG VARBIT` chaining blocker (including
+  the unresolved multi-copy/version-selection problem), and four
+  methodology notes on validating a byte-level reader (a sector-linear
+  addressing bug that survives casual inspection, why ±1 shifted-window
+  controls don't discriminate on this format, an object-ID minimum-gap
+  self-check, and requiring ≥3 distinct values before trusting a
+  fixed-offset anchor). No code changes; recorded so the negative
+  results aren't lost. Fixes #17.
 
 ### Changed
 

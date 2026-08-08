@@ -517,6 +517,60 @@ Consequences for the parser:
 
 Reproduce with `re/template_clusters.py`.
 
+## 8b. Dead ends and methodology notes (independent Enterprise 24.0 decoder)
+
+@pete-green built an independent byte-level reader against a QuickBooks
+Enterprise 24.0 file, hit a real blocker, and wrote up what didn't work
+before stopping (#17). Recorded here so the negative results aren't
+lost and the blocker is characterised for whoever picks it up next.
+Clean-room, byte-level, single lawfully-owned file; several claims were
+scored against an external reference that isn't redistributable, so
+only the byte-derived structural claims are reproduced below (see #17
+for the full writeup, including what rests on that reference).
+
+**The open blocker: multi-page LONG VARBIT allocation and chaining.**
+A `LONG VARBIT` value longer than one page splits across pages with
+head flag `02`, continuation pages flagged `01`, trailer suffix `45
+00`, chunk sizes of 4,040 bytes (head) then 4,096 (continuations), and
+exactly one sector-7 hole per page transition. What's unresolved: page
+lists exist in more than one physical copy with *different* runs (one
+16,908-byte value had a copy headed `864638` then `864639-864642`, and
+a second copy headed `863915` then `864279-864282`), with no
+discovered rule for choosing between them - reassemble either copy and
+you can't tell if it's the current one. Sub-questions in the order
+they blocked progress: native head/continuation detection without a
+supplied page list; ordering and pointer-following across the chain;
+**copy/version selection**; sector-7 hole and trailer recovery. A
+reader that just accepts contiguous values ≤ 4096 bytes sidesteps this
+at the cost of large values being silently absent from its output.
+
+**Methodology notes, more transferable than the blocker itself:**
+
+- A row reader addressing with `(row + delta) % 512` can reproduce its
+  own output exactly and still be wrong in two directions on a
+  page-linear layout: rows straddling a 512-byte logical boundary
+  become structurally invisible, and some accepted rows are stitched
+  (head of one row spliced onto the body of another). It survived
+  undetected because the date field sits near the row's genuine head -
+  validating a row reader by checking a field near the start of the
+  row won't catch this class of bug.
+- Shifted-window controls (declare a gate valid if `row±1` emits zero
+  matches) don't discriminate on this format: `row+1` and `row-1` both
+  emitted tens of thousands of exact-identity matches, because a
+  one-step shift lands on a neighbouring row of the same parent, which
+  is contiguous by construction. `±32`/`±64`/`±137` were found to
+  actually discriminate; `±1`/`±2` are weak by construction and passing
+  them proves little.
+- Object identifiers on this file sit on a minimum-gap-3 lattice - two
+  distinct objects can't occupy positions 1 or 2 apart. Cheap to assert
+  as a self-check on any reader's output regardless of what else it
+  decodes; caught a mis-anchored population that otherwise looked like
+  valid output.
+- No fixed byte offset was found that resolves line-level amount /
+  quantity / rate values: apparent hits were duplicate-line or
+  constant-value coincidences. Require ≥ 3 *distinct* observed values
+  before trusting a fixed-offset anchor for a money field.
+
 ## 9. Change log
 
 - **2026-04-19 · C.1-C.4** - Initial specification: corpus survey,
