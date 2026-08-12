@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-08-12
+
 ### Added
 
 - Docs: Python API reference page (`python-api`) covering `openqbw.open`,
@@ -52,6 +54,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Upgraded `pyo3` from 0.22 to 0.29, clearing RUSTSEC-2025-0020 and
   RUSTSEC-2026-0177; the `--ignore` workarounds in the audit workflow
   are removed accordingly.
+- PyPI package now declares `keywords` (`quickbooks`, `qbw`,
+  `accounting`, `parser`) so the package is findable via PyPI search;
+  previously only the crates.io side had them.
 
 ### Fixed
 
@@ -71,14 +76,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   byte-array literals in `attribution_schema.rs`. Rewrote them as byte
   string literals per clippy's own suggestion. Unrelated to the pyo3
   bump above - this was already broken before it.
-
-## [0.1.4] - 2026-07-06
-
-### Changed
-
-- PyPI package now declares `keywords` (`quickbooks`, `qbw`,
-  `accounting`, `parser`) so the package is findable via PyPI search;
-  previously only the crates.io side had them.
 
 ## [0.1.3] - 2026-07-04
 
