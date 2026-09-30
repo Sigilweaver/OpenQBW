@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Schema gap diagnostics count distinct plausible column ordinals, preventing
+  duplicate names at the same position from underflowing or hiding gaps.
+- Equally supported back-reference layouts remain unresolved, allowing schema
+  recovery to use the independent `SYSOBJECT` scan instead of guessing.
+
 - `openqbw schema` could not recover the columns of most tables the
   `catalog` command lists. Owners were bridged to table names only by
   the `SYSOBJECT` name scan, which needs the table's name to appear a

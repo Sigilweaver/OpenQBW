@@ -30,7 +30,7 @@
 //! against [`crate::SysTableEntry::data_root_page`] was wrong: the two
 //! are independent integer namespaces (see `re/NOTES.md` C.52).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::iter::FusedIterator;
 
 use opensqlany::{ApModel, Page, PageStore, PageType, Result as SaResult, SlottedPage};
@@ -245,7 +245,13 @@ impl SchemaRecovery {
     /// still missing.
     pub fn missing_column_ids(&self) -> usize {
         match self.column_id_range() {
-            Some((first, last)) => (last - first) as usize + 1 - self.plausible_columns().count(),
+            Some((first, last)) => {
+                // Different recovered names can share an ordinal. Count each
+                // occupied position once, rather than subtracting row count.
+                let recovered_ids: BTreeSet<u32> =
+                    self.plausible_columns().map(|c| c.column_id).collect();
+                (last - first) as usize + 1 - recovered_ids.len()
+            }
             None => 0,
         }
     }
@@ -544,6 +550,24 @@ mod tests {
         let r = recovery_with_ids(&[1, 2, 5, 9]);
         assert_eq!(r.column_id_range(), Some((1, 9)));
         assert_eq!(r.missing_column_ids(), 5);
+        assert!(r.has_column_gaps());
+    }
+
+    #[test]
+    fn duplicate_ordinal_names_do_not_underflow_gap_count() {
+        let mut r = recovery_with_ids(&[1, 1]);
+        r.columns[1].name = "different_name".into();
+        assert_eq!(r.column_id_range(), Some((1, 1)));
+        assert_eq!(r.missing_column_ids(), 0);
+        assert!(!r.has_column_gaps());
+    }
+
+    #[test]
+    fn duplicate_ordinal_names_do_not_hide_a_missing_position() {
+        let mut r = recovery_with_ids(&[1, 1, 3]);
+        r.columns[1].name = "different_name".into();
+        assert_eq!(r.column_id_range(), Some((1, 3)));
+        assert_eq!(r.missing_column_ids(), 1);
         assert!(r.has_column_gaps());
     }
 

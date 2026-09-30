@@ -226,15 +226,17 @@ impl BackrefVotes {
             .unwrap_or(0)
     }
 
-    /// Distance that explains the most `(name, owner)` pairs. Ties go to
-    /// the smaller distance so the result is deterministic.
+    /// Distance that uniquely explains the most `(name, owner)` pairs.
+    /// Equally supported layouts are unresolved, allowing the caller to
+    /// fall back to the independent `SYSOBJECT` scan.
     pub fn best_distance(&self) -> Option<usize> {
-        let best = self
+        let best = self.votes.keys().copied().max_by_key(|d| self.score(*d))?;
+        let best_score = self.score(best);
+        let tied = self
             .votes
             .keys()
-            .copied()
-            .max_by_key(|d| (self.score(*d), std::cmp::Reverse(*d)))?;
-        (self.score(best) >= MIN_CALIBRATION_PAIRS).then_some(best)
+            .any(|&distance| distance != best && self.score(distance) == best_score);
+        (best_score >= MIN_CALIBRATION_PAIRS && !tied).then_some(best)
     }
 
     /// Build the owner -> name map for `distance`, resolving an owner
@@ -404,6 +406,87 @@ mod tests {
 
         assert_eq!(votes.best_distance(), Some(shift));
         assert_eq!(votes.bridge_at(shift).table_for(902), Some("t_c"));
+    }
+
+    #[test]
+    fn equally_supported_offsets_leave_sysobject_fallback_available() {
+        let mut plain = vec![0u8; 0x1000];
+        let rows = [
+            (200usize, "table_a"),
+            (400, "table_b"),
+            (600, "table_c"),
+            (800, "table_d"),
+        ];
+        let mut columns = Vec::new();
+        let mut tables = Vec::new();
+        for (i, (tag, name)) in rows.iter().enumerate() {
+            let owner = 900 + i as u32;
+            plant_row(
+                &mut plain,
+                *tag,
+                900 + ((i + 1) % 4) as u32,
+                100 + i as u32,
+                name,
+            );
+            // One plausible field at -30 conflicts with the intended -44
+            // layout. Both explain four distinct known-owner pairs.
+            plain[tag - 44..tag - 40].copy_from_slice(&owner.to_le_bytes());
+            columns.push(SysColumn {
+                name: format!("column_{i}"),
+                owner_object_id: owner,
+                column_id: 1,
+                nulls_flag: 0,
+                domain_char: b'N',
+                width: 4,
+                page_number: 0,
+                tag_offset: 0,
+            });
+            tables.push(SysTableEntry {
+                table_id: 100 + i as u32,
+                name: (*name).into(),
+                magic: [0; 4],
+                col_count: None,
+                data_root_page: None,
+                last_page: None,
+                page_number: 0,
+                row_offset: *tag,
+            });
+            // Independent SYSOBJECT-shaped records establish the correct
+            // mapping, without depending on either prefix layout.
+            let start = 1000 + i * 200;
+            plain[start..start + 4].copy_from_slice(&owner.to_le_bytes());
+            plain[start + 24] = name.len() as u8;
+            plain[start + 25..start + 25 + name.len()].copy_from_slice(name.as_bytes());
+        }
+        let owners = owner_set(&[900, 901, 902, 903]);
+        let mut votes = BackrefVotes::new();
+        votes.observe_page(&plain, &rows, &owners);
+        assert_eq!(votes.score(30), 4);
+        assert_eq!(votes.score(44), 4);
+        assert_eq!(votes.best_distance(), None);
+
+        // Encode a zero-step, bv=0 synthetic AP page, using page zero so
+        // each sector's base is its sector index. The trailer is plaintext.
+        plain[0xFF2] = b'E';
+        let mut raw = plain.clone();
+        for (offset, byte) in raw[..0xFF0].iter_mut().enumerate() {
+            *byte = byte.wrapping_add((offset / 512) as u8);
+        }
+        let store = PageStore::from_bytes(raw).unwrap();
+        let model = ApModel::default();
+        let mut bridge = bridge_owners_via_backref(&store, &model, &columns, &tables);
+        assert!(bridge.is_empty());
+        assert_eq!(bridge.backref_distance, None);
+        extend_with_sysobject(&mut bridge, &store, &model, &columns, &tables);
+        assert_eq!(bridge.from_backref, 0);
+        assert_eq!(bridge.from_sysobject, 4);
+        for (i, (_, name)) in rows.iter().enumerate() {
+            assert_eq!(bridge.table_for(900 + i as u32), Some(*name));
+            assert_eq!(
+                bridge.source_for(900 + i as u32),
+                Some(BridgeSource::SysObjectScan)
+            );
+        }
     }
 
     #[test]
