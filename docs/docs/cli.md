@@ -34,8 +34,21 @@ look at any file.
 $ openqbw schema mybooks.qbw abmc_invoice_lineitem
 ```
 
-Lists the columns for the named table, bridging SYSCOLUMN to
-SYSTABLE via the SYSOBJECT catalog.
+Lists the columns for the named table, bridging `SYSCOLUMN` to
+`SYSTABLE` via the table-id back-reference in the `SYSTABLE` row
+prefix (`SPECIFICATION.md` §5.1), and falling back to the `SYSOBJECT`
+catalog scan for owners that does not cover. The header line names the
+owner and the bridge that resolved it:
+
+```console
+table: abmc_invoice_header  columns: 46  (SYSCOLUMN owner 3073, via SYSTABLE back-reference)
+```
+
+Not every table's columns are recoverable yet. When the recovered
+`column_id`s have holes the command says so on stderr, and when no
+owner can be bridged to the table it reports which stage came up
+empty - catalog presence, `SYSCOLUMN` recovery, or the bridge -
+rather than a bare "not found".
 
 ### `indexes [--fk-only] [--summary-only]`
 

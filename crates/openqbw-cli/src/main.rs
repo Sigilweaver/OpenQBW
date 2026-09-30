@@ -72,8 +72,9 @@ enum Cmd {
         strict_attribution: bool,
     },
     /// Print the columns of a table. SYSCOLUMN.owner_object_id is
-    /// bridged to SYSTABLE.name via the SYSOBJECT catalog
-    /// (Phase 6, WP-6Z.2).
+    /// bridged to SYSTABLE.name via the table-id back-reference in the
+    /// SYSTABLE row prefix, falling back to the SYSOBJECT catalog scan
+    /// (Phase 6, WP-6Z.2 / WP-6Z.4).
     Schema {
         /// Input QBW file.
         input: PathBuf,
@@ -284,26 +285,84 @@ fn run_catalog(input: PathBuf, user_only: bool) -> Result<()> {
 fn run_schema(input: PathBuf, table: String) -> Result<()> {
     let store = PageStore::open(&input).with_context(|| format!("opening {:?}", input))?;
     let model = ApModel::learn(&store);
-    let cols = openqbw::schema_for(&store, &model, &table);
+    let found = openqbw::recover_schema(&store, &model, &table);
+    let cols = &found.columns;
     if cols.is_empty() {
-        anyhow::bail!(
-            "no schema found for table {:?} (table may be unknown or its SYSTABLE \
-             row lacks a recoverable data_root_page)",
-            table
+        anyhow::bail!("{}", schema_miss_report(&found));
+    }
+    let provenance = match (found.owner, found.source) {
+        (Some(owner), Some(source)) => {
+            format!("  (SYSCOLUMN owner {}, via {})", owner, source.label())
+        }
+        _ => String::new(),
+    };
+    println!("table: {}  columns: {}{}", table, cols.len(), provenance);
+    if found.has_column_gaps()
+        && let Some((first, last)) = found.column_id_range()
+    {
+        eprintln!(
+            "warning: {} of the {} column_ids in {}..={} have no recovered SYSCOLUMN row, \
+             so the listing below is incomplete (openqbw#19)",
+            found.missing_column_ids(),
+            (last - first) as usize + 1,
+            first,
+            last
         );
     }
-    println!("table: {}  columns: {}", table, cols.len());
+    if found.implausible_column_ids() > 0 {
+        eprintln!(
+            "warning: {} row(s) below carry an implausible column_id and are likely \
+             mis-parsed",
+            found.implausible_column_ids()
+        );
+    }
     println!(
         "{:>5}  {:<32}  {:>6}  {:>5}  {:>5}",
         "id", "name", "domain", "width", "nulls"
     );
-    for c in &cols {
+    for c in cols {
         println!(
             "{:>5}  {:<32}  {:>6}  {:>5}  {:>5}",
             c.column_id, c.name, c.domain_char as char, c.width, c.nulls_flag
         );
     }
     Ok(())
+}
+
+/// Explain a `schema` miss in terms of the stage that actually failed:
+/// the catalog lookup, `SYSCOLUMN` recovery, or the owner -> table
+/// bridge. A table can be listed by `catalog` and still have no
+/// recoverable schema, and saying which is the case is the whole point
+/// (openqbw#19).
+fn schema_miss_report(found: &openqbw::SchemaRecovery) -> String {
+    let mut out = format!("no columns recovered for table {:?}\n", found.table);
+    out.push_str(&match found.catalog_table_id {
+        Some(tid) => format!("  catalog:      listed in SYSTABLE (table_id {})\n", tid),
+        None => {
+            "  catalog:      no SYSTABLE row with this name - check `openqbw catalog`\n".to_string()
+        }
+    });
+    out.push_str(&format!(
+        "  SYSCOLUMN:    {} rows recovered, {} distinct owners\n",
+        found.syscolumn_rows, found.distinct_owners
+    ));
+    out.push_str(&match found.backref_distance {
+        Some(d) => format!(
+            "  owner bridge: {} tables ({} via SYSTABLE back-reference at -{}, \
+             {} via SYSOBJECT scan)\n",
+            found.bridged_tables, found.from_backref, d, found.from_sysobject
+        ),
+        None => format!(
+            "  owner bridge: {} tables ({} via SYSOBJECT scan; no SYSTABLE \
+             back-reference distance could be calibrated on this file)\n",
+            found.bridged_tables, found.from_sysobject
+        ),
+    });
+    out.push_str(
+        "  this table:   no SYSCOLUMN owner could be bridged to it, so its columns \
+         cannot be attributed yet",
+    );
+    out
 }
 
 fn run_fkgraph(input: PathBuf, resolved_only: bool) -> Result<()> {

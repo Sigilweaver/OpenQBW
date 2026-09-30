@@ -25,6 +25,7 @@ mod fkgraph;
 mod lineitem;
 mod nullability;
 mod opaque;
+mod owner_bridge;
 mod page_attribution;
 mod syscolumn;
 mod sysindex;
@@ -52,10 +53,14 @@ pub use lineitem::{
 };
 pub use nullability::{NullsFlagBucket, histogram as nulls_flag_histogram};
 pub use opaque::{OPAQUE_ENTROPY_THRESHOLD, is_opaque_high_entropy};
+pub use owner_bridge::{
+    BACKREF_MAX_DISTANCE, BACKREF_MIN_DISTANCE, BackrefVotes, BridgeSource,
+    DEFAULT_BACKREF_DISTANCE, OwnerBridge, bridge_owners_via_backref, extend_with_sysobject,
+};
 pub use page_attribution::{AttributionGap, PageAttribution};
 pub use syscolumn::{
-    SYSCOLUMN_TAG, SysColumn, collect_unique as collect_unique_syscolumns, iter_syscolumns,
-    scan_page as scan_syscolumn_page, schema_for,
+    SYSCOLUMN_TAG, SchemaRecovery, SysColumn, collect_unique as collect_unique_syscolumns,
+    iter_syscolumns, recover_schema, scan_page as scan_syscolumn_page, schema_for,
 };
 pub use sysindex::{
     AuditOutcome, CrossValidation, DISAGREE_SAMPLE_LIMIT, SYSINDEX_CREATOR, SysIndexEntry,

@@ -6,6 +6,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Schema gap diagnostics count distinct plausible column ordinals, preventing
+  duplicate names at the same position from underflowing or hiding gaps.
+- Equally supported back-reference layouts remain unresolved, allowing schema
+  recovery to use the independent `SYSOBJECT` scan instead of guessing.
+
+- `openqbw schema` could not recover the columns of most tables the
+  `catalog` command lists. Owners were bridged to table names only by
+  the `SYSOBJECT` name scan, which needs the table's name to appear a
+  second time in the file, so on the TLR 2021/2022 practice files it
+  reached 115-144 of ~650 names - `abmc_invoice_header`, whose name
+  appears exactly once, was not among them. `SYSTABLE` rows carry the
+  `SYSCOLUMN` owner id themselves, 30 bytes before the row tag, and
+  that back-reference is now the primary bridge: coverage goes to
+  401-420 names per file, and `openqbw schema <file> abmc_invoice_header`
+  returns its 46 recovered columns on both files from the report.
+  Fixes #19, reported by @Balaxxe.
+
+### Added
+
+- `openqbw::recover_schema` and `SchemaRecovery`, the diagnosing form of
+  `schema_for`: which bridge resolved the table, how many `SYSCOLUMN`
+  rows and owners the file yielded, and which `column_id`s inside the
+  recovered range are still missing.
+- `openqbw::owner_bridge`: `bridge_owners_via_backref`,
+  `extend_with_sysobject`, `OwnerBridge`, `BridgeSource` and the
+  `BackrefVotes` calibrator, which picks the back-reference distance
+  per file (4..=96 bytes) instead of hard-coding it, so a layout change
+  in another QuickBooks version recalibrates rather than silently
+  returning nothing.
+- `SPECIFICATION.md` §5.1: the `SYSTABLE` row-prefix `table_id` field,
+  with the cross-file evidence for it.
+
+### Changed
+
+- A failed `openqbw schema` lookup now reports the stage that failed -
+  catalog presence, `SYSCOLUMN` recovery, bridge coverage - instead of
+  claiming the `SYSTABLE` row lacks a recoverable `data_root_page`,
+  which `schema` never consulted. A successful lookup names the owner
+  and the bridge that found it, and warns when the recovered
+  `column_id`s have holes.
+- `schema` only falls back to the whole-file `SYSOBJECT` scan when the
+  back-reference does not resolve the requested table, so the common
+  case no longer pays for that pass.
+
 ## [0.1.5] - 2026-09-09
 
 ### Changed

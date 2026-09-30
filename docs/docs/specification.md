@@ -395,6 +395,49 @@ affect the current tag-anchored scan, but matters for any future work
 that needs the row's true boundaries (e.g. computing row length from
 the slot array, per §6's open prelude-field questions).
 
+### 5.1 The row prefix carries the SYSCOLUMN owner id
+
+One field of that prefix *is* now identified. A `u32_LE` sitting **30
+bytes before the row tag** holds the same id that `SYSCOLUMN` rows
+carry in their `owner_object_id` field, which makes it the bridge from
+a table's columns to the table's name:
+
+```
+... <table_id u32_LE> ..26 bytes.. 05 00 00 00 <tid u32_LE> 00 00 00 00
+    ^ row_offset - 30                          ^ row_offset
+    <magic 4B> 00 00 00 00 <name_len u8> <name>
+```
+
+This `table_id` is a different namespace from the row's own `<tid>`:
+`<tid>` advances by roughly one per *column* in the file and tracks the
+SA `object_id` space (§5 above), while the prefix id is the compact
+per-table counter that `SYSCOLUMN` rows point at. On
+`B22_Sample.qbw`, `abmc_invoice_header` has `<tid>` 5884 and prefix id
+3073, and owner 3073's `SYSCOLUMN` rows are its columns
+(`target_id`, `transaction_date`, `customer_id`, `ship_date`,
+`po_num`, `ipn_payment_info`, ...).
+
+Evidence, over the six TLR 2021/2022 practice files tested
+(`crates/openqbw/src/owner_bridge.rs`):
+
+- the distance is the same 30 bytes on every file, and calibration
+  (trying 4..=96 and keeping the distance that explains the most
+  distinct `(name, owner)` pairs) picks it by a factor of ten over
+  the runner-up;
+- it resolves 401-420 of the ~650 table names per file, against
+  115-144 for the `SYSOBJECT` name scan of §WP-6Z.2;
+- the map is near-injective (e.g. 421 distinct owners for 420 names on
+  `B22_Sample.qbw`) and near-monotone against the row's `<tid>`
+  (11-17 inversions per file);
+- where it overlaps the independent `SYSOBJECT` scan the two agree on
+  92-96% of shared names, and in the disagreements checked by hand the
+  prefix id is the one whose columns match the table (the scan had
+  `v_TransactionLink` pointing at `SYSPROCPARM`-shaped columns, the
+  prefix id points at `TxnID_1`/`TxnID_2`/`LinkType`).
+
+The remaining prefix bytes, and the fields between the prefix id and
+the tag, are still unassigned. See openqbw#19.
+
 ## 6. Slotted catalog pages
 
 Deobfuscated catalog pages follow the classic SAP SQL Anywhere
