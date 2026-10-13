@@ -15,6 +15,27 @@ env:
   RUSTFLAGS: -Dwarnings
 
 jobs:
+  docs:
+    name: documentation types and build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: docs/package-lock.json
+      - name: Install locked documentation dependencies
+        working-directory: docs
+        run: npm ci
+      - name: Check documentation types
+        working-directory: docs
+        run: npm run typecheck
+      - name: Build documentation
+        working-directory: docs
+        run: npm run build
+
   fmt:
     name: fmt
     runs-on: ubuntu-latest
