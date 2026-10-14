@@ -131,18 +131,8 @@ jobs:
 
   docs:
     name: Docs (Docusaurus)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-      - name: Install
-        working-directory: docs
-        run: bun install --frozen-lockfile
-      - name: Check types
-        working-directory: docs
-        run: bun run typecheck
-      - name: Build
-        working-directory: docs
-        run: bun run build:cloudflare
+    permissions:
+      contents: read
+    uses: Sigilweaver/ops/.github/workflows/docs.yml@c2f3734fca95d586bf4203ef484f37a6190eb618
+    with:
+      tooling-ref: c2f3734fca95d586bf4203ef484f37a6190eb618
