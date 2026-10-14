@@ -44,7 +44,7 @@ Whole-file facts (corpus-wide, 112/112 files):
 | % of files where `size % 8192 == 0`   | 51% |
 
 → **Page size is 4096 bytes (4 KiB)** and a file is exactly
-`page_count × 4096` bytes long. See [C.2](#c2-page-size).
+`page_count × 4096` bytes long. See [the page-count hint](#32-page-count-hint).
 
 ### 2.1 Page-0 is the *superblock*
 

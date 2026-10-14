@@ -129,20 +129,19 @@ jobs:
           path: OpenQBW/target/wheels/*.whl
           if-no-files-found: error
 
+  docs-validation:
+    name: Shared docs validation
+    permissions:
+      contents: read
+    uses: Sigilweaver/ops/.github/workflows/docs.yml@757c6789b96e3ac05bbc7d1a092d01cbeb0cb9e2
+    with:
+      tooling-ref: 757c6789b96e3ac05bbc7d1a092d01cbeb0cb9e2
   docs:
     name: Docs (Docusaurus)
+    needs: docs-validation
+    if: ${{ always() }}
     runs-on: ubuntu-latest
+    env:
+      DOCS_RESULT: ${{ needs.docs-validation.result }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-      - name: Install
-        working-directory: docs
-        run: bun install --frozen-lockfile
-      - name: Check types
-        working-directory: docs
-        run: bun run typecheck
-      - name: Build
-        working-directory: docs
-        run: bun run build:cloudflare
+      - run: test "$DOCS_RESULT" = success
