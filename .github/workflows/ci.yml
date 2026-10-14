@@ -140,6 +140,9 @@ jobs:
       - name: Install
         working-directory: docs
         run: bun install --frozen-lockfile
+      - name: Check types
+        working-directory: docs
+        run: bun run typecheck
       - name: Build
         working-directory: docs
         run: bun run build:cloudflare
