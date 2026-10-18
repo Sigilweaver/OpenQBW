@@ -199,6 +199,7 @@ First publication-ready release.
   $399,914,792.78, matching the value QuickBooks itself reports
   for the same file.
 
-[Unreleased]: https://github.com/Sigilweaver/OpenQBW/compare/v0.1.5...HEAD
+[Unreleased]: https://github.com/Sigilweaver/OpenQBW/compare/v0.1.6...HEAD
+[0.1.6]: https://github.com/Sigilweaver/OpenQBW/releases/tag/v0.1.6
 [0.1.5]: https://github.com/Sigilweaver/OpenQBW/releases/tag/v0.1.5
 [0.1.0]: https://github.com/Sigilweaver/OpenQBW/releases/tag/v0.1.0
