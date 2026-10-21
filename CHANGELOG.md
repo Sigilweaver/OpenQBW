@@ -14,6 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   duplicate names at the same position from underflowing or hiding gaps.
 - Equally supported back-reference layouts remain unresolved, allowing schema
   recovery to use the independent `SYSOBJECT` scan instead of guessing.
+- `schema_for` on 0.1.5 could return different columns for the same table
+  on repeated runs, sometimes another table's columns, because the
+  `SYSOBJECT` name bridge was read from an unordered map. 0.1.6 returns the
+  same result on every run, and a table whose owner cannot be bridged
+  returns no columns.
 
 - `openqbw schema` could not recover the columns of most tables the
   `catalog` command lists. Owners were bridged to table names only by
