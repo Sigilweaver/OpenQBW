@@ -164,6 +164,12 @@ enum MigrateFormat {
     Iif,
 }
 
+/// Open a company file, checking the magic, version and every page CRC.
+fn open_checked(path: &std::path::Path) -> Result<PageStore> {
+    openqbw::open_store(path, &openqbw::OpenOptions::default())
+        .with_context(|| format!("opening {:?}", path))
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let lenient = cli.lenient;
@@ -222,7 +228,7 @@ fn run_export(input: PathBuf, output: PathBuf, lenient: bool) -> Result<ExportSt
         std::fs::remove_file(&output).with_context(|| format!("removing existing {:?}", output))?;
     }
 
-    let store = PageStore::open(&input).with_context(|| format!("opening {:?}", input))?;
+    let store = open_checked(&input)?;
     let model = ApModel::learn(&store);
     let attribution = PageAttribution::build(&store, &model);
     warn_on_attribution_gap(&attribution);
@@ -252,7 +258,7 @@ fn run_export(input: PathBuf, output: PathBuf, lenient: bool) -> Result<ExportSt
 }
 
 fn run_catalog(input: PathBuf, user_only: bool) -> Result<()> {
-    let store = PageStore::open(&input).with_context(|| format!("opening {:?}", input))?;
+    let store = open_checked(&input)?;
     let model = ApModel::learn(&store);
 
     let mut entries: Vec<SysTableEntry> = openqbw::collect_unique(&store, &model);
@@ -303,7 +309,7 @@ fn run_catalog(input: PathBuf, user_only: bool) -> Result<()> {
 }
 
 fn run_schema(input: PathBuf, table: String) -> Result<()> {
-    let store = PageStore::open(&input).with_context(|| format!("opening {:?}", input))?;
+    let store = open_checked(&input)?;
     let model = ApModel::learn(&store);
     let found = openqbw::recover_schema(&store, &model, &table);
     let cols = &found.columns;
@@ -386,7 +392,7 @@ fn schema_miss_report(found: &openqbw::SchemaRecovery) -> String {
 }
 
 fn run_fkgraph(input: PathBuf, resolved_only: bool) -> Result<()> {
-    let store = PageStore::open(&input).with_context(|| format!("opening {:?}", input))?;
+    let store = open_checked(&input)?;
     let model = ApModel::learn(&store);
     let edges = openqbw::build_fk_graph(&store, &model);
     let s = openqbw::fk_graph_stats(&edges);
@@ -419,7 +425,7 @@ fn run_fkgraph(input: PathBuf, resolved_only: bool) -> Result<()> {
 }
 
 fn run_indexes(input: PathBuf, fk_only: bool, summary_only: bool) -> Result<()> {
-    let store = PageStore::open(&input).with_context(|| format!("opening {:?}", input))?;
+    let store = open_checked(&input)?;
     let model = ApModel::learn(&store);
     let entries: Vec<SysIndexEntry> = openqbw::collect_unique_sysindex(&store, &model);
     let tables: Vec<SysTableEntry> = openqbw::collect_unique(&store, &model);
@@ -484,7 +490,7 @@ fn print_audit_summary(audit: &CrossValidation) {
 }
 
 fn run_validate_attribution(input: PathBuf) -> Result<()> {
-    let store = PageStore::open(&input).with_context(|| format!("opening {:?}", input))?;
+    let store = open_checked(&input)?;
     let model = ApModel::learn(&store);
     let position = openqbw::PageAttribution::build(&store, &model);
     let schema = openqbw::SchemaAttribution::build(&store, &model);
@@ -518,7 +524,7 @@ fn run_validate_attribution(input: PathBuf) -> Result<()> {
 }
 
 fn run_nulls(input: PathBuf) -> Result<()> {
-    let store = PageStore::open(&input).with_context(|| format!("opening {:?}", input))?;
+    let store = open_checked(&input)?;
     let model = ApModel::learn(&store);
     let buckets = openqbw::nulls_flag_histogram(&store, &model);
     let total: usize = buckets.iter().map(|b| b.count).sum();
@@ -702,7 +708,7 @@ fn run_verify(
     println!();
     println!("=== SYSINDEX cross-validation (WP-6Z.3) ===");
     {
-        let store = PageStore::open(&input).with_context(|| format!("re-opening {:?}", input))?;
+        let store = open_checked(&input)?;
         let model = ApModel::learn(&store);
         let entries = openqbw::collect_unique_sysindex(&store, &model);
         let tables: Vec<SysTableEntry> = openqbw::collect_unique(&store, &model);
@@ -721,7 +727,7 @@ fn run_verify(
     if strict_attribution {
         println!();
         println!("=== content-signature attribution (--strict-attribution) ===");
-        let store = PageStore::open(&input).with_context(|| format!("re-opening {:?}", input))?;
+        let store = open_checked(&input)?;
         let model = ApModel::learn(&store);
         let content = ContentAttribution::build(&store, &model);
         let position = PageAttribution::build(&store, &model);
@@ -1000,12 +1006,9 @@ fn collect_lineitems(
             ScanOptions::strict()
         },
     )
-    .context("scanning line items (use --lenient to skip undecodable records and count them)")?;
-    if !scan.warnings.is_empty() {
-        eprintln!(
-            "warning: --lenient skipped {} undecodable line-item record(s); they are listed in the output",
-            scan.warnings.len()
-        );
+    .context("scanning line items (use --lenient to skip undecodable records and list them)")?;
+    for w in &scan.warnings {
+        eprintln!("warning: {w}");
     }
     Ok((scan.items, scan.warnings))
 }
@@ -1115,8 +1118,8 @@ struct Records {
     model: ApModel,
 }
 
-fn collect_records(input: &PathBuf, lenient: bool) -> Result<Records> {
-    let store = PageStore::open(input).with_context(|| format!("opening {:?}", input))?;
+fn collect_records(input: &std::path::Path, lenient: bool) -> Result<Records> {
+    let store = open_checked(input)?;
     let model = ApModel::learn(&store);
     let attribution = PageAttribution::build(&store, &model);
     warn_on_attribution_gap(&attribution);
@@ -1404,13 +1407,11 @@ fn render_iif(items: &[LineItem], headers: &[TransactionHeader]) -> (String, Iif
 // =========================================================================
 
 fn run_forensics(input: PathBuf, lenient: bool) -> Result<()> {
-    let store = PageStore::open(&input).with_context(|| format!("opening {:?}", input))?;
+    let store = open_checked(&input)?;
     let model = ApModel::learn(&store);
     let attribution = PageAttribution::build(&store, &model);
 
-    let file_size = std::fs::metadata(&input)
-        .map(|m| m.len())
-        .unwrap_or_default();
+    let file_size = store.size_bytes();
     let page_count = store.page_count();
 
     println!("=== file ===");

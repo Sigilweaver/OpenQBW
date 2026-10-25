@@ -20,6 +20,7 @@ use std::iter::FusedIterator;
 use opensqlany::{ApModel, PageStore, PageType};
 
 use crate::bv_recovery::{deobfuscate_with_bv, recover_bv_qb_data};
+use crate::opaque::count_opaque_pages;
 use crate::page_attribution::PageAttribution;
 use crate::scan::{ScanOptions, ScanResult, ScanWarning};
 
@@ -79,6 +80,15 @@ pub enum LineItemError {
         page_offset: usize,
         /// The unrecognised type byte.
         type_byte: u8,
+    },
+    /// Most data pages are indistinguishable from random bytes, as in a
+    /// password-protected or otherwise encrypted file. No records were read.
+    #[error("{opaque} of {extent} data pages are opaque; the file content is not readable")]
+    ContentOpaque {
+        /// Opaque `E` pages.
+        opaque: u64,
+        /// All `E` pages.
+        extent: u64,
     },
     /// A line-item anchor ends too close to the end of the page data area
     /// for its 4 amount bytes to be read.
@@ -326,6 +336,19 @@ pub fn scan_lineitems(
     options: &ScanOptions,
 ) -> Result<ScanResult<LineItem>, LineItemError> {
     let mut scan = ScanResult::default();
+    let opaque = count_opaque_pages(store).map_err(LineItemError::Sa)?;
+    if opaque.mostly_opaque() {
+        return Err(LineItemError::ContentOpaque {
+            opaque: opaque.opaque,
+            extent: opaque.extent,
+        });
+    }
+    if opaque.opaque > 0 {
+        scan.warnings.push(ScanWarning::OpaquePages {
+            opaque: opaque.opaque,
+            extent: opaque.extent,
+        });
+    }
     for r in LineItemIter::new(store, model, attribution) {
         match r {
             Ok(li) => scan.items.push(li),
@@ -738,5 +761,48 @@ mod tests {
         ))
         .unwrap_err();
         assert!(matches!(err, LineItemError::TruncatedAmount { .. }));
+    }
+
+    fn random_extent_store(pages: usize, opaque: usize) -> PageStore {
+        let mut b = vec![0u8; 4096 * pages];
+        let mut x: u32 = 0x1234_5678;
+        for (i, page) in b.chunks_mut(4096).enumerate().skip(1) {
+            if i <= opaque {
+                for byte in page[..0xFF0].iter_mut() {
+                    x = x.wrapping_mul(1_103_515_245).wrapping_add(12345);
+                    *byte = (x >> 16) as u8;
+                }
+            }
+            page[0xFF2] = b'E';
+        }
+        PageStore::from_bytes(b).unwrap()
+    }
+
+    #[test]
+    fn mostly_opaque_file_is_an_error() {
+        let store = random_extent_store(11, 8);
+        let model = ApModel::learn(&store);
+        let err = scan_lineitems(&store, &model, None, &ScanOptions::strict()).unwrap_err();
+        assert!(matches!(
+            err,
+            LineItemError::ContentOpaque {
+                opaque: 8,
+                extent: 10
+            }
+        ));
+    }
+
+    #[test]
+    fn a_few_opaque_pages_are_a_warning_even_in_strict_mode() {
+        let store = random_extent_store(11, 2);
+        let model = ApModel::learn(&store);
+        let scan = scan_lineitems(&store, &model, None, &ScanOptions::strict()).unwrap();
+        assert!(matches!(
+            scan.warnings.as_slice(),
+            [ScanWarning::OpaquePages {
+                opaque: 2,
+                extent: 10
+            }]
+        ));
     }
 }

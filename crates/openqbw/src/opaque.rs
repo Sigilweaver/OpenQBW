@@ -18,6 +18,8 @@
 //! See `OpenQBW/re/NOTES.md` (entry C.51, WP-5C) for the empirical
 //! characterisation across the four-file corpus.
 
+use opensqlany::{PageStore, PageType};
+
 const TRAILER_START: usize = 0xFF0;
 
 /// Shannon entropy of `bytes` in bits/byte (0.0 .. 8.0).
@@ -60,6 +62,48 @@ pub fn is_opaque_high_entropy(raw_page: &[u8]) -> bool {
     shannon_entropy(&raw_page[..TRAILER_START]) >= OPAQUE_ENTROPY_THRESHOLD
 }
 
+/// Share of `E` pages above which a file is treated as unreadable content
+/// (for example a password-protected file) rather than a readable file with
+/// a few opaque blobs. Not measured on a corpus.
+pub const OPAQUE_FILE_FRACTION: f64 = 0.5;
+
+/// Counts of `E` pages in a store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct OpaqueCount {
+    /// `E` pages whose body is indistinguishable from random bytes.
+    pub opaque: u64,
+    /// All `E` pages.
+    pub extent: u64,
+}
+
+impl OpaqueCount {
+    /// `true` when more than [`OPAQUE_FILE_FRACTION`] of the `E` pages are
+    /// opaque.
+    pub fn mostly_opaque(&self) -> bool {
+        self.extent > 0 && self.opaque as f64 / self.extent as f64 > OPAQUE_FILE_FRACTION
+    }
+}
+
+/// Count opaque and total `E` pages in `store`.
+pub fn count_opaque_pages(store: &PageStore) -> Result<OpaqueCount, opensqlany::Error> {
+    let mut c = OpaqueCount {
+        opaque: 0,
+        extent: 0,
+    };
+    for pn in 1..store.page_count() {
+        let page = store.page(pn)?;
+        if page.trailer().page_type() != PageType::Extent {
+            continue;
+        }
+        c.extent += 1;
+        if is_opaque_high_entropy(page.bytes()) {
+            c.opaque += 1;
+        }
+    }
+    Ok(c)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -92,6 +136,14 @@ mod tests {
             raw[i + 3] = 0x0B;
         }
         assert!(!is_opaque_high_entropy(&raw));
+    }
+
+    #[test]
+    fn mostly_opaque_needs_more_than_half() {
+        let c = |opaque, extent| OpaqueCount { opaque, extent };
+        assert!(!c(0, 0).mostly_opaque());
+        assert!(!c(5, 10).mostly_opaque());
+        assert!(c(6, 10).mostly_opaque());
     }
 
     #[test]

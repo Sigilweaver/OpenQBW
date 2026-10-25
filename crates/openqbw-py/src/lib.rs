@@ -7,7 +7,8 @@
 
 use openqbw_rs::{
     collect_unique as collect_unique_systable, collect_unique_sysindex, iter_transaction_headers,
-    scan_lineitems, PageAttribution, ScanOptions, SysIndexEntry, SysTableEntry, TransactionHeader,
+    open_store, scan_lineitems, OpenError, OpenOptions, PageAttribution, ScanOptions,
+    SysIndexEntry, SysTableEntry, TransactionHeader,
 };
 use opensqlany::{ApModel, PageStore};
 use pyo3::exceptions::{PyIOError, PyValueError};
@@ -33,6 +34,13 @@ impl Reader {
         self.path.display().to_string()
     }
 
+    /// Why page-to-table attribution is unavailable (`"NoCatalogRows"` or
+    /// `"AllRootsZeroed"`), or `None` when it is available.
+    #[getter]
+    fn attribution_gap(&self) -> Option<String> {
+        self.attribution.gap().map(|g| format!("{g:?}"))
+    }
+
     /// Number of pages in the underlying page-store.
     #[getter]
     fn page_count(&self) -> u64 {
@@ -42,7 +50,7 @@ impl Reader {
     /// File size in bytes.
     #[getter]
     fn file_size(&self) -> u64 {
-        std::fs::metadata(&self.path).map(|m| m.len()).unwrap_or(0)
+        self.store.size_bytes()
     }
 
     fn __repr__(&self) -> String {
@@ -96,7 +104,7 @@ impl Reader {
     ///
     /// A record that cannot be decoded raises `ValueError`. With
     /// `lenient=True` such records are skipped and a `UserWarning` reports
-    /// how many.
+    /// how many. A `UserWarning` also reports opaque pages that were not decoded.
     #[pyo3(signature = (lenient=false))]
     fn line_items<'py>(&self, py: Python<'py>, lenient: bool) -> PyResult<Vec<Bound<'py, PyDict>>> {
         let scan = scan_lineitems(
@@ -125,7 +133,7 @@ impl Reader {
                 py,
                 &py.get_type::<pyo3::exceptions::PyUserWarning>(),
                 &std::ffi::CString::new(format!(
-                    "openqbw: skipped {} undecodable line-item record(s); first: {}",
+                    "openqbw: {} scan warning(s); first: {}",
                     scan.warnings.len(),
                     first.join("; ")
                 ))
@@ -177,12 +185,34 @@ impl Reader {
 }
 
 /// Open a QBW file and return a `Reader`.
+///
+/// Raises `OSError` when the file cannot be read and `ValueError` when it
+/// is not a supported QuickBooks company file (bad magic, unsupported
+/// version, or a page that fails its CRC check). Issues a `UserWarning`
+/// when page-to-table attribution is unavailable; see
+/// `Reader.attribution_gap`.
 #[pyfunction]
-fn open(path: PathBuf) -> PyResult<Reader> {
-    let store = PageStore::open(&path)
-        .map_err(|e| PyIOError::new_err(format!("opening {:?}: {e}", path)))?;
+fn open(py: Python<'_>, path: PathBuf) -> PyResult<Reader> {
+    let store = open_store(&path, &OpenOptions::default()).map_err(|e| match e {
+        OpenError::Store(opensqlany::Error::Io(io)) => {
+            PyIOError::new_err(format!("opening {:?}: {io}", path))
+        }
+        other => PyValueError::new_err(format!("opening {:?}: {other}", path)),
+    })?;
     let model = ApModel::learn(&store);
     let attribution = PageAttribution::build(&store, &model);
+    if let Some(gap) = attribution.gap() {
+        PyErr::warn(
+            py,
+            &py.get_type::<pyo3::exceptions::PyUserWarning>(),
+            &std::ffi::CString::new(format!(
+                "openqbw: page-to-table attribution is unavailable ({gap:?}); \
+                 line items have no source_table and transactions are empty"
+            ))
+            .map_err(|e| PyValueError::new_err(e.to_string()))?,
+            1,
+        )?;
+    }
     Ok(Reader {
         path,
         store: Arc::new(store),

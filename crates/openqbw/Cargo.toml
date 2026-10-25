@@ -17,5 +17,8 @@ description = "QuickBooks .qbw file parser built on opensqlany page-store."
 opensqlany = { workspace = true }
 thiserror = { workspace = true }
 
+[dev-dependencies]
+crc32fast = "1"
+
 [lints]
 workspace = true

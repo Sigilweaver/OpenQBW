@@ -33,6 +33,14 @@ impl ScanOptions {
 pub enum ScanWarning {
     /// A line-item record was skipped.
     RecordSkipped(LineItemError),
+    /// Some `E` pages are indistinguishable from random bytes and were not
+    /// decoded (compressed or separately encrypted blobs).
+    OpaquePages {
+        /// Opaque `E` pages.
+        opaque: u64,
+        /// All `E` pages.
+        extent: u64,
+    },
 }
 
 impl ScanWarning {
@@ -40,6 +48,7 @@ impl ScanWarning {
     pub fn location(&self) -> (Option<u64>, Option<usize>) {
         match self {
             Self::RecordSkipped(e) => e.location(),
+            Self::OpaquePages { .. } => (None, None),
         }
     }
 }
@@ -48,12 +57,19 @@ impl std::fmt::Display for ScanWarning {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::RecordSkipped(e) => write!(f, "record skipped: {e}"),
+            Self::OpaquePages { opaque, extent } => {
+                write!(
+                    f,
+                    "{opaque} of {extent} data pages are opaque and were not decoded"
+                )
+            }
         }
     }
 }
 
 /// Result of a scan: the records found and the warnings a lenient scan
-/// produced. `warnings` is always empty in strict mode.
+/// produced, plus informational warnings that apply in both modes (opaque
+/// pages). A scan that returns `Ok` in strict mode has no skipped records.
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct ScanResult<T> {
