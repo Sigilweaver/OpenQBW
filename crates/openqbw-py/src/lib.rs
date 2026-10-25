@@ -6,14 +6,13 @@
 #![allow(clippy::useless_conversion)] // pyo3 macro expansions can trigger this on newer clippy
 
 use openqbw_rs::{
-    collect_unique as collect_unique_systable, collect_unique_sysindex,
-    iter_lineitems_with_attribution, iter_transaction_headers, PageAttribution, SysIndexEntry,
-    SysTableEntry, TransactionHeader,
+    collect_unique as collect_unique_systable, collect_unique_sysindex, iter_transaction_headers,
+    scan_lineitems, PageAttribution, SysIndexEntry, SysTableEntry, TransactionHeader,
 };
 use opensqlany::{ApModel, PageStore};
-use pyo3::exceptions::PyIOError;
+use pyo3::exceptions::{PyIOError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyBytes, PyDict};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -87,18 +86,56 @@ impl Reader {
     }
 
     /// Return all line items as a list of dicts. Each dict carries the
-    /// parent `invoice_id`, decoded amount fields, the source-table name,
-    /// and the page coordinates.
-    fn line_items<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyDict>>> {
-        let iter = iter_lineitems_with_attribution(&self.store, &self.model, &self.attribution);
-        let mut out = Vec::new();
-        for li in iter {
+    /// parent `invoice_id`, the amount fields, the source-table name, and
+    /// the page coordinates.
+    ///
+    /// `amount_cents` is in cents under `amount_encoding` and is `None`
+    /// when the amount is not decoded (check `amount_type` and
+    /// `amount_encoding` for why). `None` means unknown, not zero.
+    /// `amount_raw` holds the 4 undecoded amount bytes.
+    ///
+    /// A record that cannot be decoded raises `ValueError`. With
+    /// `lenient=True` such records are skipped and a `UserWarning` reports
+    /// how many.
+    #[pyo3(signature = (lenient=false))]
+    fn line_items<'py>(&self, py: Python<'py>, lenient: bool) -> PyResult<Vec<Bound<'py, PyDict>>> {
+        let scan = scan_lineitems(&self.store, &self.model, Some(&self.attribution), lenient)
+            .map_err(|e| {
+                PyValueError::new_err(format!(
+                    "{e} (pass lenient=True to skip undecodable records and count them)"
+                ))
+            })?;
+        if !scan.rejected.is_empty() {
+            let first: Vec<String> = scan
+                .rejected
+                .iter()
+                .take(3)
+                .map(|e| e.to_string())
+                .collect();
+            PyErr::warn(
+                py,
+                &py.get_type::<pyo3::exceptions::PyUserWarning>(),
+                &std::ffi::CString::new(format!(
+                    "openqbw: skipped {} undecodable line-item record(s); first: {}",
+                    scan.rejected.len(),
+                    first.join("; ")
+                ))
+                .map_err(|e| PyValueError::new_err(e.to_string()))?,
+                1,
+            )?;
+        }
+        let mut out = Vec::with_capacity(scan.items.len());
+        for li in scan.items {
             let d = PyDict::new(py);
             let date = li.txn_date_days_since_unix();
             d.set_item("invoice_id", li.invoice_id)?;
             d.set_item("item_qb_id", li.item_qb_id)?;
             d.set_item("amount_cents", li.amount_cents)?;
-            d.set_item("amount_cents_signed", li.amount_cents_signed)?;
+            d.set_item("amount_encoding", li.amount_encoding.as_str())?;
+            d.set_item("amount_type", li.amount_raw[0])?;
+            d.set_item("amount_raw", PyBytes::new(py, &li.amount_raw))?;
+            d.set_item("txn_date_raw", li.txn_date_raw)?;
+            d.set_item("counter", li.counter)?;
             d.set_item("txn_date_days_since_unix", date)?;
             d.set_item("source_table", li.source_table)?;
             d.set_item("page_number", li.page_number)?;

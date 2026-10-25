@@ -17,9 +17,9 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use openqbw::{
-    AmountType, AttributionGap, ContentAttribution, CrossValidation, LineItem, PageAttribution,
-    SysIndexEntry, SysTableEntry, TransactionHeader, iter_lineitems_with_attribution,
-    iter_transaction_headers,
+    AmountType, AttributionGap, ContentAttribution, CrossValidation, LineItem, LineItemError,
+    PageAttribution, SysIndexEntry, SysTableEntry, TransactionHeader, iter_transaction_headers,
+    scan_lineitems,
 };
 use opensqlany::{ApModel, PageStore};
 use rusqlite::{Connection, Transaction, params};
@@ -34,6 +34,13 @@ const PHASE5_INVOICE_COUNT: i64 = 13_375;
     about = "QuickBooks .qbw inspector and exporter"
 )]
 struct Cli {
+    /// Skip line-item records that cannot be decoded (unknown amount-type
+    /// byte, amount cut off by the page end) instead of stopping with an
+    /// error. Every skipped record is counted on stderr and listed in the
+    /// export (`scan_rejections` table in SQLite, `rejected.csv` in CSV).
+    #[arg(long, global = true)]
+    lenient: bool,
+
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -129,6 +136,13 @@ enum Cmd {
         /// Output format.
         #[arg(long, value_enum, default_value_t = MigrateFormat::Csv)]
         format: MigrateFormat,
+        /// IIF only: write the export even though account names and
+        /// transaction types are not decoded. Every TRNS posts to the
+        /// placeholder account `Accounts Receivable` and every SPL uses the
+        /// internal source-table name as its account. Transactions with an
+        /// undecoded amount are left out and counted.
+        #[arg(long)]
+        placeholder_accounts: bool,
     },
     /// File-level forensic discovery summary: size, page-type
     /// histogram, table inventory, and high-level signals useful
@@ -152,14 +166,15 @@ enum MigrateFormat {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    let lenient = cli.lenient;
     match cli.cmd {
-        Cmd::Export { input, output } => run_export(input, output).map(|_| ()),
+        Cmd::Export { input, output } => run_export(input, output, lenient).map(|_| ()),
         Cmd::Catalog { input, user_only } => run_catalog(input, user_only),
         Cmd::Verify {
             input,
             output,
             strict_attribution,
-        } => run_verify(input, output, strict_attribution),
+        } => run_verify(input, output, strict_attribution, lenient),
         Cmd::Schema { input, table } => run_schema(input, table),
         Cmd::Fkgraph {
             input,
@@ -172,8 +187,13 @@ fn main() -> Result<()> {
             fk_only,
             summary_only,
         } => run_indexes(input, fk_only, summary_only),
-        Cmd::Migrate { input, out, format } => run_migrate(input, out, format),
-        Cmd::Forensics { input } => run_forensics(input),
+        Cmd::Migrate {
+            input,
+            out,
+            format,
+            placeholder_accounts,
+        } => run_migrate(input, out, format, placeholder_accounts, lenient),
+        Cmd::Forensics { input } => run_forensics(input, lenient),
     }
 }
 
@@ -197,7 +217,7 @@ fn warn_on_attribution_gap(attribution: &PageAttribution) {
     }
 }
 
-fn run_export(input: PathBuf, output: PathBuf) -> Result<ExportStats> {
+fn run_export(input: PathBuf, output: PathBuf, lenient: bool) -> Result<ExportStats> {
     if output.exists() {
         std::fs::remove_file(&output).with_context(|| format!("removing existing {:?}", output))?;
     }
@@ -207,8 +227,7 @@ fn run_export(input: PathBuf, output: PathBuf) -> Result<ExportStats> {
     let attribution = PageAttribution::build(&store, &model);
     warn_on_attribution_gap(&attribution);
 
-    let mut items: Vec<LineItem> =
-        iter_lineitems_with_attribution(&store, &model, &attribution).collect();
+    let (mut items, rejected) = collect_lineitems(&store, &model, &attribution, lenient)?;
     items.sort_by_key(|li| (li.page_number, li.page_offset));
 
     let mut headers: Vec<TransactionHeader> =
@@ -223,10 +242,11 @@ fn run_export(input: PathBuf, output: PathBuf) -> Result<ExportStats> {
         let header_map = insert_transaction_headers(&tx, &headers)?;
         insert_synthesized_transactions(&tx, &items, &header_map)?;
         insert_transaction_line_items(&tx, &items)?;
+        insert_scan_rejections(&tx, &rejected)?;
         tx.commit()?;
     }
 
-    let stats = collect_export_stats(&conn, &store, &items, &headers)?;
+    let stats = collect_export_stats(&conn, &store, &items, &headers, rejected.len())?;
     println!("{}", stats.summary());
     Ok(stats)
 }
@@ -515,12 +535,17 @@ fn run_nulls(input: PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn run_verify(input: PathBuf, output: Option<PathBuf>, strict_attribution: bool) -> Result<()> {
+fn run_verify(
+    input: PathBuf,
+    output: Option<PathBuf>,
+    strict_attribution: bool,
+    lenient: bool,
+) -> Result<()> {
     let out = match output {
         Some(p) => p,
         None => std::env::temp_dir().join(format!("openqbw-verify-{}.sqlite", std::process::id())),
     };
-    let stats = run_export(input.clone(), out.clone())?;
+    let stats = run_export(input.clone(), out.clone(), lenient)?;
     println!();
     println!("=== verification report ===");
 
@@ -572,14 +597,14 @@ fn run_verify(input: PathBuf, output: Option<PathBuf>, strict_attribution: bool)
         |r| r.get(0),
     )?;
     let grand_total: i64 = conn.query_row(
-        "SELECT COALESCE(SUM(amount_cents), 0) FROM transaction_line_items",
+        "SELECT COALESCE(SUM(amount_raw_u24_cents), 0) FROM transaction_line_items",
         [],
         |r| r.get(0),
     )?;
     let regression_ok =
         grand_total == PHASE5_INVOICE_TOTAL_CENTS && parent_count == PHASE5_INVOICE_COUNT;
     println!(
-        "Phase 5 regression (universal anchor):  parents={}/{}  grand_total=${:.2}/${:.2}  {}",
+        "Phase 5 regression (universal anchor, undecoded u24 reading):  parents={}/{}  grand_total=${:.2}/${:.2}  {}",
         parent_count,
         PHASE5_INVOICE_COUNT,
         grand_total as f64 / 100.0,
@@ -607,7 +632,7 @@ fn run_verify(input: PathBuf, output: Option<PathBuf>, strict_attribution: bool)
     }
 
     println!();
-    println!("Journal sum-to-zero check (Phase 2.2, signed amounts, C.48 Track A):");
+    println!("Journal sum-to-zero check (Phase 2.2, sign-bit amounts, C.48 Track A):");
     // Same-type 2-line journal pair-balance: the strictest case where the
     // high-bit-of-byte-1 sign hypothesis is unambiguous. Acceptance target:
     // 100% same-type pair-balance.
@@ -617,13 +642,13 @@ fn run_verify(input: PathBuf, output: Option<PathBuf>, strict_attribution: bool)
            COALESCE(SUM(CASE WHEN signed_sum = 0 THEN 1 ELSE 0 END), 0) AS balanced
          FROM (
            SELECT qb_id_parent,
-                  SUM(amount_cents_signed) AS signed_sum,
+                  SUM(amount_cents) AS signed_sum,
                   COUNT(*) AS n,
                   COUNT(DISTINCT amount_type) AS types
            FROM transaction_line_items
            WHERE source_table = 'abmc_general_journal_inventory_lineitem'
-             AND amount_type IN (1, 2)
-             AND amount_cents_signed IS NOT NULL
+             AND amount_type = 2
+             AND amount_cents IS NOT NULL
            GROUP BY qb_id_parent
            HAVING n = 2 AND types = 1
          )",
@@ -654,7 +679,7 @@ fn run_verify(input: PathBuf, output: Option<PathBuf>, strict_attribution: bool)
            COALESCE(SUM(CASE WHEN signed_sum = 0 THEN 1 ELSE 0 END), 0) AS bal
          FROM (
            SELECT qb_id_parent,
-                  COALESCE(SUM(amount_cents_signed), 0) AS signed_sum
+                  COALESCE(SUM(amount_cents), 0) AS signed_sum
            FROM transaction_line_items
            WHERE source_table = 'abmc_general_journal_inventory_lineitem'
            GROUP BY qb_id_parent
@@ -754,8 +779,10 @@ fn create_schema(conn: &Connection) -> Result<()> {
             txn_date_raw INTEGER,
             counter      INTEGER,
             line_count   INTEGER NOT NULL,
-            total_cents  INTEGER NOT NULL,
+            -- NULL when any line's amount is not decoded (see unresolved_lines).
+            total_cents  INTEGER,
             has_deferred INTEGER NOT NULL,
+            unresolved_lines INTEGER NOT NULL,
             source_page  INTEGER
         );
 
@@ -764,8 +791,11 @@ fn create_schema(conn: &Connection) -> Result<()> {
             line_number         INTEGER NOT NULL,
             item_qb_id          TEXT,
             amount_type         INTEGER NOT NULL,
+            -- Decoded under amount_encoding; NULL when not decoded.
             amount_cents        INTEGER,
-            amount_cents_signed INTEGER,
+            amount_encoding     TEXT NOT NULL,
+            -- Undecoded u24 reading of the amount bytes, for diagnostics only.
+            amount_raw_u24_cents INTEGER,
             amount_raw_hex      TEXT NOT NULL,
             txn_date_raw        INTEGER,
             counter             INTEGER,
@@ -773,6 +803,12 @@ fn create_schema(conn: &Connection) -> Result<()> {
             page_number         INTEGER NOT NULL,
             page_offset         INTEGER NOT NULL,
             PRIMARY KEY (qb_id_parent, line_number, source_table)
+        );
+
+        CREATE TABLE scan_rejections (
+            page_number INTEGER,
+            page_offset INTEGER,
+            reason      TEXT NOT NULL
         );
 
         CREATE INDEX idx_lineitems_page   ON transaction_line_items(page_number);
@@ -795,8 +831,8 @@ fn insert_transaction_headers(
     let mut stmt = tx.prepare(
         "INSERT INTO transactions \
          (qb_id, type, source_table, txn_date_raw, counter, \
-          line_count, total_cents, has_deferred, source_page) \
-         VALUES (?, ?, ?, ?, ?, 0, 0, 0, ?)",
+          line_count, total_cents, has_deferred, unresolved_lines, source_page) \
+         VALUES (?, ?, ?, ?, ?, 0, 0, 0, 0, ?)",
     )?;
     let mut ordered: Vec<&TransactionHeader> = map.values().collect();
     ordered.sort_by_key(|h| (h.page_number, h.page_offset));
@@ -834,24 +870,29 @@ fn insert_synthesized_transactions(
     }
 
     let mut update_stmt = tx.prepare(
-        "UPDATE transactions SET line_count=?, total_cents=?, has_deferred=? WHERE qb_id=?",
+        "UPDATE transactions SET line_count=?, total_cents=?, has_deferred=?, \
+         unresolved_lines=? WHERE qb_id=?",
     )?;
     let mut insert_stmt = tx.prepare(
         "INSERT INTO transactions \
          (qb_id, type, source_table, txn_date_raw, counter, \
-          line_count, total_cents, has_deferred, source_page) \
-         VALUES (?, 'unknown', ?, ?, ?, ?, ?, ?, ?)",
+          line_count, total_cents, has_deferred, unresolved_lines, source_page) \
+         VALUES (?, 'unknown', ?, ?, ?, ?, ?, ?, ?, ?)",
     )?;
     for qb_id in order {
         let lines = &groups[&qb_id];
-        let total: i64 = lines
-            .iter()
-            .filter_map(|l| l.amount_cents.map(|c| c as i64))
-            .sum();
+        let unresolved = lines.iter().filter(|l| l.amount_cents.is_none()).count() as i64;
+        // A total over some lines is not the transaction total: leave it
+        // NULL when any line's amount is not decoded.
+        let total: Option<i64> = if unresolved == 0 {
+            Some(lines.iter().filter_map(|l| l.amount_cents).sum())
+        } else {
+            None
+        };
         let has_deferred = lines.iter().any(|l| l.amount_type == AmountType::Deferred) as i64;
         let line_count = lines.len() as i64;
         if header_map.contains_key(&qb_id) {
-            update_stmt.execute(params![line_count, total, has_deferred, qb_id])?;
+            update_stmt.execute(params![line_count, total, has_deferred, unresolved, qb_id])?;
             continue;
         }
         let date = lines.iter().find_map(|l| l.txn_date_raw);
@@ -869,6 +910,7 @@ fn insert_synthesized_transactions(
             line_count,
             total,
             has_deferred,
+            unresolved,
             page
         ])?;
     }
@@ -877,11 +919,11 @@ fn insert_synthesized_transactions(
 
 fn insert_transaction_line_items(tx: &Transaction<'_>, items: &[LineItem]) -> Result<()> {
     let mut stmt = tx.prepare(
-        "INSERT OR IGNORE INTO transaction_line_items \
+        "INSERT INTO transaction_line_items \
          (qb_id_parent, line_number, item_qb_id, amount_type, amount_cents, \
-          amount_cents_signed, amount_raw_hex, txn_date_raw, counter, source_table, \
-          page_number, page_offset) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          amount_encoding, amount_raw_u24_cents, amount_raw_hex, txn_date_raw, counter, \
+          source_table, page_number, page_offset) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )?;
     let mut line_no: BTreeMap<(String, String), i64> = BTreeMap::new();
     for li in items {
@@ -901,7 +943,8 @@ fn insert_transaction_line_items(tx: &Transaction<'_>, items: &[LineItem]) -> Re
             li.item_qb_id,
             type_byte,
             li.amount_cents,
-            li.amount_cents_signed,
+            li.amount_encoding.as_str(),
+            li.amount_type.decode_cents(&li.amount_raw),
             hex,
             li.txn_date_raw,
             li.counter,
@@ -911,6 +954,53 @@ fn insert_transaction_line_items(tx: &Transaction<'_>, items: &[LineItem]) -> Re
         ])?;
     }
     Ok(())
+}
+
+fn insert_scan_rejections(tx: &Transaction<'_>, rejected: &[LineItemError]) -> Result<()> {
+    let mut stmt = tx.prepare(
+        "INSERT INTO scan_rejections (page_number, page_offset, reason) VALUES (?, ?, ?)",
+    )?;
+    for e in rejected {
+        let (page, offset) = rejection_location(e);
+        stmt.execute(params![page, offset, e.to_string()])?;
+    }
+    Ok(())
+}
+
+fn rejection_location(e: &LineItemError) -> (Option<i64>, Option<i64>) {
+    match e {
+        LineItemError::Page { page_number, .. } => (Some(*page_number as i64), None),
+        LineItemError::UnknownAmountType {
+            page_number,
+            page_offset,
+            ..
+        }
+        | LineItemError::TruncatedAmount {
+            page_number,
+            page_offset,
+        } => (Some(*page_number as i64), Some(*page_offset as i64)),
+        LineItemError::Sa(_) => (None, None),
+    }
+}
+
+/// Scan all line items. Strict mode stops at the first undecodable record.
+/// Lenient mode returns the skipped records and prints their count to stderr.
+fn collect_lineitems(
+    store: &PageStore,
+    model: &ApModel,
+    attribution: &PageAttribution,
+    lenient: bool,
+) -> Result<(Vec<LineItem>, Vec<LineItemError>)> {
+    let scan = scan_lineitems(store, model, Some(attribution), lenient).context(
+        "scanning line items (use --lenient to skip undecodable records and count them)",
+    )?;
+    if !scan.rejected.is_empty() {
+        eprintln!(
+            "warning: --lenient skipped {} undecodable line-item record(s); they are listed in the output",
+            scan.rejected.len()
+        );
+    }
+    Ok((scan.items, scan.rejected))
 }
 
 fn amount_type_byte(t: AmountType) -> i64 {
@@ -930,17 +1020,27 @@ struct ExportStats {
     headers: i64,
     line_items: i64,
     grand_total_cents: i64,
+    /// Transactions whose total is NULL because a line amount is not decoded.
+    transactions_without_total: i64,
+    /// Line items whose amount is not decoded.
+    unresolved_lines: i64,
+    rejected_records: usize,
 }
 
 impl ExportStats {
     fn summary(&self) -> String {
         format!(
-            "openqbw: pages={} transactions={} headers={} lineitems={} grand_total=${:.2}",
+            "openqbw: pages={} transactions={} headers={} lineitems={} grand_total=${:.2} \
+             (covers only transactions with fully decoded amounts; {} transactions and {} line items \
+             have undecoded amounts, {} records skipped)",
             self.pages,
             self.transactions,
             self.headers,
             self.line_items,
             self.grand_total_cents as f64 / 100.0,
+            self.transactions_without_total,
+            self.unresolved_lines,
+            self.rejected_records,
         )
     }
 }
@@ -950,6 +1050,7 @@ fn collect_export_stats(
     store: &PageStore,
     items: &[LineItem],
     headers: &[TransactionHeader],
+    rejected_records: usize,
 ) -> Result<ExportStats> {
     let txns: i64 = conn.query_row("SELECT COUNT(*) FROM transactions", [], |r| r.get(0))?;
     let total: i64 = conn.query_row(
@@ -957,7 +1058,15 @@ fn collect_export_stats(
         [],
         |r| r.get(0),
     )?;
+    let without_total: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM transactions WHERE total_cents IS NULL",
+        [],
+        |r| r.get(0),
+    )?;
     Ok(ExportStats {
+        transactions_without_total: without_total,
+        unresolved_lines: items.iter().filter(|li| li.amount_cents.is_none()).count() as i64,
+        rejected_records,
         pages: store.page_count(),
         transactions: txns,
         headers: headers.len() as i64,
@@ -970,28 +1079,50 @@ fn collect_export_stats(
 // migrate -- data-liberation export
 // =========================================================================
 
-fn run_migrate(input: PathBuf, out: PathBuf, format: MigrateFormat) -> Result<()> {
+fn run_migrate(
+    input: PathBuf,
+    out: PathBuf,
+    format: MigrateFormat,
+    placeholder_accounts: bool,
+    lenient: bool,
+) -> Result<()> {
+    if placeholder_accounts && !matches!(format, MigrateFormat::Iif) {
+        anyhow::bail!("--placeholder-accounts applies only to --format iif");
+    }
     match format {
-        MigrateFormat::Sqlite => run_export(input, out).map(|s| println!("{}", s.summary())),
-        MigrateFormat::Csv => run_migrate_csv(input, out),
-        MigrateFormat::Iif => run_migrate_iif(input, out),
+        MigrateFormat::Sqlite => {
+            run_export(input, out, lenient).map(|s| println!("{}", s.summary()))
+        }
+        MigrateFormat::Csv => run_migrate_csv(input, out, lenient),
+        MigrateFormat::Iif => run_migrate_iif(input, out, placeholder_accounts, lenient),
     }
 }
 
-fn collect_records(
-    input: &PathBuf,
-) -> Result<(Vec<LineItem>, Vec<TransactionHeader>, PageStore, ApModel)> {
+struct Records {
+    items: Vec<LineItem>,
+    rejected: Vec<LineItemError>,
+    headers: Vec<TransactionHeader>,
+    store: PageStore,
+    model: ApModel,
+}
+
+fn collect_records(input: &PathBuf, lenient: bool) -> Result<Records> {
     let store = PageStore::open(input).with_context(|| format!("opening {:?}", input))?;
     let model = ApModel::learn(&store);
     let attribution = PageAttribution::build(&store, &model);
     warn_on_attribution_gap(&attribution);
-    let mut items: Vec<LineItem> =
-        iter_lineitems_with_attribution(&store, &model, &attribution).collect();
+    let (mut items, rejected) = collect_lineitems(&store, &model, &attribution, lenient)?;
     items.sort_by_key(|li| (li.page_number, li.page_offset));
     let mut headers: Vec<TransactionHeader> =
         iter_transaction_headers(&store, &model, &attribution).collect();
     headers.sort_by_key(|h| (h.page_number, h.page_offset));
-    Ok((items, headers, store, model))
+    Ok(Records {
+        items,
+        rejected,
+        headers,
+        store,
+        model,
+    })
 }
 
 /// Minimal CSV-field escaper: quote if the field contains comma, quote,
@@ -1030,15 +1161,28 @@ fn iso_date_from_unix_days(days: i64) -> String {
     format!("{:04}-{:02}-{:02}", y, m, d)
 }
 
+/// Format signed cents as a decimal string without going through f64.
+fn format_cents(cents: i64) -> String {
+    let sign = if cents < 0 { "-" } else { "" };
+    let abs = cents.unsigned_abs();
+    format!("{sign}{}.{:02}", abs / 100, abs % 100)
+}
+
 fn lineitem_date(li: &LineItem) -> String {
     li.txn_date_days_since_unix()
         .map(iso_date_from_unix_days)
         .unwrap_or_default()
 }
 
-fn run_migrate_csv(input: PathBuf, out: PathBuf) -> Result<()> {
+fn run_migrate_csv(input: PathBuf, out: PathBuf, lenient: bool) -> Result<()> {
     std::fs::create_dir_all(&out).with_context(|| format!("creating {:?}", out))?;
-    let (items, headers, store, model) = collect_records(&input)?;
+    let Records {
+        items,
+        rejected,
+        headers,
+        store,
+        model,
+    } = collect_records(&input, lenient)?;
 
     // catalog.csv
     let mut cat = std::fs::File::create(out.join("catalog.csv"))?;
@@ -1077,25 +1221,18 @@ fn run_migrate_csv(input: PathBuf, out: PathBuf) -> Result<()> {
     let mut lif = std::fs::File::create(out.join("lineitems.csv"))?;
     writeln!(
         lif,
-        "invoice_id,item_qb_id,amount_cents,amount_signed_cents,amount_decimal,txn_date,source_table,page_number,page_offset"
+        "invoice_id,item_qb_id,amount_cents,amount_encoding,amount_decimal,txn_date,source_table,page_number,page_offset"
     )?;
     for li in &items {
         let amt = li.amount_cents.map(|c| c.to_string()).unwrap_or_default();
-        let amts = li
-            .amount_cents_signed
-            .map(|c| c.to_string())
-            .unwrap_or_default();
-        let dec = li
-            .amount_cents
-            .map(|c| format!("{:.2}", c as f64 / 100.0))
-            .unwrap_or_default();
+        let dec = li.amount_cents.map(format_cents).unwrap_or_default();
         writeln!(
             lif,
             "{},{},{},{},{},{},{},{},{}",
             csv_field(&li.invoice_id),
             csv_field(li.item_qb_id.as_deref().unwrap_or("")),
             amt,
-            amts,
+            li.amount_encoding.as_str(),
             dec,
             lineitem_date(li),
             csv_field(li.source_table.as_deref().unwrap_or("")),
@@ -1104,42 +1241,99 @@ fn run_migrate_csv(input: PathBuf, out: PathBuf) -> Result<()> {
         )?;
     }
 
+    if !rejected.is_empty() {
+        let mut rf = std::fs::File::create(out.join("rejected.csv"))?;
+        writeln!(rf, "page_number,page_offset,reason")?;
+        for e in &rejected {
+            let (page, offset) = rejection_location(e);
+            writeln!(
+                rf,
+                "{},{},{}",
+                page.map(|v| v.to_string()).unwrap_or_default(),
+                offset.map(|v| v.to_string()).unwrap_or_default(),
+                csv_field(&e.to_string()),
+            )?;
+        }
+    }
+
     println!(
-        "openqbw migrate csv: out={:?} tables={} transactions={} lineitems={}",
+        "openqbw migrate csv: out={:?} tables={} transactions={} lineitems={} undecoded_amounts={} skipped_records={}",
         out,
         tables.len(),
         headers.len(),
         items.len(),
+        items.iter().filter(|li| li.amount_cents.is_none()).count(),
+        rejected.len(),
     );
     Ok(())
 }
 
-fn run_migrate_iif(input: PathBuf, out: PathBuf) -> Result<()> {
-    let (items, headers, _store, _model) = collect_records(&input)?;
-    use std::io::Write;
-    let mut f = std::fs::File::create(&out).with_context(|| format!("creating {:?}", out))?;
+fn run_migrate_iif(
+    input: PathBuf,
+    out: PathBuf,
+    placeholder_accounts: bool,
+    lenient: bool,
+) -> Result<()> {
+    if !placeholder_accounts {
+        anyhow::bail!(
+            "IIF export is not available: account names and transaction types are not decoded \
+             from the file, so the output would post entries to invented accounts. Pass \
+             --placeholder-accounts to write it anyway (every TRNS uses the account \
+             'Accounts Receivable', every SPL uses the internal source-table name as its \
+             account, parents without a header become GENERAL JOURNAL, and transactions with \
+             an undecoded amount are left out and counted)."
+        );
+    }
+    let Records {
+        items,
+        rejected,
+        headers,
+        ..
+    } = collect_records(&input, lenient)?;
+    let (text, stats) = render_iif(&items, &headers);
+    std::fs::write(&out, text).with_context(|| format!("writing {:?}", out))?;
+    println!(
+        "openqbw migrate iif: out={:?} transactions={} lineitems={} skipped_transactions={} \
+         skipped_lineitems={} (undecoded amounts) skipped_records={}",
+        out,
+        stats.written_txns,
+        stats.written_lines,
+        stats.skipped_txns,
+        stats.skipped_lines,
+        rejected.len(),
+    );
+    Ok(())
+}
 
+#[derive(Debug, Default, PartialEq, Eq)]
+struct IifStats {
+    written_txns: usize,
+    written_lines: usize,
+    skipped_txns: usize,
+    skipped_lines: usize,
+}
+
+/// Render the placeholder-account IIF. A transaction with any line whose
+/// amount is not decoded is left out whole, because a partial transaction
+/// would not balance.
+fn render_iif(items: &[LineItem], headers: &[TransactionHeader]) -> (String, IifStats) {
+    use std::fmt::Write;
     // IIF requires CRLF line endings for maximum compatibility with the
     // Windows tools that consume it.
     let nl = "\r\n";
-    write!(
+    let mut f = String::new();
+    let _ = write!(
         f,
         "!TRNS\tTRNSID\tTRNSTYPE\tDATE\tACCNT\tNAME\tAMOUNT\tMEMO{nl}"
-    )?;
-    write!(
+    );
+    let _ = write!(
         f,
         "!SPL\tSPLID\tTRNSTYPE\tDATE\tACCNT\tNAME\tAMOUNT\tMEMO{nl}"
-    )?;
-    write!(f, "!ENDTRNS{nl}")?;
+    );
+    let _ = write!(f, "!ENDTRNS{nl}");
 
-    // Bucket line items by parent invoice id. We emit one TRNS per parent
-    // group: in this build most parents are orphans (no matching header)
-    // because the WP-6Z work only parses the lineitem and a small slice of
-    // header tables. We still emit them as TRNS/SPL pairs so the IIF is
-    // useful for liberation. When a matching header exists, we use its
-    // txn_type; otherwise we default to GENERAL JOURNAL.
     let mut by_parent: HashMap<&str, Vec<&LineItem>> = HashMap::new();
-    for li in &items {
+    for li in items {
         by_parent
             .entry(li.invoice_id.as_str())
             .or_default()
@@ -1152,18 +1346,16 @@ fn run_migrate_iif(input: PathBuf, out: PathBuf) -> Result<()> {
 
     let mut trns_id: u64 = 1;
     let mut spl_id: u64 = 1;
-    let mut written_txns = 0usize;
-    let mut written_lines = 0usize;
+    let mut stats = IifStats::default();
 
     for parent_id in parent_ids {
-        let kids = by_parent.get(parent_id).cloned().unwrap_or_default();
-        if kids.is_empty() {
+        let kids = &by_parent[parent_id];
+        let Some(cents): Option<Vec<i64>> = kids.iter().map(|li| li.amount_cents).collect() else {
+            stats.skipped_txns += 1;
+            stats.skipped_lines += kids.len();
             continue;
-        }
-        let sum_cents: i64 = kids
-            .iter()
-            .map(|li| li.amount_cents.unwrap_or(0) as i64)
-            .sum();
+        };
+        let sum_cents: i64 = cents.iter().sum();
         let date = kids
             .iter()
             .find_map(|li| li.txn_date_days_since_unix())
@@ -1173,41 +1365,35 @@ fn run_migrate_iif(input: PathBuf, out: PathBuf) -> Result<()> {
             .get(parent_id)
             .map(|h| h.txn_type().to_uppercase())
             .unwrap_or_else(|| "GENERAL JOURNAL".to_string());
-        let amt = sum_cents as f64 / 100.0;
-        let memo = format_args!("qb_id={parent_id}").to_string();
-        write!(
+        let amt = format_cents(sum_cents);
+        let _ = write!(
             f,
-            "TRNS\t{trns_id}\t{ttype}\t{date}\tAccounts Receivable\t\t{amt:.2}\t{memo}{nl}"
-        )?;
-        for li in &kids {
-            let amt = -(li.amount_cents.unwrap_or(0) as i64) as f64 / 100.0;
+            "TRNS\t{trns_id}\t{ttype}\t{date}\tAccounts Receivable\t\t{amt}\tqb_id={parent_id}{nl}"
+        );
+        for (li, c) in kids.iter().zip(&cents) {
+            let amt = format_cents(-c);
             let date = lineitem_date(li);
             let accnt = li.source_table.as_deref().unwrap_or("");
             let memo = li.item_qb_id.as_deref().unwrap_or("");
-            write!(
+            let _ = write!(
                 f,
-                "SPL\t{spl_id}\t{ttype}\t{date}\t{accnt}\t\t{amt:.2}\t{memo}{nl}"
-            )?;
+                "SPL\t{spl_id}\t{ttype}\t{date}\t{accnt}\t\t{amt}\t{memo}{nl}"
+            );
             spl_id += 1;
-            written_lines += 1;
+            stats.written_lines += 1;
         }
-        write!(f, "ENDTRNS{nl}")?;
+        let _ = write!(f, "ENDTRNS{nl}");
         trns_id += 1;
-        written_txns += 1;
+        stats.written_txns += 1;
     }
-
-    println!(
-        "openqbw migrate iif: out={:?} transactions={} lineitems={}",
-        out, written_txns, written_lines
-    );
-    Ok(())
+    (f, stats)
 }
 
 // =========================================================================
 // forensics -- file-level discovery
 // =========================================================================
 
-fn run_forensics(input: PathBuf) -> Result<()> {
+fn run_forensics(input: PathBuf, lenient: bool) -> Result<()> {
     let store = PageStore::open(&input).with_context(|| format!("opening {:?}", input))?;
     let model = ApModel::learn(&store);
     let attribution = PageAttribution::build(&store, &model);
@@ -1240,8 +1426,7 @@ fn run_forensics(input: PathBuf) -> Result<()> {
     println!("tables total: {}", tables.len());
     println!("tables user : {}", user_tables.len());
 
-    let items: Vec<LineItem> =
-        iter_lineitems_with_attribution(&store, &model, &attribution).collect();
+    let (items, rejected) = collect_lineitems(&store, &model, &attribution, lenient)?;
     let headers: Vec<TransactionHeader> =
         iter_transaction_headers(&store, &model, &attribution).collect();
 
@@ -1257,18 +1442,19 @@ fn run_forensics(input: PathBuf) -> Result<()> {
     let parent_ids: HashSet<&str> = items.iter().map(|li| li.invoice_id.as_str()).collect();
     let orphan_parents = parent_ids.difference(&header_ids).count();
     let childless_headers = header_ids.difference(&parent_ids).count();
-    let grand_total_cents: i64 = items
-        .iter()
-        .map(|li| li.amount_cents.unwrap_or(0) as i64)
-        .sum();
+    let decoded_cents: i64 = items.iter().filter_map(|li| li.amount_cents).sum();
+    let undecoded = items.iter().filter(|li| li.amount_cents.is_none()).count();
 
     println!("distinct parent invoice ids : {}", parent_ids.len());
     println!("orphan parents (no header)  : {}", orphan_parents);
     println!("childless headers           : {}", childless_headers);
     println!(
-        "lineitem grand total        : ${:.2}",
-        grand_total_cents as f64 / 100.0
+        "lineitem total (decoded)    : ${:.2} over {} line items; {} line items have undecoded amounts and are not included",
+        decoded_cents as f64 / 100.0,
+        items.len() - undecoded,
+        undecoded,
     );
+    println!("records skipped (--lenient) : {}", rejected.len());
 
     if orphan_parents > 0 || childless_headers > 0 {
         println!();
@@ -1278,4 +1464,68 @@ fn run_forensics(input: PathBuf) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use openqbw::AmountEncoding;
+
+    fn item(parent: &str, cents: Option<i64>) -> LineItem {
+        LineItem {
+            invoice_id: parent.to_owned(),
+            page_number: 1,
+            page_offset: 0,
+            item_qb_id: None,
+            amount_type: AmountType::Standard,
+            amount_encoding: if cents.is_some() {
+                AmountEncoding::SignBitU23
+            } else {
+                AmountEncoding::Unconfirmed
+            },
+            amount_cents: cents,
+            amount_raw: [0; 4],
+            txn_date_raw: None,
+            counter: None,
+            source_table: Some("abmc_general_journal_inventory_lineitem".to_owned()),
+        }
+    }
+
+    #[test]
+    fn format_cents_keeps_sign_and_cents() {
+        assert_eq!(format_cents(-77_120), "-771.20");
+        assert_eq!(format_cents(5), "0.05");
+        assert_eq!(format_cents(-5), "-0.05");
+        assert_eq!(format_cents(266_112), "2661.12");
+    }
+
+    #[test]
+    fn iif_keeps_signed_amounts() {
+        let items = [item("P1", Some(77_120)), item("P1", Some(-77_120))];
+        let (text, stats) = render_iif(&items, &[]);
+        assert_eq!(stats.written_txns, 1);
+        assert!(text.contains("\tAccounts Receivable\t\t0.00\t"), "{text}");
+        assert!(text.contains("\t-771.20\t"), "{text}");
+        assert!(text.contains("\t771.20\t"), "{text}");
+    }
+
+    #[test]
+    fn iif_leaves_out_transactions_with_undecoded_amounts() {
+        let items = [
+            item("P1", Some(100)),
+            item("P1", None),
+            item("P2", Some(200)),
+        ];
+        let (text, stats) = render_iif(&items, &[]);
+        assert_eq!(
+            stats,
+            IifStats {
+                written_txns: 1,
+                written_lines: 1,
+                skipped_txns: 1,
+                skipped_lines: 2
+            }
+        );
+        assert!(!text.contains("P1"), "{text}");
+    }
 }

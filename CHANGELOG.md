@@ -6,6 +6,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Behavior changes
+
+- Line-item amounts are decoded per source table. Journal lines
+  (`abmc_general_journal_inventory_lineitem`) use the sign bit, so a line
+  stored as `02 c0 2d 01` is -$771.20, where earlier versions reported
+  +$772.48. Invoice lines (`abmc_invoice_inventory_lineitem`) are unsigned.
+  Lines on any other table, lines without a source table, and lines with
+  amount type `0x00`, `0x01` or `0x03` have no amount (`amount_cents` is
+  `None` / NULL), where earlier versions reported an unsigned reading or 0.
+- `LineItem::amount_cents` is `Option<i64>`. `amount_cents_signed` is removed;
+  `amount_encoding` names the reading used.
+- `iter_lineitems` and `iter_lineitems_with_attribution` yield
+  `Result<LineItem, LineItemError>`. An anchor followed by an unknown
+  amount-type byte, or one whose amount runs past the page data area, is an
+  error (`UnknownAmountType`, `TruncatedAmount`) instead of a line item
+  with a zero or unknown amount. A page read failure is an error
+  (`Page`) instead of ending the scan. `scan_lineitems` collects the
+  results.
+- The CLI stops at the first such error. `--lenient` skips those records,
+  prints how many on stderr, and lists them (`scan_rejections` table in
+  SQLite, `rejected.csv` in CSV exports).
+- Python `Reader.line_items()` raises `ValueError` on such a record;
+  `line_items(lenient=True)` skips them and issues a `UserWarning` with the
+  count. The dicts gain `amount_encoding`, `amount_type`, `amount_raw`,
+  `txn_date_raw` and `counter`, and lose `amount_cents_signed`.
+- Line items are scanned to the end of the page data area (0xFF0, was 0xFE0).
+- SQLite export: `transactions.total_cents` is NULL when any line of the
+  transaction has no decoded amount; `unresolved_lines` counts them.
+  `transaction_line_items` gains `amount_encoding` and `amount_raw_u24_cents`
+  (the undecoded unsigned reading, kept for the `verify` regression baseline)
+  and loses `amount_cents_signed`. Export summaries state how many
+  transactions and line items are excluded from the grand total.
+- CSV export: `amount_signed_cents` is replaced by `amount_encoding`;
+  `amount_decimal` is computed from integer cents.
+- `openqbw migrate --format iif` exits with an error. `--placeholder-accounts`
+  writes the file with placeholder accounts and leaves out, and counts,
+  transactions that have an undecoded amount.
+
 ## [0.1.6] - 2026-10-04
 
 ### Fixed

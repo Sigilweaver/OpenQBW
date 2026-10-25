@@ -48,8 +48,8 @@ pub use date::{
 };
 pub use fkgraph::{FkEdge, FkGraphStats, build as build_fk_graph, stats as fk_graph_stats};
 pub use lineitem::{
-    AmountType, DATE_EPOCH_DAYS_BEFORE_UNIX, LineItem, LineItemError, iter_lineitems,
-    iter_lineitems_with_attribution,
+    AmountEncoding, AmountType, DATE_EPOCH_DAYS_BEFORE_UNIX, LineItem, LineItemError, LineItemScan,
+    iter_lineitems, iter_lineitems_with_attribution, scan_lineitems,
 };
 pub use nullability::{NullsFlagBucket, histogram as nulls_flag_histogram};
 pub use opaque::{OPAQUE_ENTROPY_THRESHOLD, is_opaque_high_entropy};
