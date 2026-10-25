@@ -163,6 +163,21 @@ Built on opensqlany 0.3 (pinned to a git revision until it is published).
   `pages_unconfirmed_directory`; `scan_syscolumn_page` takes a
   `&mut SyscolumnStats`. `OwnerBridge` and `FkGraph` gain `pages_rejected`.
 - `AttributionGap` gains `as_str()`.
+- Python: `openqbw.open(path, *, lenient=False)`; the options are
+  keyword-only and apply to every read from the returned `Reader`, so
+  `line_items()` and `transactions()` no longer take `lenient`. Every method
+  (`tables()`, `indexes()`, `line_items()`, `transactions()`) returns a
+  `ScanReport` (a sequence, with `items`, `rejected` and `warnings`) of
+  frozen record objects (`Table`, `Index`, `LineItem`, `Transaction`) with
+  attributes and `to_dict()`, in place of lists of dicts. Warnings are
+  `ReadWarning` objects (`kind`, `message`) and are also issued as
+  `openqbw.OpenQBWWarning`. `Reader.attribution_gap` is a snake_case code.
+- Python exceptions: `OpenQBWError` derives from `ValueError`;
+  `OpenQBWIOError(OpenQBWError, OSError)` replaces the plain `OSError` for
+  unreadable files; `FormatError`, `RecordError` (now a `FormatError`) and
+  `ContentError` (now a `FormatError`) carry `kind`, `page_number` and
+  `page_offset`. The package ships `.pyi` stubs and `py.typed`; the native
+  module is `openqbw._openqbw`.
 
 ## [0.1.6] - 2026-10-04
 

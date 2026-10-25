@@ -15,7 +15,7 @@ description = "Python bindings for openqbw"
 # which conflicts with workspace `unsafe_code = forbid`.
 
 [lib]
-name = "openqbw"
+name = "_openqbw"
 crate-type = ["cdylib"]
 
 [dependencies]

@@ -25,6 +25,7 @@ Repository = "https://github.com/Sigilweaver/OpenQBW"
 
 [tool.maturin]
 manifest-path = "Cargo.toml"
-module-name = "openqbw"
+module-name = "openqbw._openqbw"
+python-source = "python"
 include = [{ path = "LICENSE", format = "sdist" }, { path = "NOTICE", format = "sdist" }]
 strip = true
