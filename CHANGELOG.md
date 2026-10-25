@@ -148,6 +148,9 @@ Built on opensqlany 0.3 (pinned to a git revision until it is published).
 - `openqbw migrate --format iif` exits with an error. `--placeholder-accounts`
   writes the file with placeholder accounts and leaves out, and counts,
   transactions that have an undecoded amount.
+- SQLite export: transaction headers that repeat an earlier `qb_id` are
+  still left out, but are now counted on stderr together with the number of
+  IDs seen under more than one transaction type.
 - `openqbw forensics` reports the size of the opened store instead of 0 when
   file metadata cannot be read.
 

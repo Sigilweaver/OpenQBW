@@ -57,6 +57,23 @@ pub struct TransactionHeader {
 }
 
 impl TransactionHeader {
+    /// Build a header with the given ID and source table, all other fields
+    /// empty. For tests and tools that need to synthesize records; scans
+    /// never call it.
+    #[doc(hidden)]
+    pub fn synthetic(qb_id: &str, source_table: &str) -> Self {
+        Self {
+            qb_id: qb_id.to_owned(),
+            source_table: source_table.to_owned(),
+            txn_date_raw: None,
+            counter: None,
+            date_source: DateSource::NotFound,
+            flags: Vec::new(),
+            page_number: 0,
+            page_offset: 0,
+        }
+    }
+
     /// The transaction date as days since the Unix epoch (1970-01-01), with
     /// the crate's SA-day offset (see `txn_date_raw` for the stored value).
     /// The offset is fitted to one sample file and not confirmed against a

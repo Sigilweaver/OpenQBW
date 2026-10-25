@@ -1015,13 +1015,52 @@ fn create_schema(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Headers seen more than once under the same `qb_id`.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct HeaderDupes {
+    /// Sightings after the first.
+    duplicates: usize,
+    /// IDs seen under more than one transaction type.
+    conflicting_types: usize,
+}
+
+/// One header per `qb_id`, keeping the first sighting in page order, and
+/// the count of the others.
+fn dedupe_headers(
+    headers: &[TransactionHeader],
+) -> (HashMap<String, TransactionHeader>, HeaderDupes) {
+    let mut map: HashMap<String, TransactionHeader> = HashMap::new();
+    let mut conflicting: std::collections::HashSet<&str> = Default::default();
+    let mut dupes = HeaderDupes::default();
+    for h in headers {
+        match map.get(&h.qb_id) {
+            None => {
+                map.insert(h.qb_id.clone(), h.clone());
+            }
+            Some(first) => {
+                dupes.duplicates += 1;
+                if first.txn_type() != h.txn_type() {
+                    conflicting.insert(h.qb_id.as_str());
+                }
+            }
+        }
+    }
+    dupes.conflicting_types = conflicting.len();
+    (map, dupes)
+}
+
 fn insert_transaction_headers(
     tx: &Transaction<'_>,
     headers: &[TransactionHeader],
 ) -> Result<HashMap<String, TransactionHeader>> {
-    let mut map: HashMap<String, TransactionHeader> = HashMap::new();
-    for h in headers {
-        map.entry(h.qb_id.clone()).or_insert_with(|| h.clone());
+    let (map, dupes) = dedupe_headers(headers);
+    if dupes.duplicates > 0 {
+        eprintln!(
+            "warning: {} transaction headers repeat an earlier qb_id and were not exported \
+             ({} qb_ids appear under more than one transaction type; the first in page order \
+             was kept)",
+            dupes.duplicates, dupes.conflicting_types
+        );
     }
     let mut stmt = tx.prepare(
         "INSERT INTO transactions \
@@ -1718,6 +1757,27 @@ mod tests {
     fn sqlite_without_meta_is_rejected() {
         let conn = Connection::open_in_memory().unwrap();
         assert!(check_export_format(&conn).is_err());
+    }
+
+    #[test]
+    fn duplicate_header_ids_are_counted() {
+        // S3-26: the same qb_id under two header tables kept the first and
+        // dropped the conflict without a count.
+        let headers = [
+            TransactionHeader::synthetic("0000000000001QBm", "abmc_invoice_header"),
+            TransactionHeader::synthetic("0000000000001QBm", "abmc_invoice_header"),
+            TransactionHeader::synthetic("0000000000001QBm", "abmc_bill_header"),
+            TransactionHeader::synthetic("0000000000002QBm", "abmc_bill_header"),
+        ];
+        let (map, dupes) = dedupe_headers(&headers);
+        assert_eq!(map.len(), 2);
+        assert_eq!(
+            dupes,
+            HeaderDupes {
+                duplicates: 2,
+                conflicting_types: 1
+            }
+        );
     }
 
     #[test]
