@@ -197,13 +197,6 @@ First publication-ready release.
 - `CHANGELOG.md`, `CONTRIBUTING.md`, `SECURITY.md`, `NOTICE`.
 - Documentation site at <https://sigilweaver.app/openqbw/docs/>.
 
-### Validated
-
-- On the publicly-available Rock Castle sample, the line-item
-  extractor reaches 13,375 / 13,375 invoices and a grand total of
-  $399,914,792.78, matching the value QuickBooks itself reports
-  for the same file.
-
 [Unreleased]: https://github.com/Sigilweaver/OpenQBW/compare/v0.1.6...HEAD
 [0.1.6]: https://github.com/Sigilweaver/OpenQBW/releases/tag/v0.1.6
 [0.1.5]: https://github.com/Sigilweaver/OpenQBW/releases/tag/v0.1.5
