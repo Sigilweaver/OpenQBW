@@ -2,13 +2,13 @@
 
 use std::path::Path;
 
-use opensqlany::{ApModel, PageStore};
+use opensqlany::{ApModel, PageStore, PageType};
 
 use crate::error::Result;
 use crate::lineitem::{LineItem, scan_lineitems};
 use crate::open::{learn_model, open_store, store_from_bytes};
 use crate::page_attribution::{AttributionGap, PageAttribution};
-use crate::scan::{ReadOptions, Scan, Warning, WarningKind};
+use crate::scan::{ReadOptions, RecordFlag, Scan, Warning, WarningKind};
 use crate::syscolumn::{SchemaRecovery, SysColumn};
 use crate::sysindex::SysIndexEntry;
 use crate::systable::SysTableEntry;
@@ -53,6 +53,14 @@ impl Reader {
     fn from_store(store: PageStore, options: &ReadOptions) -> Result<Self> {
         let model = learn_model(&store)?;
         let mut catalog = crate::systable::collect_unique(&store, &model, options)?;
+        let invalid = flag_invalid_roots(&store, &mut catalog.items);
+        if invalid > 0 {
+            catalog
+                .warnings
+                .push(Warning::new(WarningKind::InvalidRootPages {
+                    tables: invalid,
+                }));
+        }
         let attribution = PageAttribution::from_catalog(catalog.items.clone());
         if let Some(gap) = attribution.gap() {
             catalog
@@ -151,4 +159,23 @@ impl Reader {
                 .push(Warning::new(WarningKind::AttributionGap(gap)));
         }
     }
+}
+
+/// Flag catalog rows whose `data_root_page` is past the end of the store or
+/// not an `E` page. Returns how many were flagged.
+fn flag_invalid_roots(store: &PageStore, entries: &mut [SysTableEntry]) -> u64 {
+    let mut flagged = 0;
+    for e in entries {
+        let Some(root) = e.data_root_page.filter(|&p| p > 0) else {
+            continue;
+        };
+        let is_extent = store
+            .page(u64::from(root))
+            .is_ok_and(|p| p.trailer().page_type() == PageType::Extent);
+        if !is_extent {
+            e.flags.push(RecordFlag::RootPageInvalid);
+            flagged += 1;
+        }
+    }
+    flagged
 }

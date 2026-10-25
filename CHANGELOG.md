@@ -58,6 +58,11 @@ Built on opensqlany 0.3 (pinned to a git revision until it is published).
 - `SYSTABLE` trailer fields (`col_count`, `data_root_page`, `last_page`) are no
   longer read from the page trailer bytes at 0xFF0 and above; a row too close
   to the end of the page data area gets `None` for fields that do not fit.
+- A `SYSTABLE` row whose `data_root_page` is past the end of the file or not
+  a data (`E`) page carries `RecordFlag::RootPageInvalid` and is not used for
+  page-to-table attribution; the catalog carries an `invalid_root_pages`
+  warning. Earlier versions let such a value move the attribution boundaries
+  of every page above it.
 - `SYSCOLUMN` name recovery tries every default-value length and requires the
   default's length byte to agree. A column whose default value is itself a
   valid identifier (for example `is_active` with default `Y`) is counted in

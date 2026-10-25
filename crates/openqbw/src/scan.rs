@@ -123,6 +123,10 @@ pub enum RecordFlag {
     /// Some bytes the record was read from lie in a 512-byte sector whose
     /// keystream step could not be told apart from its runner-up.
     LowConfidenceSector,
+    /// A `SYSTABLE` row's `data_root_page` is past the end of the file or
+    /// not a data (`E`) page, so it cannot be the table's root. The row is
+    /// not used for page-to-table attribution.
+    RootPageInvalid,
 }
 
 impl RecordFlag {
@@ -135,6 +139,7 @@ impl RecordFlag {
             Self::HeaderIdAmbiguous => "header_id_ambiguous",
             Self::KeystreamUnverified => "keystream_unverified",
             Self::LowConfidenceSector => "low_confidence_sector",
+            Self::RootPageInvalid => "root_page_invalid",
         }
     }
 }
@@ -193,6 +198,14 @@ pub enum WarningKind {
         /// Anchors left out.
         records: u64,
     },
+    /// `SYSTABLE` rows whose `data_root_page` cannot be a root (past the end
+    /// of the file or not a data page). They carry
+    /// [`RecordFlag::RootPageInvalid`] and are not used for attribution.
+    #[non_exhaustive]
+    InvalidRootPages {
+        /// Rows affected.
+        tables: u64,
+    },
     /// Page-to-table attribution is unavailable, so records have no
     /// source table and header scans find nothing.
     AttributionGap(AttributionGap),
@@ -209,6 +222,7 @@ impl WarningKind {
             Self::LowConfidenceSectorPages { .. } => "low_confidence_sector_pages",
             Self::UnconfirmedDirectoryPages { .. } => "unconfirmed_directory_pages",
             Self::RecordsOutsideLiveRows { .. } => "records_outside_live_rows",
+            Self::InvalidRootPages { .. } => "invalid_root_pages",
             Self::AttributionGap(_) => "attribution_gap",
             Self::Other(code) => code,
         }
@@ -255,6 +269,11 @@ impl fmt::Display for Warning {
                 f,
                 "{records} record anchors in page free space (deleted or moved records) were \
                  left out"
+            ),
+            WarningKind::InvalidRootPages { tables } => write!(
+                f,
+                "{tables} SYSTABLE rows name a data_root_page that is past the end of the file \
+                 or not a data page; they are not used for attribution"
             ),
             WarningKind::AttributionGap(AttributionGap::NoCatalogRows) => write!(
                 f,

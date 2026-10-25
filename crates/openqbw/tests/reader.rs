@@ -86,6 +86,27 @@ fn undecodable_record_is_an_error_unless_lenient() {
 }
 
 #[test]
+fn root_page_that_is_not_a_data_page_is_flagged_and_not_used() {
+    // S1-11: a data_root_page that is past the end of the file or not an `E`
+    // page cannot be a table root, but used to move attribution boundaries.
+    let r = Reader::from_bytes(common::synthetic_qbw_bad_root(), &ReadOptions::default()).unwrap();
+    let bogus = r
+        .catalog()
+        .items
+        .iter()
+        .find(|t| t.name == "abmc_bogus")
+        .unwrap();
+    assert!(bogus.flags.contains(&RecordFlag::RootPageInvalid));
+    assert!(r.attribution().attribute(3).is_none());
+    assert!(
+        r.catalog()
+            .warnings
+            .iter()
+            .any(|w| w.kind.as_str() == "invalid_root_pages")
+    );
+}
+
+#[test]
 fn not_a_company_file_is_a_format_error() {
     let mut bytes = common::synthetic_qbw(false);
     bytes[0x14] ^= 0xFF;

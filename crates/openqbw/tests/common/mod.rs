@@ -29,6 +29,16 @@ pub const SA_DAY: u32 = 23_817;
 /// The fixture as bytes. With `bad_record`, page 7 holds a line-item anchor
 /// followed by an unknown amount-type byte.
 pub fn synthetic_qbw(bad_record: bool) -> Vec<u8> {
+    build(bad_record, false)
+}
+
+/// The fixture with a fourth `SYSTABLE` row, `abmc_bogus`, whose
+/// `data_root_page` is page 1, the `@` calibration page.
+pub fn synthetic_qbw_bad_root() -> Vec<u8> {
+    build(false, true)
+}
+
+fn build(bad_record: bool, bad_root: bool) -> Vec<u8> {
     let mut pages: Vec<Vec<u8>> = Vec::new();
     pages.push(superblock());
     pages.push(encode(&[0u8; PAGE], 1, b'@', [3, 5, 7, 9, 11, 13, 15, 17]));
@@ -51,6 +61,9 @@ pub fn synthetic_qbw(bad_record: bool) -> Vec<u8> {
         6,
         7,
     );
+    if bad_root {
+        put_systable_row(&mut systable, 0x500, 103, "abmc_bogus", 1, 1);
+    }
     pages.push(e_page(systable, 2));
     pages.push(e_page(vec![0u8; PAGE], 3));
 
