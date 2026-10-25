@@ -15,10 +15,13 @@
 
 use opensqlany::{ApModel, PageStore};
 
+use crate::error::Result;
+use crate::scan::ReadOptions;
 use crate::{SysColumn, SysTableEntry};
 
 /// One inferred foreign-key edge.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct FkEdge {
     /// Owning table of the referring column.
     pub source_table: String,
@@ -88,21 +91,40 @@ pub struct FkGraph {
     /// Of those, columns whose owner could not be bridged to a table name
     /// and so produced no edge.
     pub columns_unbridged: usize,
+    /// Pages a lenient read skipped because they failed to decode.
+    pub pages_rejected: usize,
 }
 
 /// Build a heuristic FK edge list from the parsed SYSTABLE + SYSCOLUMN
 /// catalogs. Column owners are bridged to table names with the same
 /// owner bridge `schema` uses ([`crate::owner_bridge`]); columns that do
 /// not bridge are counted in [`FkGraph::columns_unbridged`].
-pub fn build(store: &PageStore, model: &ApModel) -> FkGraph {
-    let tables: Vec<SysTableEntry> = crate::collect_unique(store, model);
-    let (columns, _stats) = crate::scan_syscolumns(store, model);
+///
+/// Pages that fail to decode are rejected per `options` and counted in
+/// [`FkGraph::pages_rejected`].
+pub(crate) fn build(store: &PageStore, model: &ApModel, options: &ReadOptions) -> Result<FkGraph> {
+    let table_scan = crate::systable::collect_unique(store, model, options)?;
+    let (column_scan, _stats) = crate::syscolumn::scan_syscolumns(store, model, options)?;
+    let tables: Vec<SysTableEntry> = table_scan.items;
+    let columns = column_scan.items;
     let mut bridge =
-        crate::owner_bridge::bridge_owners_via_backref(store, model, &columns, &tables);
-    crate::owner_bridge::extend_with_sysobject(&mut bridge, store, model, &columns, &tables);
+        crate::owner_bridge::bridge_owners_via_backref(store, model, &columns, &tables, options)?;
+    crate::owner_bridge::extend_with_sysobject(
+        &mut bridge,
+        store,
+        model,
+        &columns,
+        &tables,
+        options,
+    )?;
     let table_names: Vec<String> = tables.iter().map(|t| t.name.clone()).collect();
 
-    let mut graph = FkGraph::default();
+    let mut graph = FkGraph {
+        pages_rejected: table_scan.rejected.len()
+            + column_scan.rejected.len()
+            + bridge.pages_rejected,
+        ..FkGraph::default()
+    };
     for c in &columns {
         let Some(stem) = strip_id_suffix(&c.name) else {
             continue;
@@ -135,7 +157,7 @@ pub fn build(store: &PageStore, model: &ApModel) -> FkGraph {
             && a.source_column == b.source_column
             && a.source_column_id == b.source_column_id
     });
-    graph
+    Ok(graph)
 }
 
 fn pick_best(stem: &str, tables: &[String]) -> (Option<String>, u32) {

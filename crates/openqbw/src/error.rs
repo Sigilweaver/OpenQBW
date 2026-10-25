@@ -17,6 +17,7 @@ pub enum Error {
     #[error(
         "not a QuickBooks company file: bad superblock magic 0x{found:08X} (want 0x{expected:08X})"
     )]
+    #[non_exhaustive]
     BadMagic {
         /// Magic found at superblock offset 0x14.
         found: u32,
@@ -28,6 +29,7 @@ pub enum Error {
         "unsupported file version (format {format_major}, version {version_a}.{version_b}); \
          supported is 3, 201.12"
     )]
+    #[non_exhaustive]
     UnsupportedVersion {
         /// `format_major` found at superblock offset 0x10.
         format_major: u32,
@@ -39,18 +41,21 @@ pub enum Error {
     /// The superblock `flags_06` byte lacks the base bits every supported
     /// file carries.
     #[error("unsupported superblock flags 0x{flags_06:02X}")]
+    #[non_exhaustive]
     UnsupportedFlags {
         /// The byte at superblock offset 0x06.
         flags_06: u8,
     },
     /// A page's reserved trailer bytes are not zero.
     #[error("bad page trailer on page {page_number}: reserved bytes non-zero")]
+    #[non_exhaustive]
     BadTrailer {
         /// Zero-based page number.
         page_number: u64,
     },
     /// A page failed its CRC-32 check.
     #[error("crc mismatch on page {page_number}: stored 0x{stored:08X}, computed 0x{computed:08X}")]
+    #[non_exhaustive]
     BadCrc {
         /// Zero-based page number.
         page_number: u64,
@@ -61,6 +66,7 @@ pub enum Error {
     },
     /// Any other page-store failure.
     #[error("page store: {source}")]
+    #[non_exhaustive]
     Store {
         /// Page involved, when known.
         page_number: Option<u64>,
@@ -73,6 +79,7 @@ pub enum Error {
     #[error(
         "page {page_number} offset {page_offset:#x}: unknown amount-type byte {type_byte:#04x} after line-item anchor"
     )]
+    #[non_exhaustive]
     UnknownAmountType {
         /// Page holding the anchor.
         page_number: u64,
@@ -86,6 +93,7 @@ pub enum Error {
     #[error(
         "page {page_number} offset {page_offset:#x}: line-item anchor leaves fewer than 4 bytes for the amount"
     )]
+    #[non_exhaustive]
     TruncatedAmount {
         /// Page holding the anchor.
         page_number: u64,
@@ -95,6 +103,7 @@ pub enum Error {
     /// Most data pages are indistinguishable from random bytes, as in a
     /// password-protected or otherwise encrypted file. No records were read.
     #[error("{opaque} of {extent} data pages are opaque; the file content is not readable")]
+    #[non_exhaustive]
     ContentOpaque {
         /// Opaque `E` pages.
         opaque: u64,

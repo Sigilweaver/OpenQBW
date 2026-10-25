@@ -6,28 +6,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Built on opensqlany 0.3 (pinned to a git revision until it is published).
+
 ### Behavior changes
 
-- Built on opensqlany 0.3. Opening a file also rejects a superblock whose
-  `flags_06` byte lacks the base bits (`UnsupportedFlags`) and a page whose
-  reserved trailer bytes are not zero (`BadTrailer`). A file whose AP
-  keystream cannot be calibrated at all is an error (`Store`, from
-  `learn_model`) instead of decoding with `bv = 0`.
+- Opening a file checks the superblock magic, the version triple (3, 201.12),
+  the `flags_06` base bits, and the CRC-32 footer and reserved trailer bytes
+  of every page. A file that is not a QuickBooks company file (a `.QBB`, a
+  `.TLG`, any 4 KiB-aligned file), has another version, or has a damaged page
+  fails to open with a specific error (`BadMagic`, `UnsupportedVersion`,
+  `UnsupportedFlags`, `BadCrc`, `BadTrailer`) instead of exporting zero or
+  spurious records. A file whose keystream cannot be calibrated at all is an
+  error (`Store`) instead of decoding with `bv = 0`.
+- Reads are strict by default in the library, the CLI and Python: a record
+  or page that cannot be decoded is an error. `ReadOptions::lenient()`
+  (`--lenient`, `lenient=True`) skips each one and lists it in `rejected`
+  (`scan_rejections` in SQLite, `rejected.csv` in CSV). This now applies to
+  every command, including `catalog`, `schema` and the catalog read at open,
+  where a page that failed to decode used to end the scan silently.
 - Every page is decoded through one path. A page whose keystream opensqlany
   confirms is read as before. A page where exactly one `bv` decodes the
   QuickBooks C.36 anchor is read with that key (earlier versions took the
   first of several). Any other `E` page is decoded with opensqlany's
-  best-scoring key, and every line item and header read from it carries
-  `RecordFlag::KeystreamUnverified`; a record whose bytes touch a sector whose
-  step opensqlany could not determine carries
-  `RecordFlag::LowConfidenceSector`. The OpenQBW byte-zero oracle and brute
-  search are no longer used to decode pages.
+  best-scoring key, and every record read from it carries
+  `RecordFlag::KeystreamUnverified`; a record whose bytes touch a sector
+  whose step opensqlany could not determine carries
+  `RecordFlag::LowConfidenceSector`. Scans count both in a run-level
+  warning. The OpenQBW byte-zero oracle and brute search are no longer used
+  to decode pages.
 - Slot directories must be confirmed by the page prelude. Header pages
   without a confirmed directory use the linear scan, whose records carry
-  `HeaderIdAmbiguous`. `SYSCOLUMN` pages without one are skipped and counted
-  in `SyscolumnStats::pages_unconfirmed_directory`, and `openqbw schema`
-  prints the count. Not measured on a corpus: opensqlany reports that about a
-  fifth of `E` pages with a directory are not confirmed.
+  `HeaderIdAmbiguous`, and are counted in an `unconfirmed_directory_pages`
+  warning. `SYSCOLUMN` pages without one are skipped and counted in
+  `SyscolumnStats::pages_unconfirmed_directory`, and `openqbw schema` prints
+  the count. Not measured on a corpus: opensqlany reports that about a fifth
+  of `E` pages with a directory are not confirmed.
 - Line items take the nearest `04 00 10 <id>` item ID instead of the farthest
   in the 96 bytes before the anchor, and their search windows stop at the
   neighbouring records' anchors, so a record no longer reports the previous
@@ -43,48 +56,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   valid identifier (for example `is_active` with default `Y`) is counted in
   `SyscolumnStats::rows_ambiguous_name` and left out, where earlier versions
   reported the default as the column name. Defaults of any length are
-  recognized. `scan_page` takes a `&mut SyscolumnStats`.
-- `SchemaRecovery` gains `candidate_owners`, `catalog_col_count`, `scan_stats`
-  and `columns_short_of_catalog()`. `openqbw schema` warns about columns
-  missing relative to the `SYSTABLE` count, owners that tied, and rows or pages
-  it could not read.
+  recognized.
+- `openqbw schema` warns about columns missing relative to the `SYSTABLE`
+  count, owners that tied, and rows or pages it could not read.
 - A `SYSOBJECT` owner whose candidate table names tie on votes is left
   unbridged instead of taking an arbitrary one.
-- `build_fk_graph` returns an `FkGraph` and joins column owners to tables
-  through the owner bridge; columns that cannot be placed are counted
-  (`columns_unbridged`) instead of dropped, and `openqbw fkgraph` prints the
-  count. Earlier versions joined on `data_root_page`, which names unrelated
-  tables for most owners.
-- Opening a file checks the superblock magic, the version triple (3, 201.12)
-  and the CRC-32 footer of every page. A file that is not a QuickBooks
-  company file (a `.QBB`, a `.TLG`, any 4 KiB-aligned file), has another
-  version, or has a damaged page now fails to open with a specific error
-  instead of exporting zero or spurious records. The CLI and Python
-  `openqbw.open()` use `openqbw::open_store`; Python raises `FormatError`.
+- The foreign-key graph joins column owners to tables through the owner
+  bridge; columns that cannot be placed are counted (`columns_unbridged`)
+  instead of dropped, and `openqbw fkgraph` prints the count. Earlier
+  versions joined on `data_root_page`, which names unrelated tables for most
+  owners.
 - Line-item scans count pages whose body is indistinguishable from random
   bytes. When more than half of the data pages are opaque (as in a
   password-protected file) the scan fails with `ContentOpaque`; otherwise
-  the count is reported as a `ScanWarning::OpaquePages` (CLI stderr, Python
-  `UserWarning`). The 50% threshold has not been measured on a corpus.
-- Python `open()` issues a `UserWarning` when page-to-table attribution is
-  unavailable, and `Reader.attribution_gap` names the reason.
-- `Reader.file_size` and `openqbw forensics` report the size of the opened
-  store instead of 0 when file metadata cannot be read.
+  the count is reported as an `opaque_pages` warning. The 50% threshold has
+  not been measured on a corpus.
+- When page-to-table attribution is unavailable, the catalog, line-item and
+  header scans carry an `attribution_gap` warning.
 - Line-item and header dates are found in a wider window (SA-days
   10000..=40000, was 13000..20000, which stopped at Oct 2013), so records
   dated after Oct 2013 now have a date. When two separate date/counter pairs
   sit in the search window, the date and counter are left unset and
   `date_source` is `ambiguous` (`window_scan` when one pair was found,
-  `not_found` when none). `LineItem` and `TransactionHeader` gain
-  `date_source` and `flags` (`RecordFlag::DateAmbiguous`); SQLite, CSV and
-  Python outputs carry them. The scan window itself is internal.
-- `iter_transaction_headers` yields `Result<TransactionHeader, Error>`, and
-  `scan_transaction_headers` collects them with `ScanOptions`. Python
-  `Reader.transactions(*, lenient=False)` returns a `ScanReport` like
-  `line_items()` (renamed from `LineItems`). `transactions.csv` gains
-  `txn_date_raw`, `counter` and `date_source`. The SA-day to
-  calendar conversion uses the offset documented in `date.rs`; it is fitted to
-  the Rock Castle sample and not checked against a date known from another
+  `not_found` when none), with `RecordFlag::DateAmbiguous`. SQLite, CSV and
+  Python outputs carry `date_source` and `flags`; `transactions.csv` gains
+  `txn_date_raw`, `counter` and `date_source`. The SA-day to calendar
+  conversion uses the offset documented in `date.rs`; it is fitted to the
+  Rock Castle sample and not checked against a date known from another
   source.
 - Line-item amounts are decoded per source table. Journal lines
   (`abmc_general_journal_inventory_lineitem`) use the sign bit, so a line
@@ -93,37 +91,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Lines on any other table, lines without a source table, and lines with
   amount type `0x00`, `0x01` or `0x03` have no amount (`amount_cents` is
   `None` / NULL), where earlier versions reported an unsigned reading or 0.
-- `LineItem::amount_cents` is `Option<i64>` and holds the amount under
-  `amount_encoding`; `amount_cents_signed` and `AmountType::decode_cents*`
-  are removed. `AmountType::OneByteOne` is `Unestablished`, `AmountType::Other`
-  is removed (an unknown byte is an error), and `LineItem::amount_type_byte()`
-  gives the raw byte. `LineItem` gains `amount_encoding` and `flags`
-  (`RecordFlag`). `LineItem`, `AmountType`, `AmountEncoding`, `RecordFlag` and
-  the other public result and option types are `#[non_exhaustive]`.
-- One crate `Error` (with `ErrorKind`, `page_number()`, `page_offset()`)
-  replaces `LineItemError`; no `opensqlany` type appears in it. Page-store
-  failures map to `Error::Io`, `BadMagic`, `BadCrc` or `Store`.
-- `iter_lineitems` and `iter_lineitems_with_attribution` yield
-  `Result<LineItem, Error>`. An anchor followed by an unknown amount-type
-  byte, or one whose amount runs past the page data area, is an error
-  (`UnknownAmountType`, `TruncatedAmount`) instead of a line item with a zero
-  or unknown amount. A page read failure is an error instead of ending the
-  scan.
-- New `scan_lineitems(store, model, attribution, &ScanOptions)` returns a
-  `ScanResult` with `items` and `warnings`. `ScanOptions` holds a
-  `Strictness`; `Strict` (the default) returns the first error and `Lenient`
-  turns each into a `ScanWarning`.
-- The CLI stops at the first such error. `--lenient` skips those records,
-  prints each warning on stderr, and lists them (`scan_rejections` table in
-  SQLite, `rejected.csv` in CSV exports).
-- Python `Reader.line_items(*, lenient=False)` returns a `LineItems` result
-  (`items`, `rejected`, `warnings`; iterable) instead of a list. An
-  undecodable record raises `RecordError`; with `lenient=True` it is listed
-  in `rejected` and a `UserWarning` is issued. New exception hierarchy under
-  `OpenQBWError`: `FormatError`, `RecordError`, `ContentError`; each carries
-  `kind`, `page_number` and `page_offset`. The item dicts gain
-  `amount_encoding`, `amount_type`, `amount_raw`, `txn_date_raw`, `counter`
-  and `flags`, and lose `amount_cents_signed`.
+- An anchor followed by an unknown amount-type byte, or one whose amount runs
+  past the page data area, is an error (`UnknownAmountType`,
+  `TruncatedAmount`) instead of a line item with a zero or unknown amount.
 - Line items are scanned to the end of the page data area (0xFF0, was 0xFE0).
 - SQLite export: `transactions.total_cents` is NULL when any line of the
   transaction has no decoded amount; `unresolved_lines` counts them.
@@ -136,10 +106,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   written, with a `kind` column, and a `manifest.json` records
   `format_version`.
 - SQLite export: a `meta` table and `PRAGMA user_version` record the format
-  version (1); `scan_rejections` stores `kind` and `message`.
+  version (1); `scan_rejections` stores `kind` and `message`. A lenient
+  export that skipped a record no longer fails while writing
+  `scan_rejections`.
 - `openqbw migrate --format iif` exits with an error. `--placeholder-accounts`
   writes the file with placeholder accounts and leaves out, and counts,
   transactions that have an undecoded amount.
+- `openqbw forensics` reports the size of the opened store instead of 0 when
+  file metadata cannot be read.
+
+### API breaks
+
+- `Reader::open(path, &ReadOptions)` (and `Reader::from_bytes`) is the entry
+  point. It owns the page store, the keystream model, the catalog and the
+  page attribution; `line_items()`, `transactions()`, `indexes()`,
+  `columns()`, `schema(table)`, `catalog()` and `attribution_gap()` read
+  from it. No `opensqlany` type appears in the public API. Removed:
+  `open_store`, `check_store`, `OpenOptions`, `learn_model`,
+  `iter_lineitems`, `iter_lineitems_with_attribution`, `scan_lineitems`,
+  `iter_transaction_headers`, `scan_transaction_headers`,
+  `iter_systable_entries`, `collect_unique`, `iter_sysindex`,
+  `collect_unique_sysindex`, `iter_syscolumns`, `scan_syscolumns`,
+  `collect_unique_syscolumns`, `schema_for`, `recover_schema`,
+  `PageAttribution::build`, `bridge_owners_via_backref`,
+  `extend_with_sysobject`, `bridge_owners_to_tables`, `count_opaque_pages`
+  and `OpaqueCount`.
+- `ReadOptions` holds a `Leniency` set (`Leniency::STRICT`, the default, and
+  `Leniency::RECORDS`) in place of `ScanOptions` and `Strictness`.
+- Scans return `Scan<T>` (`items`, `rejected: Vec<Error>`,
+  `warnings: Vec<Warning>`) in place of `ScanResult` and `ScanWarning`.
+  `Warning` has a `WarningKind` (`OpaquePages`, `KeystreamUnverifiedPages`,
+  `LowConfidenceSectorPages`, `UnconfirmedDirectoryPages`, `AttributionGap`,
+  `Other(code)`) with a stable `as_str()`.
+- One crate `Error` with `kind()` (`ErrorKind`, stable `as_str()`),
+  `page_number()` and `page_offset()` replaces `LineItemError`. New variants
+  `UnsupportedFlags` and `BadTrailer`. Struct-like variants are
+  `#[non_exhaustive]`.
+- `LineItem::amount_cents` is `Option<i64>` and holds the amount under
+  `amount_encoding`; `amount_cents_signed` and `AmountType::decode_cents*`
+  are removed. `AmountType::OneByteOne` is `Unestablished`, `AmountType::Other`
+  is removed, and `LineItem::amount_type_byte()` gives the raw byte.
+  `LineItem` and `TransactionHeader` gain `amount_encoding` (line items),
+  `date_source` and `flags`; `SysTableEntry`, `SysIndexEntry` and `SysColumn`
+  gain `flags`.
+- Every public struct and enum is `#[non_exhaustive]`.
+- Reverse-engineering cross-checks moved to `openqbw::diagnostics`, which is
+  outside semantic versioning: `fk_graph`, `nulls_flag_histogram`,
+  `content_attribution`, `schema_attribution`, `sysindex_cross_validation`,
+  `learned_block_count` and their result types (formerly `build_fk_graph`,
+  `fk_graph_stats`, `nulls_flag_histogram`, `ContentAttribution::build`,
+  `SchemaAttribution::build`, `CrossValidation` and friends at the crate
+  root). Their methods take `&Reader` instead of a page store and model.
+- `SchemaRecovery` gains `candidate_owners`, `catalog_col_count`,
+  `scan_stats`, `pages_rejected`, `warnings` and
+  `columns_short_of_catalog()`. `SyscolumnStats` gains
+  `pages_unconfirmed_directory`; `scan_syscolumn_page` takes a
+  `&mut SyscolumnStats`. `OwnerBridge` and `FkGraph` gain `pages_rejected`.
+- `AttributionGap` gains `as_str()`.
 
 ## [0.1.6] - 2026-10-04
 

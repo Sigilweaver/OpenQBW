@@ -5,12 +5,7 @@
 
 #![allow(clippy::useless_conversion)] // pyo3 macro expansions can trigger this on newer clippy
 
-use openqbw_rs::{
-    collect_unique as collect_unique_systable, collect_unique_sysindex, learn_model, open_store,
-    scan_lineitems, scan_transaction_headers, OpenOptions, PageAttribution, ScanOptions,
-    ScanWarning, SysIndexEntry, SysTableEntry,
-};
-use opensqlany::{ApModel, PageStore};
+use openqbw_rs::{ReadOptions, Scan, SysIndexEntry, SysTableEntry};
 use pyo3::exceptions::{PyIOError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
@@ -73,24 +68,18 @@ fn warn_user(py: Python<'_>, msg: &str) -> PyResult<()> {
 
 /// Split warnings into rejected records and informational warnings, issue
 /// Python warnings for them, and build the report.
-fn make_report(
-    py: Python<'_>,
-    items: Vec<Py<PyDict>>,
-    scan_warnings: Vec<ScanWarning>,
-) -> PyResult<ScanReport> {
-    let mut rejected = Vec::new();
-    let mut warnings = Vec::new();
-    for w in &scan_warnings {
-        match w {
-            ScanWarning::RecordSkipped(e) => rejected.push(Rejected {
-                kind: e.kind().as_str().to_owned(),
-                page_number: e.page_number(),
-                page_offset: e.page_offset(),
-                message: e.to_string(),
-            }),
-            other => warnings.push(other.to_string()),
-        }
-    }
+fn make_report<T>(py: Python<'_>, items: Vec<Py<PyDict>>, scan: &Scan<T>) -> PyResult<ScanReport> {
+    let rejected: Vec<Rejected> = scan
+        .rejected
+        .iter()
+        .map(|e| Rejected {
+            kind: e.kind().as_str().to_owned(),
+            page_number: e.page_number(),
+            page_offset: e.page_offset(),
+            message: e.to_string(),
+        })
+        .collect();
+    let warnings: Vec<String> = scan.warnings.iter().map(|w| w.to_string()).collect();
     if !rejected.is_empty() {
         let first: Vec<&str> = rejected
             .iter()
@@ -177,9 +166,8 @@ impl ScanReport {
 #[pyclass(module = "openqbw", frozen)]
 struct Reader {
     path: PathBuf,
-    store: Arc<PageStore>,
-    model: Arc<ApModel>,
-    attribution: Arc<PageAttribution>,
+    inner: Arc<openqbw_rs::Reader>,
+    lenient: Arc<openqbw_rs::Reader>,
 }
 
 #[pymethods]
@@ -194,32 +182,32 @@ impl Reader {
     /// `"AllRootsZeroed"`), or `None` when it is available.
     #[getter]
     fn attribution_gap(&self) -> Option<String> {
-        self.attribution.gap().map(|g| format!("{g:?}"))
+        self.inner.attribution_gap().map(|g| format!("{g:?}"))
     }
 
     /// Number of pages in the underlying page-store.
     #[getter]
     fn page_count(&self) -> u64 {
-        self.store.page_count()
+        self.inner.page_count()
     }
 
     /// File size in bytes.
     #[getter]
     fn file_size(&self) -> u64 {
-        self.store.size_bytes()
+        self.inner.file_size()
     }
 
     fn __repr__(&self) -> String {
         format!(
             "<openqbw.Reader path={:?} pages={}>",
             self.path,
-            self.store.page_count()
+            self.inner.page_count()
         )
     }
 
     /// Return the SYSTABLE catalog as a list of dicts.
     fn tables<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyDict>>> {
-        let entries: Vec<SysTableEntry> = collect_unique_systable(&self.store, &self.model);
+        let entries: Vec<SysTableEntry> = self.inner.catalog().items.clone();
         let mut out = Vec::with_capacity(entries.len());
         for e in entries {
             let d = PyDict::new(py);
@@ -236,7 +224,8 @@ impl Reader {
 
     /// Return SYSINDEX entries as a list of dicts.
     fn indexes<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyDict>>> {
-        let entries: Vec<SysIndexEntry> = collect_unique_sysindex(&self.store, &self.model);
+        let entries: Vec<SysIndexEntry> =
+            self.inner.indexes().map_err(|e| to_py_err(py, &e))?.items;
         let mut out = Vec::with_capacity(entries.len());
         for e in entries {
             let d = PyDict::new(py);
@@ -264,19 +253,14 @@ impl Reader {
     /// warnings are in `result.warnings` in both modes.
     #[pyo3(signature = (*, lenient=false))]
     fn line_items(&self, py: Python<'_>, lenient: bool) -> PyResult<ScanReport> {
-        let options = if lenient {
-            ScanOptions::lenient()
-        } else {
-            ScanOptions::strict()
-        };
-        let scan = scan_lineitems(&self.store, &self.model, Some(&self.attribution), &options)
-            .map_err(|e| to_py_err(py, &e))?;
+        let reader = if lenient { &self.lenient } else { &self.inner };
+        let scan = reader.line_items().map_err(|e| to_py_err(py, &e))?;
         let mut items = Vec::with_capacity(scan.items.len());
-        for li in scan.items {
+        for li in &scan.items {
             let d = PyDict::new(py);
             let date = li.txn_date_days_since_unix();
-            d.set_item("invoice_id", li.invoice_id)?;
-            d.set_item("item_qb_id", li.item_qb_id)?;
+            d.set_item("invoice_id", &li.invoice_id)?;
+            d.set_item("item_qb_id", &li.item_qb_id)?;
             d.set_item("amount_cents", li.amount_cents)?;
             d.set_item("amount_encoding", li.amount_encoding.as_str())?;
             d.set_item("amount_type", li.amount_raw[0])?;
@@ -285,14 +269,14 @@ impl Reader {
             d.set_item("counter", li.counter)?;
             d.set_item("date_source", li.date_source.as_str())?;
             d.set_item("txn_date_days_since_unix", date)?;
-            d.set_item("source_table", li.source_table)?;
+            d.set_item("source_table", &li.source_table)?;
             d.set_item("page_number", li.page_number)?;
             d.set_item("page_offset", li.page_offset)?;
             let flags: Vec<&str> = li.flags.iter().map(|f| f.as_str()).collect();
             d.set_item("flags", flags)?;
             items.push(d.unbind());
         }
-        make_report(py, items, scan.warnings)
+        make_report(py, items, &scan)
     }
 
     /// Scan all transaction headers and return a `ScanReport` like
@@ -301,15 +285,10 @@ impl Reader {
     /// coordinates.
     #[pyo3(signature = (*, lenient=false))]
     fn transactions(&self, py: Python<'_>, lenient: bool) -> PyResult<ScanReport> {
-        let options = if lenient {
-            ScanOptions::lenient()
-        } else {
-            ScanOptions::strict()
-        };
-        let scan = scan_transaction_headers(&self.store, &self.model, &self.attribution, &options)
-            .map_err(|e| to_py_err(py, &e))?;
+        let reader = if lenient { &self.lenient } else { &self.inner };
+        let scan = reader.transactions().map_err(|e| to_py_err(py, &e))?;
         let mut items = Vec::with_capacity(scan.items.len());
-        for h in scan.items {
+        for h in &scan.items {
             let d = PyDict::new(py);
             d.set_item("qb_id", &h.qb_id)?;
             d.set_item("source_table", &h.source_table)?;
@@ -323,7 +302,7 @@ impl Reader {
             d.set_item("page_offset", h.page_offset)?;
             items.push(d.unbind());
         }
-        make_report(py, items, scan.warnings)
+        make_report(py, items, &scan)
     }
 }
 
@@ -336,10 +315,11 @@ impl Reader {
 /// `Reader.attribution_gap`.
 #[pyfunction]
 fn open(py: Python<'_>, path: PathBuf) -> PyResult<Reader> {
-    let store = open_store(&path, &OpenOptions::default()).map_err(|e| to_py_err(py, &e))?;
-    let model = learn_model(&store).map_err(|e| to_py_err(py, &e))?;
-    let attribution = PageAttribution::build(&store, &model);
-    if let Some(gap) = attribution.gap() {
+    let inner =
+        openqbw_rs::Reader::open(&path, &ReadOptions::strict()).map_err(|e| to_py_err(py, &e))?;
+    let lenient =
+        openqbw_rs::Reader::open(&path, &ReadOptions::lenient()).map_err(|e| to_py_err(py, &e))?;
+    if let Some(gap) = inner.attribution_gap() {
         warn_user(
             py,
             &format!(
@@ -350,9 +330,8 @@ fn open(py: Python<'_>, path: PathBuf) -> PyResult<Reader> {
     }
     Ok(Reader {
         path,
-        store: Arc::new(store),
-        model: Arc::new(model),
-        attribution: Arc::new(attribution),
+        inner: Arc::new(inner),
+        lenient: Arc::new(lenient),
     })
 }
 

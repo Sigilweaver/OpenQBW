@@ -70,23 +70,23 @@ pub const OPAQUE_FILE_FRACTION: f64 = 0.5;
 /// Counts of `E` pages in a store.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
-pub struct OpaqueCount {
+pub(crate) struct OpaqueCount {
     /// `E` pages whose body is indistinguishable from random bytes.
-    pub opaque: u64,
+    pub(crate) opaque: u64,
     /// All `E` pages.
-    pub extent: u64,
+    pub(crate) extent: u64,
 }
 
 impl OpaqueCount {
     /// `true` when more than [`OPAQUE_FILE_FRACTION`] of the `E` pages are
     /// opaque.
-    pub fn mostly_opaque(&self) -> bool {
+    pub(crate) fn mostly_opaque(&self) -> bool {
         self.extent > 0 && self.opaque as f64 / self.extent as f64 > OPAQUE_FILE_FRACTION
     }
 }
 
 /// Count opaque and total `E` pages in `store`.
-pub fn count_opaque_pages(store: &PageStore) -> crate::Result<OpaqueCount> {
+pub(crate) fn count_opaque_pages(store: &PageStore) -> crate::Result<OpaqueCount> {
     let mut c = OpaqueCount {
         opaque: 0,
         extent: 0,

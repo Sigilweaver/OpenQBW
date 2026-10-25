@@ -15,15 +15,12 @@
 //!   - `0x00`         -- non-amount marker (record carries date/counter only)
 //!   - any other byte -- reported as [`Error::UnknownAmountType`]
 
-use std::iter::FusedIterator;
+use opensqlany::{ApModel, PageStore};
 
-use opensqlany::{ApModel, PageStore, PageType};
-
-use crate::decode::decode_page;
 use crate::error::Error;
 use crate::opaque::count_opaque_pages;
 use crate::page_attribution::PageAttribution;
-use crate::scan::{RecordFlag, ScanOptions, ScanResult, ScanWarning};
+use crate::scan::{ReadOptions, RecordFlag, Scan, Warning, WarningKind, for_each_extent_page};
 
 pub use crate::date::DATE_EPOCH_DAYS_BEFORE_UNIX;
 use crate::date::{DateSource, sa_day_to_unix_day, scan_date_counter};
@@ -157,8 +154,7 @@ pub struct LineItem {
     /// date and counter unset.
     pub date_source: DateSource,
     /// Owning `SYSTABLE` name (e.g. `abmc_invoice_inventory_lineitem`) when
-    /// the line item's page was attributable. Populated by
-    /// [`iter_lineitems_with_attribution`]; `None` otherwise.
+    /// the line item's page was attributable; `None` otherwise.
     pub source_table: Option<String>,
     /// Reasons this record deserves less trust. Empty when no check flagged it.
     pub flags: Vec<RecordFlag>,
@@ -227,44 +223,21 @@ impl LineItem {
     }
 }
 
-/// Yields every line item found in `store` by scanning each `E`-type page.
+/// Collect every line item in `store`, tagging each with the table its page
+/// is attributed to (when `attribution` is given) and decoding its amount
+/// with the reading for that table.
 ///
-/// A page that cannot be read, an anchor with an unknown amount-type byte
-/// and an anchor too close to the page end each yield an `Err`; scanning
-/// continues with the next record. Each yielded item has
-/// `source_table = None`, so its amount is not decoded
-/// ([`AmountEncoding::Unconfirmed`]).
-pub fn iter_lineitems<'a>(
-    store: &'a PageStore,
-    model: &'a ApModel,
-) -> impl Iterator<Item = Result<LineItem, Error>> + 'a {
-    LineItemIter::new(store, model, None)
-}
-
-/// Like [`iter_lineitems`], but tags each emitted item with the
-/// `SysTableEntry::name` of the table that the line item's source page
-/// is attributed to (via [`PageAttribution`]) and decodes its amount with
-/// the reading for that table. Errors are yielded as in [`iter_lineitems`].
-pub fn iter_lineitems_with_attribution<'a>(
-    store: &'a PageStore,
-    model: &'a ApModel,
-    attribution: &'a PageAttribution,
-) -> impl Iterator<Item = Result<LineItem, Error>> + 'a {
-    LineItemIter::new(store, model, Some(attribution))
-}
-
-/// Collect every line item in `store`.
-///
-/// In strict mode (the default options) the first error is returned. In
-/// lenient mode each error becomes a [`ScanWarning::RecordSkipped`] in the
-/// result and scanning continues; callers must report the warnings.
-pub fn scan_lineitems(
+/// In strict mode the first undecodable record or page is returned as an
+/// error. Under [`Leniency::RECORDS`](crate::Leniency::RECORDS) each is
+/// listed in [`Scan::rejected`] and scanning continues. More than half of the
+/// data pages being opaque is [`Error::ContentOpaque`] in both modes.
+pub(crate) fn scan_lineitems(
     store: &PageStore,
     model: &ApModel,
     attribution: Option<&PageAttribution>,
-    options: &ScanOptions,
-) -> Result<ScanResult<LineItem>, Error> {
-    let mut scan = ScanResult::default();
+    options: &ReadOptions,
+) -> Result<Scan<LineItem>, Error> {
+    let mut scan = Scan::default();
     let opaque = count_opaque_pages(store)?;
     if opaque.mostly_opaque() {
         return Err(Error::ContentOpaque {
@@ -273,106 +246,52 @@ pub fn scan_lineitems(
         });
     }
     if opaque.opaque > 0 {
-        scan.warnings.push(ScanWarning::OpaquePages {
+        scan.warnings.push(Warning::new(WarningKind::OpaquePages {
             opaque: opaque.opaque,
             extent: opaque.extent,
-        });
+        }));
     }
-    for r in LineItemIter::new(store, model, attribution) {
-        match r {
-            Ok(li) => scan.items.push(li),
-            Err(e) if options.is_lenient() => scan.warnings.push(ScanWarning::RecordSkipped(e)),
-            Err(e) => return Err(e),
-        }
-    }
-    Ok(scan)
-}
-
-struct LineItemIter<'a> {
-    store: &'a PageStore,
-    model: &'a ApModel,
-    attribution: Option<&'a PageAttribution>,
-    pn: u64,
-    n_pages: u64,
-    buffer: Vec<Result<LineItem, Error>>,
-}
-
-impl<'a> LineItemIter<'a> {
-    fn new(
-        store: &'a PageStore,
-        model: &'a ApModel,
-        attribution: Option<&'a PageAttribution>,
-    ) -> Self {
-        Self {
-            store,
-            model,
-            attribution,
-            pn: 1, // skip superblock (page 0)
-            n_pages: store.page_count(),
-            buffer: Vec::new(),
-        }
-    }
-
-    fn fill_buffer(&mut self) -> Result<bool, Error> {
-        while self.buffer.is_empty() && self.pn < self.n_pages {
-            let pn = self.pn;
-            self.pn += 1;
-
-            let page = self
-                .store
-                .page(pn)
-                .map_err(|e| Error::from_store(e, Some(pn)))?;
-            if page.trailer().page_type() != PageType::Extent {
-                continue;
-            }
-
-            let decoded = decode_page(self.store, self.model, pn)?;
-            let before = self.buffer.len();
-            scan_page(&decoded.bytes()[..PAGE_DATA_END], pn, &mut self.buffer);
-            // A record reads up to 96 bytes before its anchor (item ID) and
-            // 64 bytes after its payload (date); flag it when any of those
-            // bytes came from an unconfirmed keystream or a weak sector.
-            for li in self.buffer[before..].iter_mut().flatten() {
+    for_each_extent_page(
+        store,
+        model,
+        options,
+        &mut scan,
+        |_| true,
+        |decoded, scan| {
+            let pn = decoded.pn();
+            let source = attribution
+                .and_then(|a| a.attribute(pn))
+                .map(|e| e.name.clone());
+            let mut found = Vec::new();
+            scan_page(&decoded.bytes()[..PAGE_DATA_END], pn, &mut found);
+            for r in found {
+                let mut li = match r {
+                    Ok(li) => li,
+                    Err(e) => {
+                        scan.reject(e, options)?;
+                        continue;
+                    }
+                };
+                // A record reads up to 96 bytes before its anchor (item ID)
+                // and 64 bytes after its payload (date); flag it when any of
+                // those bytes came from an unconfirmed keystream or a weak
+                // sector.
                 let span = li.page_offset.saturating_sub(96)
                     ..(li.page_offset + ANCHOR_LEN + 64).min(PAGE_DATA_END);
                 li.flags.extend(decoded.flags_for(span));
-            }
-            if let Some(attr) = self.attribution
-                && let Some(entry) = attr.attribute(pn)
-            {
-                let name = entry.name.clone();
-                for li in self.buffer[before..].iter_mut().flatten() {
-                    li.set_source_table(Some(name.clone()));
+                if source.is_some() {
+                    li.set_source_table(source.clone());
                 }
+                scan.items.push(li);
             }
-        }
-        Ok(!self.buffer.is_empty())
-    }
+            Ok(())
+        },
+    )?;
+    Ok(scan)
 }
-
-impl Iterator for LineItemIter<'_> {
-    type Item = Result<LineItem, Error>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            if let Some(item) = self.buffer.pop() {
-                return Some(item);
-            }
-            match self.fill_buffer() {
-                Ok(true) => continue,
-                Ok(false) => return None,
-                // A page read error is yielded; the page counter already
-                // moved past it, so the next call continues with the next page.
-                Err(e) => return Some(Err(e)),
-            }
-        }
-    }
-}
-
-impl FusedIterator for LineItemIter<'_> {}
 
 /// Scan a decoded page body for line-item anchors and append parsed records
-/// to `out`. Items are appended in the order encountered.
+/// to `out` in page order.
 fn scan_page(body: &[u8], pn: u64, out: &mut Vec<Result<LineItem, Error>>) {
     if body.len() < ANCHOR_LEN {
         return;
@@ -401,7 +320,6 @@ fn scan_page(body: &[u8], pn: u64, out: &mut Vec<Result<LineItem, Error>>) {
         pos += ANCHOR_LEN;
     }
 
-    // Reverse so we can pop in original order (iterator buffer is LIFO).
     // Each record's search windows stop at its neighbours' anchors, so a
     // field of the previous or next record is never read as this one's.
     let bounds: Vec<(usize, usize, usize)> = (0..start.len())
@@ -415,7 +333,7 @@ fn scan_page(body: &[u8], pn: u64, out: &mut Vec<Result<LineItem, Error>>) {
             (start[i], floor, ceil)
         })
         .collect();
-    for (anchor, floor, ceil) in bounds.into_iter().rev() {
+    for (anchor, floor, ceil) in bounds {
         out.push(parse_anchor(body, pn, anchor, floor, ceil));
     }
 }
@@ -686,8 +604,7 @@ mod tests {
             .into_iter()
             .map(|r| r.unwrap().item_qb_id.unwrap())
             .collect();
-        // Output is LIFO (last record first).
-        assert_eq!(ids, ["BBBBBBBBBBBBBBBB", "AAAAAAAAAAAAAAAA"]);
+        assert_eq!(ids, ["AAAAAAAAAAAAAAAA", "BBBBBBBBBBBBBBBB"]);
     }
 
     #[test]
@@ -704,9 +621,9 @@ mod tests {
         let mut out = Vec::new();
         scan_page(&body, 7, &mut out);
         assert_eq!(out.len(), 2);
-        assert_eq!(out[0].as_ref().unwrap().item_qb_id, None);
+        assert_eq!(out[1].as_ref().unwrap().item_qb_id, None);
         assert_eq!(
-            out[1].as_ref().unwrap().item_qb_id.as_deref(),
+            out[0].as_ref().unwrap().item_qb_id.as_deref(),
             Some("AAAAAAAAAAAAAAAA")
         );
     }
@@ -768,7 +685,7 @@ mod tests {
     fn mostly_opaque_file_is_an_error() {
         let store = random_extent_store(11, 8);
         let model = crate::testutil::lenient_model(&store);
-        let err = scan_lineitems(&store, &model, None, &ScanOptions::strict()).unwrap_err();
+        let err = scan_lineitems(&store, &model, None, &ReadOptions::strict()).unwrap_err();
         assert!(matches!(
             err,
             Error::ContentOpaque {
@@ -782,13 +699,18 @@ mod tests {
     fn a_few_opaque_pages_are_a_warning_even_in_strict_mode() {
         let store = random_extent_store(11, 2);
         let model = crate::testutil::lenient_model(&store);
-        let scan = scan_lineitems(&store, &model, None, &ScanOptions::strict()).unwrap();
+        let scan = scan_lineitems(&store, &model, None, &ReadOptions::strict()).unwrap();
         assert!(matches!(
             scan.warnings.as_slice(),
-            [ScanWarning::OpaquePages {
-                opaque: 2,
-                extent: 10
-            }]
+            [
+                Warning {
+                    kind: WarningKind::OpaquePages {
+                        opaque: 2,
+                        extent: 10
+                    }
+                },
+                ..
+            ]
         ));
     }
 }

@@ -1,18 +1,38 @@
-//! QuickBooks `.qbw` file parser.
+//! QuickBooks `.qbw` file reader.
 //!
-//! Provides parsing of invoice line-item records out of an SA17 page-store
-//! that was produced by QuickBooks. Built on the [`opensqlany`] crate which
-//! handles the lower-level page-store layer (CRC validation, AP-fill
-//! deobfuscation, slotted-page directories).
+//! Reads transaction headers, invoice and journal line items and the system
+//! catalog out of a QuickBooks company file, an SQL Anywhere 17 page store
+//! read with the [`opensqlany`](https://crates.io/crates/opensqlany) crate.
+//! No `opensqlany` type appears in this crate's API.
 //!
-//! This release (v0.1) covers the invoice line-item record format only.
-//! Invoice headers, bills, checks, journal entries, and the system catalog
-//! are deferred to later releases.
+//! ```no_run
+//! use openqbw::{ReadOptions, Reader};
 //!
-//! # Status
+//! let reader = Reader::open("mybooks.qbw", &ReadOptions::default())?;
+//! let lines = reader.line_items()?;
+//! for w in &lines.warnings {
+//!     eprintln!("warning: {w}");
+//! }
+//! let decoded: i64 = lines.items.iter().filter_map(|li| li.amount_cents).sum();
+//! println!("{} lines, {decoded} cents decoded", lines.items.len());
+//! # Ok::<(), openqbw::Error>(())
+//! ```
 //!
-//! Prototype quality. See `OpenQBW/re/NOTES.md` (entries C.40-C.43) for the
-//! reverse-engineered record layout and remaining gaps.
+//! # Errors, options and flags
+//!
+//! Reads are strict by default: input the decoder cannot read with
+//! confidence is an [`Error`]. [`ReadOptions`] carries a [`Leniency`] set;
+//! [`Leniency::RECORDS`] skips undecodable records and lists them in
+//! [`Scan::rejected`]. Records that were kept but deserve less trust carry
+//! [`RecordFlag`]s, and conditions that apply to a whole read are
+//! [`Warning`]s. [`Error`], [`WarningKind`], [`RecordFlag`] and the result
+//! types are `#[non_exhaustive]`.
+//!
+//! [`diagnostics`] holds reverse-engineering cross-checks and is outside
+//! semantic versioning.
+//!
+//! See `SPECIFICATION.md` and `re/NOTES.md` for the reverse-engineered
+//! record layouts and remaining gaps.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -22,6 +42,7 @@ mod attribution_schema;
 mod bv_recovery;
 mod date;
 mod decode;
+pub mod diagnostics;
 mod error;
 mod fkgraph;
 mod lineitem;
@@ -30,6 +51,7 @@ mod opaque;
 mod open;
 mod owner_bridge;
 mod page_attribution;
+mod reader;
 mod scan;
 mod syscolumn;
 mod sysindex;
@@ -40,11 +62,6 @@ mod transaction_header;
 #[cfg(test)]
 mod testutil;
 
-pub use attribution_content::{AttributionAgreement, ContentAttribution, RowSignature, SIG_LEN};
-pub use attribution_schema::{
-    MIN_ROW_BODY_BYTES, SchemaAttribution, VARIABLE_COLUMN_UPPER_ALLOWANCE, ValidationStats,
-    WidthBand,
-};
 pub use bv_recovery::{
     APAGE_MAGIC, deobfuscate_with_bv, oracle_bv_e_page, recover_bv_any, recover_bv_apage,
     recover_bv_brute, recover_bv_qb_data,
@@ -54,38 +71,22 @@ pub use date::{
     sa_day_to_unix_seconds, unix_day_to_sa_day,
 };
 pub use error::{Error, ErrorKind, Result};
-pub use fkgraph::{
-    FkEdge, FkGraph, FkGraphStats, build as build_fk_graph, stats as fk_graph_stats,
-};
-pub use lineitem::{
-    AmountEncoding, AmountType, DATE_EPOCH_DAYS_BEFORE_UNIX, LineItem, iter_lineitems,
-    iter_lineitems_with_attribution, scan_lineitems,
-};
-pub use nullability::{NullsFlagBucket, histogram as nulls_flag_histogram};
-pub use opaque::{
-    OPAQUE_ENTROPY_THRESHOLD, OPAQUE_FILE_FRACTION, OpaqueCount, count_opaque_pages,
-    is_opaque_high_entropy,
-};
-pub use open::{OpenOptions, SUPPORTED_VERSION, check_store, learn_model, open_store};
+pub use lineitem::{AmountEncoding, AmountType, DATE_EPOCH_DAYS_BEFORE_UNIX, LineItem};
+pub use opaque::{OPAQUE_ENTROPY_THRESHOLD, OPAQUE_FILE_FRACTION, is_opaque_high_entropy};
+pub use open::SUPPORTED_VERSION;
 pub use owner_bridge::{
     BACKREF_MAX_DISTANCE, BACKREF_MIN_DISTANCE, BackrefVotes, BridgeSource,
-    DEFAULT_BACKREF_DISTANCE, OwnerBridge, bridge_owners_via_backref, extend_with_sysobject,
+    DEFAULT_BACKREF_DISTANCE, OwnerBridge,
 };
 pub use page_attribution::{AttributionGap, PageAttribution};
-pub use scan::{RecordFlag, ScanOptions, ScanResult, ScanWarning, Strictness};
+pub use reader::Reader;
+pub use scan::{Leniency, ReadOptions, RecordFlag, Scan, Warning, WarningKind};
 pub use syscolumn::{
-    SYSCOLUMN_TAG, SchemaRecovery, SysColumn, SyscolumnStats,
-    collect_unique as collect_unique_syscolumns, iter_syscolumns, recover_schema,
-    scan_page as scan_syscolumn_page, scan_syscolumns, schema_for,
+    SYSCOLUMN_TAG, SchemaRecovery, SysColumn, SyscolumnStats, scan_page as scan_syscolumn_page,
 };
 pub use sysindex::{
-    AuditOutcome, CrossValidation, DISAGREE_SAMPLE_LIMIT, SYSINDEX_CREATOR, SysIndexEntry,
-    collect_unique as collect_unique_sysindex, iter_sysindex, scan_page as scan_sysindex_page,
+    DISAGREE_SAMPLE_LIMIT, SYSINDEX_CREATOR, SysIndexEntry, scan_page as scan_sysindex_page,
 };
-pub use sysobject::{SYSOBJECT_NAME_OFFSET, bridge_owners_to_tables};
-pub use systable::{
-    SysTableEntry, collect_unique, iter_systable_entries, scan_page as scan_systable_page,
-};
-pub use transaction_header::{
-    TransactionHeader, iter_transaction_headers, scan_transaction_headers,
-};
+pub use sysobject::SYSOBJECT_NAME_OFFSET;
+pub use systable::{SysTableEntry, scan_page as scan_systable_page};
+pub use transaction_header::TransactionHeader;
