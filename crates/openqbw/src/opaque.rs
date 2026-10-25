@@ -86,13 +86,15 @@ impl OpaqueCount {
 }
 
 /// Count opaque and total `E` pages in `store`.
-pub fn count_opaque_pages(store: &PageStore) -> Result<OpaqueCount, opensqlany::Error> {
+pub fn count_opaque_pages(store: &PageStore) -> crate::Result<OpaqueCount> {
     let mut c = OpaqueCount {
         opaque: 0,
         extent: 0,
     };
     for pn in 1..store.page_count() {
-        let page = store.page(pn)?;
+        let page = store
+            .page(pn)
+            .map_err(|e| crate::Error::from_store(e, Some(pn)))?;
         if page.trailer().page_type() != PageType::Extent {
             continue;
         }
