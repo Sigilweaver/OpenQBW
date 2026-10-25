@@ -24,6 +24,7 @@ use std::iter::FusedIterator;
 use opensqlany::{ApModel, Page, PageStore, PageType, Result as SaResult, SlottedPage};
 
 use crate::bv_recovery::{deobfuscate_with_bv, recover_bv_any};
+use crate::date::{DateScan, DateSource, scan_date_counter};
 use crate::page_attribution::PageAttribution;
 
 const PAGE_DATA_END: usize = 0xFF0;
@@ -33,15 +34,20 @@ const HEADER_SUFFIX: &str = "_header";
 
 /// A minimal transaction-header record.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct TransactionHeader {
     /// Row QB-ID (16 base62 chars) - primary key of the transaction.
     pub qb_id: String,
     /// Owning `SYSTABLE` name (e.g. `abmc_invoice_header`).
     pub source_table: String,
-    /// SA17 transaction date (days since 1981-01-01), when discovered.
+    /// SA17 transaction date (SA-day), set only when `date_source` is
+    /// [`DateSource::WindowScan`].
     pub txn_date_raw: Option<u32>,
-    /// Internal counter / row sequence number, when discovered.
+    /// Internal counter / row sequence number, set under the same condition.
     pub counter: Option<u32>,
+    /// How `txn_date_raw` was found. `NotFound` and `Ambiguous` leave the
+    /// date and counter unset.
+    pub date_source: DateSource,
     /// Source page number in the QBW file.
     pub page_number: u64,
     /// Byte offset of the QB-ID anchor within the decoded page body.
@@ -104,17 +110,15 @@ fn scan_page(body: &[u8], pn: u64, source_table: &str, out: &mut Vec<Transaction
             .expect("guarded by is_base62")
             .to_owned();
 
-        // Search a 96-byte window before and after the QB-ID for a
-        // plausible (date, counter) pair. SA dates fall in 13000..20000
-        // (roughly 2016..2034). The internal counter is non-zero and
-        // bounded by 32 bits worth of plausible row indices.
-        let (txn_date_raw, counter) = find_date_counter(body, id_start + QB_ID_LEN);
+        // Search the 96 bytes after the QB-ID for a (date, counter) pair.
+        let scan = find_date_counter(body, id_start + QB_ID_LEN);
 
         out.push(TransactionHeader {
             qb_id,
             source_table: source_table.to_owned(),
-            txn_date_raw,
-            counter,
+            txn_date_raw: scan.date,
+            counter: scan.counter,
+            date_source: scan.source,
             page_number: pn,
             page_offset: pos,
         });
@@ -123,18 +127,8 @@ fn scan_page(body: &[u8], pn: u64, source_table: &str, out: &mut Vec<Transaction
     }
 }
 
-fn find_date_counter(body: &[u8], start: usize) -> (Option<u32>, Option<u32>) {
-    let end = (start + 96).min(body.len().saturating_sub(8));
-    let mut i = start;
-    while i + 8 <= end {
-        let d = u32::from_le_bytes([body[i], body[i + 1], body[i + 2], body[i + 3]]);
-        let c = u32::from_le_bytes([body[i + 4], body[i + 5], body[i + 6], body[i + 7]]);
-        if (13_000..20_000).contains(&d) && c > 0 && c < 10_000_000 {
-            return (Some(d), Some(c));
-        }
-        i += 1;
-    }
-    (None, None)
+fn find_date_counter(body: &[u8], start: usize) -> DateScan {
+    scan_date_counter(body, start, start + 96, 10_000_000)
 }
 
 /// Slotted-page-aware header scanner.
@@ -176,12 +170,13 @@ fn scan_page_slotted(
                         .expect("guarded by is_base62")
                         .to_owned();
                     let after = i + 3 + QB_ID_LEN;
-                    let (txn_date_raw, counter) = find_date_counter(row, after);
+                    let scan = find_date_counter(row, after);
                     out.push(TransactionHeader {
                         qb_id,
                         source_table: source_table.to_owned(),
-                        txn_date_raw,
-                        counter,
+                        txn_date_raw: scan.date,
+                        counter: scan.counter,
+                        date_source: scan.source,
                         page_number: pn,
                         page_offset: slot_off as usize + i,
                     });
@@ -294,6 +289,7 @@ mod tests {
             source_table: "abmc_invoice_header".into(),
             txn_date_raw: None,
             counter: None,
+            date_source: DateSource::NotFound,
             page_number: 0,
             page_offset: 0,
         };
@@ -307,6 +303,7 @@ mod tests {
             source_table: "abmc_general_journal_header".into(),
             txn_date_raw: None,
             counter: None,
+            date_source: DateSource::NotFound,
             page_number: 0,
             page_offset: 0,
         };

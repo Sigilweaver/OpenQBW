@@ -145,6 +145,7 @@ impl Reader {
             d.set_item("amount_raw", PyBytes::new(py, &li.amount_raw))?;
             d.set_item("txn_date_raw", li.txn_date_raw)?;
             d.set_item("counter", li.counter)?;
+            d.set_item("date_source", li.date_source.as_str())?;
             d.set_item("txn_date_days_since_unix", date)?;
             d.set_item("source_table", li.source_table)?;
             d.set_item("page_number", li.page_number)?;
@@ -164,6 +165,9 @@ impl Reader {
             d.set_item("qb_id", &h.qb_id)?;
             d.set_item("source_table", &h.source_table)?;
             d.set_item("txn_type", h.txn_type().to_string())?;
+            d.set_item("txn_date_raw", h.txn_date_raw)?;
+            d.set_item("counter", h.counter)?;
+            d.set_item("date_source", h.date_source.as_str())?;
             d.set_item("page_number", h.page_number)?;
             d.set_item("page_offset", h.page_offset)?;
             out.push(d);

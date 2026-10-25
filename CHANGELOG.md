@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Behavior changes
 
+- Line-item and header dates are found in a wider window (SA-days
+  10000..=40000, was 13000..20000, which stopped at Oct 2013), so records
+  dated after Oct 2013 now have a date. When two separate date/counter pairs
+  sit in the search window, the date and counter are left unset and
+  `date_source` is `ambiguous` (`window_scan` when one pair was found,
+  `not_found` when none). `LineItem` and `TransactionHeader` gain
+  `date_source`; SQLite, CSV and Python outputs carry it. The SA-day to
+  calendar conversion uses the offset documented in `date.rs`; it is fitted to
+  the Rock Castle sample and not checked against a date known from another
+  source.
 - Line-item amounts are decoded per source table. Journal lines
   (`abmc_general_journal_inventory_lineitem`) use the sign bit, so a line
   stored as `02 c0 2d 01` is -$771.20, where earlier versions reported

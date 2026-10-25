@@ -778,6 +778,7 @@ fn create_schema(conn: &Connection) -> Result<()> {
             source_table TEXT NOT NULL,
             txn_date_raw INTEGER,
             counter      INTEGER,
+            date_source  TEXT NOT NULL,
             line_count   INTEGER NOT NULL,
             -- NULL when any line's amount is not decoded (see unresolved_lines).
             total_cents  INTEGER,
@@ -799,6 +800,7 @@ fn create_schema(conn: &Connection) -> Result<()> {
             amount_raw_hex      TEXT NOT NULL,
             txn_date_raw        INTEGER,
             counter             INTEGER,
+            date_source         TEXT NOT NULL,
             source_table        TEXT NOT NULL,
             page_number         INTEGER NOT NULL,
             page_offset         INTEGER NOT NULL,
@@ -830,9 +832,9 @@ fn insert_transaction_headers(
     }
     let mut stmt = tx.prepare(
         "INSERT INTO transactions \
-         (qb_id, type, source_table, txn_date_raw, counter, \
+         (qb_id, type, source_table, txn_date_raw, counter, date_source, \
           line_count, total_cents, has_deferred, unresolved_lines, source_page) \
-         VALUES (?, ?, ?, ?, ?, 0, 0, 0, 0, ?)",
+         VALUES (?, ?, ?, ?, ?, ?, 0, 0, 0, 0, ?)",
     )?;
     let mut ordered: Vec<&TransactionHeader> = map.values().collect();
     ordered.sort_by_key(|h| (h.page_number, h.page_offset));
@@ -843,6 +845,7 @@ fn insert_transaction_headers(
             h.source_table,
             h.txn_date_raw,
             h.counter,
+            h.date_source.as_str(),
             h.page_number as i64,
         ])?;
     }
@@ -875,9 +878,9 @@ fn insert_synthesized_transactions(
     )?;
     let mut insert_stmt = tx.prepare(
         "INSERT INTO transactions \
-         (qb_id, type, source_table, txn_date_raw, counter, \
+         (qb_id, type, source_table, txn_date_raw, counter, date_source, \
           line_count, total_cents, has_deferred, unresolved_lines, source_page) \
-         VALUES (?, 'unknown', ?, ?, ?, ?, ?, ?, ?, ?)",
+         VALUES (?, 'unknown', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )?;
     for qb_id in order {
         let lines = &groups[&qb_id];
@@ -897,6 +900,12 @@ fn insert_synthesized_transactions(
         }
         let date = lines.iter().find_map(|l| l.txn_date_raw);
         let counter = lines.iter().find_map(|l| l.counter);
+        let date_source = lines
+            .iter()
+            .find(|l| l.txn_date_raw.is_some())
+            .or(lines.first())
+            .map(|l| l.date_source)
+            .unwrap_or(openqbw::DateSource::NotFound);
         let src = lines
             .iter()
             .find_map(|l| l.source_table.clone())
@@ -907,6 +916,7 @@ fn insert_synthesized_transactions(
             src,
             date,
             counter,
+            date_source.as_str(),
             line_count,
             total,
             has_deferred,
@@ -921,9 +931,9 @@ fn insert_transaction_line_items(tx: &Transaction<'_>, items: &[LineItem]) -> Re
     let mut stmt = tx.prepare(
         "INSERT INTO transaction_line_items \
          (qb_id_parent, line_number, item_qb_id, amount_type, amount_cents, \
-          amount_encoding, amount_raw_u24_cents, amount_raw_hex, txn_date_raw, counter, \
+          amount_encoding, amount_raw_u24_cents, amount_raw_hex, txn_date_raw, counter, date_source, \
           source_table, page_number, page_offset) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )?;
     let mut line_no: BTreeMap<(String, String), i64> = BTreeMap::new();
     for li in items {
@@ -948,6 +958,7 @@ fn insert_transaction_line_items(tx: &Transaction<'_>, items: &[LineItem]) -> Re
             hex,
             li.txn_date_raw,
             li.counter,
+            li.date_source.as_str(),
             src,
             li.page_number as i64,
             li.page_offset as i64,
@@ -1219,20 +1230,21 @@ fn run_migrate_csv(input: PathBuf, out: PathBuf, lenient: bool) -> Result<()> {
     let mut lif = std::fs::File::create(out.join("lineitems.csv"))?;
     writeln!(
         lif,
-        "invoice_id,item_qb_id,amount_cents,amount_encoding,amount_decimal,txn_date,source_table,page_number,page_offset"
+        "invoice_id,item_qb_id,amount_cents,amount_encoding,amount_decimal,txn_date,date_source,source_table,page_number,page_offset"
     )?;
     for li in &items {
         let amt = li.amount_cents.map(|c| c.to_string()).unwrap_or_default();
         let dec = li.amount_cents.map(format_cents).unwrap_or_default();
         writeln!(
             lif,
-            "{},{},{},{},{},{},{},{},{}",
+            "{},{},{},{},{},{},{},{},{},{}",
             csv_field(&li.invoice_id),
             csv_field(li.item_qb_id.as_deref().unwrap_or("")),
             amt,
             li.amount_encoding.as_str(),
             dec,
             lineitem_date(li),
+            li.date_source.as_str(),
             csv_field(li.source_table.as_deref().unwrap_or("")),
             li.page_number,
             li.page_offset,

@@ -44,8 +44,8 @@ pub use bv_recovery::{
     recover_bv_brute, recover_bv_qb_data,
 };
 pub use date::{
-    SA_DAY_MAX_PLAUSIBLE, SA_DAY_MIN_PLAUSIBLE, sa_day_to_unix_day, sa_day_to_unix_seconds,
-    unix_day_to_sa_day,
+    DATE_SCAN_MAX, DATE_SCAN_MIN, DateScan, DateSource, SA_DAY_MAX_PLAUSIBLE, SA_DAY_MIN_PLAUSIBLE,
+    sa_day_to_unix_day, sa_day_to_unix_seconds, scan_date_counter, unix_day_to_sa_day,
 };
 pub use fkgraph::{FkEdge, FkGraphStats, build as build_fk_graph, stats as fk_graph_stats};
 pub use lineitem::{
