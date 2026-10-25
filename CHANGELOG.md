@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 Built on opensqlany 0.3 (pinned to a git revision until it is published).
+`Cargo.lock` is committed. The minimum Rust version is 1.95.
 
 ### Behavior changes
 
@@ -130,6 +131,8 @@ Built on opensqlany 0.3 (pinned to a git revision until it is published).
 
 ### API breaks
 
+- Python 3.10 or later is required (was 3.9, which reached end of life in
+  October 2025); wheels use the 3.10 stable ABI.
 - `Reader::open(path, &ReadOptions)` (and `Reader::from_bytes`) is the entry
   point. It owns the page store, the keystream model, the catalog and the
   page attribution; `line_items()`, `transactions()`, `indexes()`,

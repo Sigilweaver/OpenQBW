@@ -6,7 +6,7 @@
 [![PyPI](https://img.shields.io/pypi/v/openqbw.svg)](https://pypi.org/project/openqbw/)
 [![docs.rs](https://img.shields.io/docsrs/openqbw)](https://docs.rs/openqbw)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![Rust MSRV](https://img.shields.io/badge/rust-1.87%2B-orange.svg)](https://www.rust-lang.org)
+[![Rust MSRV](https://img.shields.io/badge/rust-1.95%2B-orange.svg)](https://www.rust-lang.org)
 [![Docs](https://img.shields.io/badge/docs-sigilweaver.app-blue.svg)](https://sigilweaver.app/openqbw/docs/)
 
 > Open specification and open-source parser for the **QuickBooks Desktop company file** (`.qbw`) format.
@@ -64,19 +64,24 @@ and the empirical notebook in [re/NOTES.md](re/NOTES.md).
 
 ## Install
 
-OpenQBW depends on the [OpenSQLAnywhere](https://github.com/Sigilweaver/OpenSQLAnywhere)
-crate, which lives in a sibling directory via a relative path. Clone
-both side by side:
+OpenQBW reads the page store through the
+[OpenSQLAnywhere](https://github.com/Sigilweaver/OpenSQLAnywhere) crate,
+which Cargo fetches. Build from a clone:
 
 ```console
-$ git clone https://github.com/Sigilweaver/OpenSQLAnywhere.git
 $ git clone https://github.com/Sigilweaver/OpenQBW.git
 $ cd OpenQBW
-$ cargo build --release
+$ cargo build --release --locked
 $ ./target/release/openqbw --help
 ```
 
-Rust 1.85+ is required (workspace uses edition 2024).
+`Cargo.lock` is committed, so `--locked` builds the CLI and the Python
+wheel from the dependency versions CI tested.
+
+Supported toolchains: Rust 1.95 or later (the `rust-version` in
+`Cargo.toml`, checked in CI) and Python 3.10 or later (abi3 wheels built
+against the 3.10 stable ABI). A release that raises either floor says so in
+the CHANGELOG.
 
 ### Python bindings
 
