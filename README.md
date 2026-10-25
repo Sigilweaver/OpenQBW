@@ -32,9 +32,9 @@ OpenQBW is in active development. The current code can:
   validator (Phase 6, WP-6Z).
 - Export the parsed catalog and lineitems to a SQLite database.
 
-On the Rock Castle sample file the lineitem extractor reaches
-**13,375 / 13,375 invoices and a grand total of $399,914,792.78**,
-matching the value QuickBooks itself reports for the same file.
+The line-item extractor reads invoice line items from the Rock Castle
+sample file and sums them as unsigned cents. Amounts are decoded
+heuristically from page bytes, so treat totals as unverified.
 
 A full write-up of the format work lives in [SPECIFICATION.md](SPECIFICATION.md)
 and the empirical notebook in [re/NOTES.md](re/NOTES.md).
