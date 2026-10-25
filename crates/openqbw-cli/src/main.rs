@@ -810,14 +810,26 @@ fn create_schema(conn: &Connection) -> Result<()> {
         CREATE TABLE scan_rejections (
             page_number INTEGER,
             page_offset INTEGER,
-            reason      TEXT NOT NULL
+            kind        TEXT NOT NULL,
+            message     TEXT NOT NULL
         );
+
+        CREATE TABLE meta (
+            key   TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+        INSERT INTO meta (key, value) VALUES ('format_version', '1');
+        PRAGMA user_version = 1;
 
         CREATE INDEX idx_lineitems_page   ON transaction_line_items(page_number);
         CREATE INDEX idx_lineitems_source ON transaction_line_items(source_table);
         CREATE INDEX idx_tx_type          ON transactions(type);
         CREATE INDEX idx_tx_source        ON transactions(source_table);
         "#,
+    )?;
+    conn.execute(
+        "INSERT INTO meta (key, value) VALUES ('openqbw_version', ?)",
+        params![env!("CARGO_PKG_VERSION")],
     )?;
     Ok(())
 }
@@ -941,7 +953,7 @@ fn insert_transaction_line_items(tx: &Transaction<'_>, items: &[LineItem]) -> Re
         let key = (li.invoice_id.clone(), src.clone());
         let n = line_no.entry(key).or_insert(0);
         *n += 1;
-        let type_byte = amount_type_byte(li.amount_type);
+        let type_byte = li.amount_type_byte() as i64;
         let hex = li
             .amount_raw
             .iter()
@@ -954,7 +966,7 @@ fn insert_transaction_line_items(tx: &Transaction<'_>, items: &[LineItem]) -> Re
             type_byte,
             li.amount_cents,
             li.amount_encoding.as_str(),
-            li.amount_type.decode_cents(&li.amount_raw),
+            raw_u24_cents(li),
             hex,
             li.txn_date_raw,
             li.counter,
@@ -967,9 +979,16 @@ fn insert_transaction_line_items(tx: &Transaction<'_>, items: &[LineItem]) -> Re
     Ok(())
 }
 
+/// Undecoded unsigned reading of the three amount bytes of a type 1 or 2
+/// amount, kept in the export so `verify` can compare against its baseline.
+fn raw_u24_cents(li: &LineItem) -> Option<i64> {
+    let r = li.amount_raw;
+    matches!(r[0], 1 | 2).then(|| r[1] as i64 | (r[2] as i64) << 8 | (r[3] as i64) << 16)
+}
+
 fn insert_scan_rejections(tx: &Transaction<'_>, rejected: &[ScanWarning]) -> Result<()> {
     let mut stmt = tx.prepare(
-        "INSERT INTO scan_rejections (page_number, page_offset, reason) VALUES (?, ?, ?)",
+        "INSERT INTO scan_rejections (page_number, page_offset, kind, message) VALUES (?, ?, ?, ?)",
     )?;
     for e in rejected {
         let (page, offset) = e.location();
@@ -1008,18 +1027,6 @@ fn collect_lineitems(
         );
     }
     Ok((scan.items, scan.warnings))
-}
-
-fn amount_type_byte(t: AmountType) -> i64 {
-    match t {
-        AmountType::None => 0,
-        AmountType::OneByteOne => 1,
-        AmountType::Standard => 2,
-        AmountType::Deferred => 3,
-        AmountType::Other(b) => b as i64,
-        // AmountType is non_exhaustive; a future variant must be mapped here.
-        other => unreachable!("unmapped amount type {other:?}"),
-    }
 }
 
 #[derive(Debug)]
@@ -1251,20 +1258,29 @@ fn run_migrate_csv(input: PathBuf, out: PathBuf, lenient: bool) -> Result<()> {
         )?;
     }
 
-    if !rejected.is_empty() {
-        let mut rf = std::fs::File::create(out.join("rejected.csv"))?;
-        writeln!(rf, "page_number,page_offset,reason")?;
-        for e in &rejected {
-            let (page, offset) = e.location();
-            writeln!(
-                rf,
-                "{},{},{}",
-                page.map(|v| v.to_string()).unwrap_or_default(),
-                offset.map(|v| v.to_string()).unwrap_or_default(),
-                csv_field(&e.to_string()),
-            )?;
-        }
+    // Always written, so an empty list is distinguishable from a missing file.
+    let mut rf = std::fs::File::create(out.join("rejected.csv"))?;
+    writeln!(rf, "page_number,page_offset,kind,message")?;
+    for e in &rejected {
+        let (page, offset) = e.location();
+        writeln!(
+            rf,
+            "{},{},{},{}",
+            page.map(|v| v.to_string()).unwrap_or_default(),
+            offset.map(|v| v.to_string()).unwrap_or_default(),
+            e.kind_str(),
+            csv_field(&e.to_string()),
+        )?;
     }
+    std::fs::write(
+        out.join("manifest.json"),
+        format!(
+            "{{\"format_version\": 1, \"openqbw_version\": \"{}\", \"lineitems\": {}, \"rejected\": {}}}\n",
+            env!("CARGO_PKG_VERSION"),
+            items.len(),
+            rejected.len()
+        ),
+    )?;
 
     println!(
         "openqbw migrate csv: out={:?} tables={} transactions={} lineitems={} undecoded_amounts={} skipped_records={}",
