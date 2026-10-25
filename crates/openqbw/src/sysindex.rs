@@ -86,7 +86,7 @@ fn is_printable_ascii(b: u8) -> bool {
 ///
 /// Matches occurrences of `?? ?? 01 46 <root> 0000 0000 <tid> 0000 0000
 /// <nlen> <name>` where `root` and `tid` are non-zero, `nlen` is in
-/// [`NAME_LEN_MIN`]`..=`[`NAME_LEN_MAX`], and `name` is printable ASCII.
+/// `NAME_LEN_MIN``..=``NAME_LEN_MAX`, and `name` is printable ASCII.
 pub fn scan_page(body: &[u8], pn: u64, out: &mut Vec<SysIndexEntry>) {
     let end = body.len().min(PAGE_DATA_END);
     if end < PREAMBLE_LEN {

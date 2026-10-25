@@ -78,7 +78,7 @@ pub struct SysColumn {
     /// Column name (ASCII identifier).
     pub name: String,
     /// SA17 table id. Bridged to a table name via the `SYSTABLE` row
-    /// prefix (see [`crate::owner_bridge`]).
+    /// prefix (see `owner_bridge`).
     pub owner_object_id: u32,
     /// Ordinal position of this column inside its owning table.
     pub column_id: u32,
@@ -289,7 +289,7 @@ pub(crate) fn collect_unique(
 /// residue of a mis-parsed row.
 const MAX_PLAUSIBLE_COLUMN_ID: u32 = 4096;
 
-/// Everything [`recover_schema`] learned while looking a table up, so a
+/// Everything `recover_schema` learned while looking a table up, so a
 /// caller can explain a miss instead of reporting a bare "not found"
 /// (openqbw#19).
 #[derive(Debug, Clone)]

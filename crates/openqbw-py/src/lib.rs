@@ -320,7 +320,7 @@ impl Transaction {
             txn_date_raw: h.txn_date_raw,
             counter: h.counter,
             date_source: h.date_source.as_str().to_owned(),
-            txn_date_days_since_unix: h.txn_date_raw.and_then(openqbw_rs::sa_day_to_unix_day),
+            txn_date_days_since_unix: h.txn_date_days_since_unix(),
             page_number: h.page_number,
             page_offset: h.page_offset,
             flags: flag_names(&h.flags),

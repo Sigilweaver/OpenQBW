@@ -179,7 +179,7 @@ fn recover_step(sec: &[u8], base: u8) -> u8 {
 ///
 /// **Method.** The AP cipher decode of byte `i` in sector `si` is
 /// `plain[i] = raw[i] - (bv + pn + si - bias) - i*step`. The per-sector
-/// step recovered by [`recover_step`] is independent of bv (changing bv
+/// step recovered by `recover_step` is independent of bv (changing bv
 /// only shifts the histogram peak; it does not change which step yields
 /// the highest peak). We therefore precompute, for each sector, the
 /// histogram of `raw[i] - i*step` over all bytes in the sector body. For
@@ -259,7 +259,7 @@ pub const APAGE_MAGIC: [u8; 8] = [0x24, 0x04, 0x31, 0x00, 0xB4, 0x02, 0x19, 0x00
 /// `24 04 31 00 b4 02 19 00` (see [`APAGE_MAGIC`]) at any position in the
 /// decoded body. For each candidate bv in `0..=255` the page is decoded
 /// using sector-local steps recovered via the base-independent histogram
-/// peak in [`recover_step`]; if the magic appears the bv is returned.
+/// peak in `recover_step`; if the magic appears the bv is returned.
 ///
 /// Returns `None` for pages that do not contain the magic at any bv
 /// (page 3655 of Rock Castle, the residual high-entropy opaque pages,

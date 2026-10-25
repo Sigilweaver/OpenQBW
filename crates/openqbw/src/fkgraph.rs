@@ -79,7 +79,7 @@ fn match_score(stem: &str, table: &str) -> u32 {
     0
 }
 
-/// Result of [`build`]: the edges and how many candidate columns could not
+/// Result of `build`: the edges and how many candidate columns could not
 /// be placed in a table.
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]

@@ -57,6 +57,15 @@ pub struct TransactionHeader {
 }
 
 impl TransactionHeader {
+    /// The transaction date as days since the Unix epoch (1970-01-01), with
+    /// the crate's SA-day offset (see `txn_date_raw` for the stored value).
+    /// The offset is fitted to one sample file and not confirmed against a
+    /// date known from another source; a correction ships as a bug fix.
+    /// `None` when the date is missing or outside the plausible range.
+    pub fn txn_date_days_since_unix(&self) -> Option<i64> {
+        self.txn_date_raw.and_then(crate::date::sa_day_to_unix_day)
+    }
+
     /// QB transaction type derived from the source table name by
     /// stripping the `abmc_` prefix and `_header` suffix.
     /// E.g. `abmc_invoice_header` -> `invoice`,
