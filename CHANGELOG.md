@@ -42,6 +42,12 @@ Built on opensqlany 0.3 (pinned to a git revision until it is published).
   `SyscolumnStats::pages_unconfirmed_directory`, and `openqbw schema` prints
   the count. Not measured on a corpus: opensqlany reports that about a fifth
   of `E` pages with a directory are not confirmed.
+- A line-item anchor in a page's free space (between a confirmed slot
+  directory and the lowest live row) is left out and counted in a
+  `records_outside_live_rows` warning; earlier versions exported such
+  residue of deleted or moved records as live line items. Pages without a
+  confirmed directory keep every anchor, and freed pages are still read,
+  because the allocation map is not decoded. Not measured on a corpus.
 - Line items take the nearest `04 00 10 <id>` item ID instead of the farthest
   in the 96 bytes before the anchor, and their search windows stop at the
   neighbouring records' anchors, so a record no longer reports the previous

@@ -185,6 +185,14 @@ pub enum WarningKind {
         /// Pages affected.
         pages: u64,
     },
+    /// Record anchors found in a page's free space, between the slot
+    /// directory and the lowest live row, were left out: they are residue of
+    /// deleted or moved records.
+    #[non_exhaustive]
+    RecordsOutsideLiveRows {
+        /// Anchors left out.
+        records: u64,
+    },
     /// Page-to-table attribution is unavailable, so records have no
     /// source table and header scans find nothing.
     AttributionGap(AttributionGap),
@@ -200,6 +208,7 @@ impl WarningKind {
             Self::KeystreamUnverifiedPages { .. } => "keystream_unverified_pages",
             Self::LowConfidenceSectorPages { .. } => "low_confidence_sector_pages",
             Self::UnconfirmedDirectoryPages { .. } => "unconfirmed_directory_pages",
+            Self::RecordsOutsideLiveRows { .. } => "records_outside_live_rows",
             Self::AttributionGap(_) => "attribution_gap",
             Self::Other(code) => code,
         }
@@ -241,6 +250,11 @@ impl fmt::Display for Warning {
             WarningKind::UnconfirmedDirectoryPages { pages } => write!(
                 f,
                 "{pages} pages have a slot directory the page prelude does not confirm"
+            ),
+            WarningKind::RecordsOutsideLiveRows { records } => write!(
+                f,
+                "{records} record anchors in page free space (deleted or moved records) were \
+                 left out"
             ),
             WarningKind::AttributionGap(AttributionGap::NoCatalogRows) => write!(
                 f,

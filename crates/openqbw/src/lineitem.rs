@@ -17,6 +17,7 @@
 
 use opensqlany::{ApModel, PageStore};
 
+use crate::decode::{DecodedPage, Directory};
 use crate::error::Error;
 use crate::opaque::count_opaque_pages;
 use crate::page_attribution::PageAttribution;
@@ -251,6 +252,7 @@ pub(crate) fn scan_lineitems(
             extent: opaque.extent,
         }));
     }
+    let mut outside_live_rows = 0u64;
     for_each_extent_page(
         store,
         model,
@@ -258,36 +260,83 @@ pub(crate) fn scan_lineitems(
         &mut scan,
         |_| true,
         |decoded, scan| {
-            let pn = decoded.pn();
             let source = attribution
-                .and_then(|a| a.attribute(pn))
+                .and_then(|a| a.attribute(decoded.pn()))
                 .map(|e| e.name.clone());
-            let mut found = Vec::new();
-            scan_page(&decoded.bytes()[..PAGE_DATA_END], pn, &mut found);
-            for r in found {
-                let mut li = match r {
-                    Ok(li) => li,
-                    Err(e) => {
-                        scan.reject(e, options)?;
-                        continue;
-                    }
-                };
-                // A record reads up to 96 bytes before its anchor (item ID)
-                // and 64 bytes after its payload (date); flag it when any of
-                // those bytes came from an unconfirmed keystream or a weak
-                // sector.
-                let span = li.page_offset.saturating_sub(96)
-                    ..(li.page_offset + ANCHOR_LEN + 64).min(PAGE_DATA_END);
-                li.flags.extend(decoded.flags_for(span));
-                if source.is_some() {
-                    li.set_source_table(source.clone());
+            let found = page_lineitems(decoded, source)?;
+            outside_live_rows += found.outside_live_rows;
+            for r in found.records {
+                match r {
+                    Ok(li) => scan.items.push(li),
+                    Err(e) => scan.reject(e, options)?,
                 }
-                scan.items.push(li);
             }
             Ok(())
         },
     )?;
+    if outside_live_rows > 0 {
+        scan.warnings
+            .push(Warning::new(WarningKind::RecordsOutsideLiveRows {
+                records: outside_live_rows,
+            }));
+    }
     Ok(scan)
+}
+
+/// Line items found on one decoded page.
+struct PageLineItems {
+    /// Records and record errors, in page order.
+    records: Vec<Result<LineItem, Error>>,
+    /// Anchors left out because they lie in the page's free space.
+    outside_live_rows: u64,
+}
+
+/// Parse the line items on `decoded`, flag them for the page's decode
+/// confidence, and attribute them to `source`.
+///
+/// When the page has a confirmed slot directory, the bytes between the
+/// directory and the lowest live row are free space: an anchor there is the
+/// residue of a deleted or moved record, so it is counted and left out.
+/// Pages without a confirmed directory keep every anchor, because their row
+/// extents are unknown.
+fn page_lineitems(decoded: &DecodedPage, source: Option<String>) -> Result<PageLineItems, Error> {
+    let free = match decoded.slotted()? {
+        Directory::Confirmed(sp) => sp.directory().and_then(|dir| {
+            let low = dir.min_offset()? as usize;
+            (low > dir.end()).then_some(dir.end()..low)
+        }),
+        _ => None,
+    };
+    let mut found = Vec::new();
+    scan_page(&decoded.bytes()[..PAGE_DATA_END], decoded.pn(), &mut found);
+    let mut out = PageLineItems {
+        records: Vec::with_capacity(found.len()),
+        outside_live_rows: 0,
+    };
+    for r in found {
+        let mut li = match r {
+            Ok(li) => li,
+            Err(e) => {
+                out.records.push(Err(e));
+                continue;
+            }
+        };
+        if free.as_ref().is_some_and(|f| f.contains(&li.page_offset)) {
+            out.outside_live_rows += 1;
+            continue;
+        }
+        // A record reads up to 96 bytes before its anchor (item ID) and 64
+        // bytes after its payload (date); flag it when any of those bytes
+        // came from an unconfirmed keystream or a weak sector.
+        let span = li.page_offset.saturating_sub(96)
+            ..(li.page_offset + ANCHOR_LEN + 64).min(PAGE_DATA_END);
+        li.flags.extend(decoded.flags_for(span));
+        if source.is_some() {
+            li.set_source_table(source.clone());
+        }
+        out.records.push(Ok(li));
+    }
+    Ok(out)
 }
 
 /// Scan a decoded page body for line-item anchors and append parsed records
@@ -664,6 +713,53 @@ mod tests {
         ))
         .unwrap_err();
         assert!(matches!(err, Error::TruncatedAmount { .. }));
+    }
+
+    /// A plaintext page whose prelude-confirmed slot directory at 0x100 has
+    /// four live rows at 0xC00..0xF00, leaving 0x108..0xC00 as free space.
+    fn slotted_page() -> Vec<u8> {
+        let mut page = vec![0u8; 4096];
+        page[0xFC..0xFE].copy_from_slice(&4u16.to_le_bytes());
+        for (k, off) in [0xF00u16, 0xE00, 0xD00, 0xC00].iter().enumerate() {
+            page[0x100 + 2 * k..0x102 + 2 * k].copy_from_slice(&off.to_le_bytes());
+        }
+        page[PAGE_DATA_END] = 4;
+        page
+    }
+
+    fn put_anchor(page: &mut [u8], at: usize) {
+        page[at..at + 5].copy_from_slice(&PARENT_PREFIX);
+        page[at + 5..at + 21].copy_from_slice(b"0000000000001QBm");
+        page[at + 21..at + 25].copy_from_slice(&F32_ONE);
+        page[at + 25..at + 29].copy_from_slice(&[0x02, 0x40, 0x0F, 0x04]);
+    }
+
+    #[test]
+    fn anchor_in_free_space_is_not_a_live_record() {
+        // S1-6: bytes between the slot directory and the lowest live row
+        // are free space; an anchor there is a deleted or stale record.
+        let mut page = slotted_page();
+        put_anchor(&mut page, 0x800);
+        put_anchor(&mut page, 0xC10);
+        let decoded = DecodedPage::from_plain(9, page);
+        let found = page_lineitems(&decoded, None).unwrap();
+        let offsets: Vec<usize> = found
+            .records
+            .iter()
+            .map(|r| r.as_ref().unwrap().page_offset)
+            .collect();
+        assert_eq!(offsets, [0xC10]);
+        assert_eq!(found.outside_live_rows, 1);
+    }
+
+    #[test]
+    fn page_without_directory_keeps_every_anchor() {
+        let mut page = vec![0u8; 4096];
+        put_anchor(&mut page, 0x800);
+        let decoded = DecodedPage::from_plain(9, page);
+        let found = page_lineitems(&decoded, None).unwrap();
+        assert_eq!(found.records.len(), 1);
+        assert_eq!(found.outside_live_rows, 0);
     }
 
     fn random_extent_store(pages: usize, opaque: usize) -> PageStore {
