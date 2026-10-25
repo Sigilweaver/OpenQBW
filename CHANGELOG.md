@@ -52,6 +52,8 @@ Built on opensqlany 0.3 (pinned to a git revision until it is published).
   in the 96 bytes before the anchor, and their search windows stop at the
   neighbouring records' anchors, so a record no longer reports the previous
   record's item ID or date.
+- Live rows on header pages that hold no header ID are counted in a
+  `header_rows_without_id` warning instead of being skipped silently.
 - Transaction headers whose row holds more than one 16-character ID in the
   header shape, and all headers on pages without a readable slot directory,
   carry `RecordFlag::HeaderIdAmbiguous`.

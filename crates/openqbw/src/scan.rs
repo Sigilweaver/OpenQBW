@@ -198,6 +198,13 @@ pub enum WarningKind {
         /// Anchors left out.
         records: u64,
     },
+    /// Live rows on header pages that hold no 16-character header ID and so
+    /// gave no transaction header.
+    #[non_exhaustive]
+    HeaderRowsWithoutId {
+        /// Rows affected.
+        rows: u64,
+    },
     /// Records whose page is not attributed to any table. Their
     /// `source_table` is `None` and line-item amounts are not decoded.
     #[non_exhaustive]
@@ -239,6 +246,7 @@ impl WarningKind {
             Self::LowConfidenceSectorPages { .. } => "low_confidence_sector_pages",
             Self::UnconfirmedDirectoryPages { .. } => "unconfirmed_directory_pages",
             Self::RecordsOutsideLiveRows { .. } => "records_outside_live_rows",
+            Self::HeaderRowsWithoutId { .. } => "header_rows_without_id",
             Self::UnattributedRecords { .. } => "unattributed_records",
             Self::LineItemsNotRead { .. } => "line_items_not_read",
             Self::InvalidRootPages { .. } => "invalid_root_pages",
@@ -288,6 +296,10 @@ impl fmt::Display for Warning {
                 f,
                 "{records} record anchors in page free space (deleted or moved records) were \
                  left out"
+            ),
+            WarningKind::HeaderRowsWithoutId { rows } => write!(
+                f,
+                "{rows} rows on header pages hold no header ID and gave no transaction"
             ),
             WarningKind::UnattributedRecords { records, total } => write!(
                 f,
