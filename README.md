@@ -100,20 +100,23 @@ full Python API.
 # Inventory the user tables in a company file
 $ openqbw catalog mybooks.qbw
 
-# Cross-validate page-to-table attribution against SYSINDEX
-$ openqbw verify mybooks.qbw
+# Columns recovered for one table
+$ openqbw schema mybooks.qbw abmc_invoice_header
 
-# List indexes (FK indexes only, summary mode)
-$ openqbw indexes mybooks.qbw --fk-only --summary-only
-
-# Export the catalog and lineitems to SQLite for inspection in any
+# Export transactions and line items to SQLite for inspection in any
 # SQL tool (DB Browser, Datasette, pandas, ...)
-$ openqbw export mybooks.qbw --out books.sqlite
+$ openqbw export mybooks.qbw books.sqlite
 
-# Other introspection subcommands
-$ openqbw schema mybooks.qbw
-$ openqbw nulls mybooks.qbw
-$ openqbw validate-attribution mybooks.qbw
+# CSV directory, or IIF with placeholder accounts
+$ openqbw migrate mybooks.qbw --format csv --out books/
+
+# Skip undecodable records instead of stopping; each is listed
+$ openqbw --lenient export mybooks.qbw books.sqlite
+
+# Reverse-engineering diagnostics (output may change in any release)
+$ openqbw debug indexes mybooks.qbw --fk-only --summary-only
+$ openqbw debug nulls mybooks.qbw
+$ openqbw debug validate-attribution mybooks.qbw
 ```
 
 See [docs/cli.md](docs/cli.md) for the full subcommand reference.

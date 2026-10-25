@@ -172,6 +172,25 @@ Built on opensqlany 0.3 (pinned to a git revision until it is published).
   attributes and `to_dict()`, in place of lists of dicts. Warnings are
   `ReadWarning` objects (`kind`, `message`) and are also issued as
   `openqbw.OpenQBWWarning`. `Reader.attribution_gap` is a snake_case code.
+- The crate root holds the reading API only: `Reader`, `ReadOptions`,
+  `Leniency`, `Scan`, `Warning`, `WarningKind`, `RecordFlag`, `Error`,
+  `ErrorKind`, the record types, `SchemaRecovery`, `SyscolumnStats`,
+  `BridgeSource`, `PageAttribution` and `AttributionGap`. The keystream
+  oracles (`recover_bv_*`, `oracle_bv_e_page`, `deobfuscate_with_bv`,
+  `APAGE_MAGIC`), the per-page row scanners (`scan_systable_page`,
+  `scan_sysindex_page`, `scan_syscolumn_page`), the anchor and threshold
+  constants, `is_opaque_high_entropy`, `OwnerBridge`, `BackrefVotes` and
+  `SUPPORTED_VERSION` moved to `openqbw::diagnostics`.
+- The date conversion is internal: `DATE_EPOCH_DAYS_BEFORE_UNIX`,
+  `SA_DAY_MIN_PLAUSIBLE`, `SA_DAY_MAX_PLAUSIBLE`, `sa_day_to_unix_day`,
+  `sa_day_to_unix_seconds` and `unix_day_to_sa_day` are removed from the
+  API; use `LineItem::txn_date_days_since_unix` or the new
+  `TransactionHeader::txn_date_days_since_unix`, documented as best effort,
+  or the stored `txn_date_raw`.
+- CLI: `fkgraph`, `nulls`, `validate-attribution`, `indexes` and
+  `forensics` moved under `openqbw debug`, whose names, flags and output
+  may change in any release. `export`, `catalog`, `schema`, `migrate` and
+  `verify` stay at the top level.
 - Python exceptions: `OpenQBWError` derives from `ValueError`;
   `OpenQBWIOError(OpenQBWError, OSError)` replaces the plain `OSError` for
   unreadable files; `FormatError`, `RecordError` (now a `FormatError`) and
