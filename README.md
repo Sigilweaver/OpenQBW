@@ -121,6 +121,31 @@ $ openqbw debug validate-attribution mybooks.qbw
 
 See [docs/cli.md](docs/cli.md) for the full subcommand reference.
 
+Exit status: 0 on success, 1 on an error (including a file that is not a
+supported company file, or an undecodable record without `--lenient`), 2
+on a usage error, and 3 when `verify` finds a check that differs. The
+`verify` regression baseline is specific to the Rock Castle Construction
+sample; pass `--no-regression-baseline` for other files.
+
+### Output formats
+
+Every file set openqbw writes records the version of its layout:
+
+- SQLite (`export`, `migrate --format sqlite`): `PRAGMA user_version` and
+  `meta.format_version`, plus `meta.openqbw_version`.
+- CSV (`migrate --format csv`): `manifest.json` with `format_version`,
+  `openqbw_version` and each file's row count. `rejected.csv` is always
+  written.
+
+The layout version is 1. Adding a table, a column, a CSV file or a manifest
+key leaves it unchanged; renaming or removing one, or changing what a value
+means, increments it. Readers should ignore tables, columns and keys they do
+not know. `openqbw verify` refuses an SQLite file whose version is newer
+than it reads. Codes stored in the exports (`kind` in `scan_rejections` and
+`rejected.csv`, `flags`, `amount_encoding`, `date_source`) are stable
+snake_case strings; the `message` text is for people and may change.
+NULL (an empty CSV field) means a value was not decoded, never zero.
+
 ## Library usage
 
 ```rust,no_run

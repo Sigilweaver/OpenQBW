@@ -16,6 +16,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
+use std::process::ExitCode;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -28,6 +29,18 @@ use rusqlite::{Connection, Transaction, params};
 
 const PHASE5_INVOICE_TOTAL_CENTS: i64 = 39_991_479_278;
 const PHASE5_INVOICE_COUNT: i64 = 13_375;
+
+/// Version of the SQLite export layout, stored in `PRAGMA user_version` and
+/// in `meta.format_version`. Adding a table or column keeps it; renaming or
+/// removing one, or changing what a column means, increments it.
+const SQLITE_FORMAT_VERSION: i64 = 1;
+
+/// Version of the CSV export layout, stored in `manifest.json`. Same rule as
+/// [`SQLITE_FORMAT_VERSION`].
+const CSV_FORMAT_VERSION: u32 = 1;
+
+/// Exit status of `verify` when a check reports DIFF.
+const EXIT_VERIFY_MISMATCH: u8 = 3;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -80,6 +93,10 @@ enum Cmd {
         /// attribution.
         #[arg(long)]
         strict_attribution: bool,
+        /// Skip the line-item regression baseline, which is specific to the
+        /// Rock Castle Construction sample file and differs on any other.
+        #[arg(long)]
+        no_regression_baseline: bool,
     },
     /// Print the columns of a table. SYSCOLUMN.owner_object_id is
     /// bridged to SYSTABLE.name via the table-id back-reference in the
@@ -210,17 +227,44 @@ fn report(warnings: &[Warning], rejected: &[QbwError]) {
     }
 }
 
-fn main() -> Result<()> {
-    let cli = Cli::parse();
+/// Exit status: 0 success, 1 error, 2 usage error (from the argument
+/// parser), 3 `verify` found a check that differs.
+fn main() -> ExitCode {
+    match run(Cli::parse()) {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("Error: {e:?}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run(cli: Cli) -> Result<ExitCode> {
     let lenient = cli.lenient;
-    match cli.cmd {
-        Cmd::Export { input, output } => run_export(input, output, lenient).map(|_| ()),
-        Cmd::Catalog { input, user_only } => run_catalog(input, user_only, lenient),
-        Cmd::Verify {
+    if let Cmd::Verify {
+        input,
+        output,
+        strict_attribution,
+        no_regression_baseline,
+    } = cli.cmd
+    {
+        let ok = run_verify(
             input,
             output,
             strict_attribution,
-        } => run_verify(input, output, strict_attribution, lenient),
+            no_regression_baseline,
+            lenient,
+        )?;
+        return Ok(if ok {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::from(EXIT_VERIFY_MISMATCH)
+        });
+    }
+    match cli.cmd {
+        Cmd::Export { input, output } => run_export(input, output, lenient).map(|_| ()),
+        Cmd::Catalog { input, user_only } => run_catalog(input, user_only, lenient),
+        Cmd::Verify { .. } => unreachable!("handled above"),
         Cmd::Schema { input, table } => run_schema(input, table, lenient),
         Cmd::Migrate {
             input,
@@ -242,7 +286,8 @@ fn main() -> Result<()> {
             } => run_indexes(input, fk_only, summary_only, lenient),
             DebugCmd::Forensics { input } => run_forensics(input, lenient),
         },
-    }
+    }?;
+    Ok(ExitCode::SUCCESS)
 }
 
 fn run_export(input: PathBuf, output: PathBuf, lenient: bool) -> Result<ExportStats> {
@@ -610,12 +655,14 @@ fn run_nulls(input: PathBuf, lenient: bool) -> Result<()> {
     Ok(())
 }
 
+/// Run the checks; `Ok(false)` when any reports DIFF.
 fn run_verify(
     input: PathBuf,
     output: Option<PathBuf>,
     strict_attribution: bool,
+    no_regression_baseline: bool,
     lenient: bool,
-) -> Result<()> {
+) -> Result<bool> {
     let out = match output {
         Some(p) => p,
         None => std::env::temp_dir().join(format!("openqbw-verify-{}.sqlite", std::process::id())),
@@ -625,6 +672,8 @@ fn run_verify(
     println!("=== verification report ===");
 
     let conn = Connection::open(&out)?;
+    check_export_format(&conn).with_context(|| format!("reading {:?}", out))?;
+    let mut diffs: Vec<&str> = Vec::new();
     println!();
     println!("Per source_table line-item counts:");
     let mut stmt = conn.prepare(
@@ -635,14 +684,19 @@ fn run_verify(
     )?;
     let rows = stmt.query_map([], |r| {
         Ok((
-            r.get::<_, String>(0)?,
+            r.get::<_, Option<String>>(0)?,
             r.get::<_, i64>(1)?,
             r.get::<_, i64>(2)?,
         ))
     })?;
     for row in rows {
         let (t, n, sum) = row?;
-        println!("  {:44}  {:>8}  ${:>15.2}", t, n, sum as f64 / 100.0);
+        println!(
+            "  {:44}  {:>8}  ${:>15.2}",
+            t.as_deref().unwrap_or(UNATTRIBUTED),
+            n,
+            sum as f64 / 100.0
+        );
     }
 
     println!();
@@ -676,16 +730,23 @@ fn run_verify(
         [],
         |r| r.get(0),
     )?;
-    let regression_ok =
-        grand_total == PHASE5_INVOICE_TOTAL_CENTS && parent_count == PHASE5_INVOICE_COUNT;
-    println!(
-        "Phase 5 regression (universal anchor, undecoded u24 reading):  parents={}/{}  grand_total=${:.2}/${:.2}  {}",
-        parent_count,
-        PHASE5_INVOICE_COUNT,
-        grand_total as f64 / 100.0,
-        PHASE5_INVOICE_TOTAL_CENTS as f64 / 100.0,
-        if regression_ok { "PASS" } else { "DIFF" },
-    );
+    if no_regression_baseline {
+        println!("Phase 5 regression: skipped (--no-regression-baseline)");
+    } else {
+        let regression_ok =
+            grand_total == PHASE5_INVOICE_TOTAL_CENTS && parent_count == PHASE5_INVOICE_COUNT;
+        println!(
+            "Phase 5 regression (Rock Castle baseline, undecoded u24 reading):  parents={}/{}  grand_total=${:.2}/${:.2}  {}",
+            parent_count,
+            PHASE5_INVOICE_COUNT,
+            grand_total as f64 / 100.0,
+            PHASE5_INVOICE_TOTAL_CENTS as f64 / 100.0,
+            if regression_ok { "PASS" } else { "DIFF" },
+        );
+        if !regression_ok {
+            diffs.push("Phase 5 regression baseline");
+        }
+    }
 
     // Per-source-table parent counts (gives a sense of attribution
     // distribution; expect most parents under the dominant lineitem
@@ -700,10 +761,12 @@ fn run_verify(
          ORDER BY n DESC
          LIMIT 10",
     )?;
-    let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+    let rows = stmt.query_map([], |r| {
+        Ok((r.get::<_, Option<String>>(0)?, r.get::<_, i64>(1)?))
+    })?;
     for row in rows {
         let (t, n) = row?;
-        println!("  {:44}  {:>8}", t, n);
+        println!("  {:44}  {:>8}", t.as_deref().unwrap_or(UNATTRIBUTED), n);
     }
 
     println!();
@@ -743,6 +806,9 @@ fn run_verify(
             pct,
             if ok { "PASS" } else { "DIFF" },
         );
+        if !ok {
+            diffs.push("journal pair balance");
+        }
     }
 
     // Broader (all journals) for visibility - not an acceptance criterion
@@ -810,9 +876,8 @@ fn run_verify(
         )?;
         let pages: Vec<u64> = stmt
             .query_map([], |r| r.get::<_, i64>(0))?
-            .filter_map(|r| r.ok())
-            .map(|n| n as u64)
-            .collect();
+            .map(|r| r.map(|n| n as u64))
+            .collect::<rusqlite::Result<_>>()?;
         let agree = content.compare(&reader, position, pages.iter().copied());
         let total = agree.total().max(1);
         println!(
@@ -829,6 +894,48 @@ fn run_verify(
 
     println!();
     println!("Overall: {}", stats.summary());
+    if diffs.is_empty() {
+        Ok(true)
+    } else {
+        eprintln!("verify: checks that differ: {}", diffs.join(", "));
+        Ok(false)
+    }
+}
+
+/// Label for rows without a source table in human-readable output.
+const UNATTRIBUTED: &str = "(unattributed)";
+
+/// Refuse an SQLite file this build cannot read: one that is not an
+/// openqbw export, or one written in a later format version.
+fn check_export_format(conn: &Connection) -> Result<()> {
+    let user_version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    let meta: Option<String> = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'format_version'",
+            [],
+            |r| r.get(0),
+        )
+        .ok();
+    let Some(meta) = meta else {
+        anyhow::bail!("not an openqbw export: no meta.format_version");
+    };
+    let meta: i64 = meta
+        .parse()
+        .with_context(|| format!("meta.format_version {meta:?} is not an integer"))?;
+    if meta != user_version {
+        anyhow::bail!(
+            "meta.format_version {meta} disagrees with PRAGMA user_version {user_version}"
+        );
+    }
+    if meta > SQLITE_FORMAT_VERSION {
+        anyhow::bail!(
+            "export format version {meta} is newer than this openqbw reads \
+             ({SQLITE_FORMAT_VERSION}); use a newer openqbw"
+        );
+    }
+    if meta < 1 {
+        anyhow::bail!("not an openqbw export: format version {meta}");
+    }
     Ok(())
 }
 
@@ -845,7 +952,8 @@ fn create_schema(conn: &Connection) -> Result<()> {
         CREATE TABLE transactions (
             qb_id        TEXT PRIMARY KEY,
             type         TEXT NOT NULL,
-            source_table TEXT NOT NULL,
+            -- NULL when no line's page is attributed to a table.
+            source_table TEXT,
             txn_date_raw INTEGER,
             counter      INTEGER,
             date_source  TEXT NOT NULL,
@@ -858,6 +966,7 @@ fn create_schema(conn: &Connection) -> Result<()> {
         );
 
         CREATE TABLE transaction_line_items (
+            id                  INTEGER PRIMARY KEY,
             qb_id_parent        TEXT NOT NULL,
             line_number         INTEGER NOT NULL,
             item_qb_id          TEXT,
@@ -873,10 +982,11 @@ fn create_schema(conn: &Connection) -> Result<()> {
             date_source         TEXT NOT NULL,
             -- Comma-separated record flags; empty when none.
             flags               TEXT NOT NULL,
-            source_table        TEXT NOT NULL,
+            -- NULL when the line's page is not attributed to a table.
+            source_table        TEXT,
             page_number         INTEGER NOT NULL,
             page_offset         INTEGER NOT NULL,
-            PRIMARY KEY (qb_id_parent, line_number, source_table)
+            UNIQUE (page_number, page_offset)
         );
 
         CREATE TABLE scan_rejections (
@@ -890,8 +1000,6 @@ fn create_schema(conn: &Connection) -> Result<()> {
             key   TEXT PRIMARY KEY,
             value TEXT NOT NULL
         );
-        INSERT INTO meta (key, value) VALUES ('format_version', '1');
-        PRAGMA user_version = 1;
 
         CREATE INDEX idx_lineitems_page   ON transaction_line_items(page_number);
         CREATE INDEX idx_lineitems_source ON transaction_line_items(source_table);
@@ -900,9 +1008,10 @@ fn create_schema(conn: &Connection) -> Result<()> {
         "#,
     )?;
     conn.execute(
-        "INSERT INTO meta (key, value) VALUES ('openqbw_version', ?)",
-        params![env!("CARGO_PKG_VERSION")],
+        "INSERT INTO meta (key, value) VALUES ('format_version', ?), ('openqbw_version', ?)",
+        params![SQLITE_FORMAT_VERSION.to_string(), env!("CARGO_PKG_VERSION")],
     )?;
+    conn.pragma_update(None, "user_version", SQLITE_FORMAT_VERSION)?;
     Ok(())
 }
 
@@ -990,10 +1099,7 @@ fn insert_synthesized_transactions(
             .or(lines.first())
             .map(|l| l.date_source)
             .unwrap_or(openqbw::DateSource::NotFound);
-        let src = lines
-            .iter()
-            .find_map(|l| l.source_table.clone())
-            .unwrap_or_default();
+        let src: Option<String> = lines.iter().find_map(|l| l.source_table.clone());
         let page = lines.first().map(|l| l.page_number as i64).unwrap_or(0);
         insert_stmt.execute(params![
             qb_id,
@@ -1019,9 +1125,9 @@ fn insert_transaction_line_items(tx: &Transaction<'_>, items: &[LineItem]) -> Re
           flags, source_table, page_number, page_offset) \
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )?;
-    let mut line_no: BTreeMap<(String, String), i64> = BTreeMap::new();
+    let mut line_no: BTreeMap<(String, Option<String>), i64> = BTreeMap::new();
     for li in items {
-        let src = li.source_table.clone().unwrap_or_default();
+        let src = li.source_table.clone();
         let key = (li.invoice_id.clone(), src.clone());
         let n = line_no.entry(key).or_insert(0);
         *n += 1;
@@ -1341,12 +1447,12 @@ fn run_migrate_csv(input: PathBuf, out: PathBuf, lenient: bool) -> Result<()> {
     }
     std::fs::write(
         out.join("manifest.json"),
-        format!(
-            "{{\"format_version\": 1, \"openqbw_version\": \"{}\", \"lineitems\": {}, \"rejected\": {}}}\n",
-            env!("CARGO_PKG_VERSION"),
-            items.len(),
-            rejected.len()
-        ),
+        csv_manifest(&[
+            ("catalog.csv", tables.len()),
+            ("transactions.csv", headers.len()),
+            ("lineitems.csv", items.len()),
+            ("rejected.csv", rejected.len()),
+        ]),
     )?;
 
     println!(
@@ -1359,6 +1465,21 @@ fn run_migrate_csv(input: PathBuf, out: PathBuf, lenient: bool) -> Result<()> {
         rejected.len(),
     );
     Ok(())
+}
+
+/// `manifest.json` for a CSV export: the format version, the writer's
+/// version, and every file written with its data-row count. File names are
+/// fixed ASCII, so no JSON escaping is needed.
+fn csv_manifest(files: &[(&str, usize)]) -> String {
+    let files = files
+        .iter()
+        .map(|(name, rows)| format!("    \"{name}\": {{\"rows\": {rows}}}"))
+        .collect::<Vec<_>>()
+        .join(",\n");
+    format!(
+        "{{\n  \"format_version\": {CSV_FORMAT_VERSION},\n  \"openqbw_version\": \"{}\",\n  \"files\": {{\n{files}\n  }}\n}}\n",
+        env!("CARGO_PKG_VERSION")
+    )
 }
 
 fn run_migrate_iif(
@@ -1565,6 +1686,38 @@ mod tests {
 
     fn item(parent: &str, cents: Option<i64>) -> LineItem {
         LineItem::synthetic(parent, Some(AmountEncoding::JOURNAL_TABLE), cents)
+    }
+
+    fn export_db(version: i64) -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        create_schema(&conn).unwrap();
+        conn.execute(
+            "UPDATE meta SET value = ? WHERE key = 'format_version'",
+            params![version.to_string()],
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", version).unwrap();
+        conn
+    }
+
+    #[test]
+    fn current_export_format_is_accepted() {
+        check_export_format(&export_db(SQLITE_FORMAT_VERSION)).unwrap();
+    }
+
+    #[test]
+    fn future_export_format_is_rejected() {
+        let e = check_export_format(&export_db(SQLITE_FORMAT_VERSION + 1)).unwrap_err();
+        assert!(
+            e.to_string().contains("newer than this openqbw reads"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn sqlite_without_meta_is_rejected() {
+        let conn = Connection::open_in_memory().unwrap();
+        assert!(check_export_format(&conn).is_err());
     }
 
     #[test]
