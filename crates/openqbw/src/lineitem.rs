@@ -252,7 +252,7 @@ pub(crate) fn scan_lineitems(
             extent: opaque.extent,
         }));
     }
-    let mut outside_live_rows = 0u64;
+    let (mut outside_live_rows, mut other_quantity) = (0u64, 0u64);
     for_each_extent_page(
         store,
         model,
@@ -265,6 +265,7 @@ pub(crate) fn scan_lineitems(
                 .map(|e| e.name.clone());
             let found = page_lineitems(decoded, source)?;
             outside_live_rows += found.outside_live_rows;
+            other_quantity += found.other_quantity;
             for r in found.records {
                 match r {
                     Ok(li) => scan.items.push(li),
@@ -280,6 +281,12 @@ pub(crate) fn scan_lineitems(
                 records: outside_live_rows,
             }));
     }
+    if other_quantity > 0 {
+        scan.warnings
+            .push(Warning::new(WarningKind::LineItemsNotRead {
+                anchors: other_quantity,
+            }));
+    }
     Ok(scan)
 }
 
@@ -289,6 +296,8 @@ struct PageLineItems {
     records: Vec<Result<LineItem, Error>>,
     /// Anchors left out because they lie in the page's free space.
     outside_live_rows: u64,
+    /// Anchor-shaped records with a quantity other than 1.0, not parsed.
+    other_quantity: u64,
 }
 
 /// Parse the line items on `decoded`, flag them for the page's decode
@@ -308,10 +317,11 @@ fn page_lineitems(decoded: &DecodedPage, source: Option<String>) -> Result<PageL
         _ => None,
     };
     let mut found = Vec::new();
-    scan_page(&decoded.bytes()[..PAGE_DATA_END], decoded.pn(), &mut found);
+    let other_quantity = scan_page(&decoded.bytes()[..PAGE_DATA_END], decoded.pn(), &mut found);
     let mut out = PageLineItems {
         records: Vec::with_capacity(found.len()),
         outside_live_rows: 0,
+        other_quantity,
     };
     for r in found {
         let mut li = match r {
@@ -341,9 +351,13 @@ fn page_lineitems(decoded: &DecodedPage, source: Option<String>) -> Result<PageL
 
 /// Scan a decoded page body for line-item anchors and append parsed records
 /// to `out` in page order.
-fn scan_page(body: &[u8], pn: u64, out: &mut Vec<Result<LineItem, Error>>) {
+///
+/// Returns how many anchors had a plausible quantity other than 1.0 in the
+/// quantity position; they are not parsed.
+fn scan_page(body: &[u8], pn: u64, out: &mut Vec<Result<LineItem, Error>>) -> u64 {
+    let mut other_quantity = 0u64;
     if body.len() < ANCHOR_LEN {
-        return;
+        return other_quantity;
     }
     let limit = body.len() - ANCHOR_LEN;
     let mut start = Vec::new();
@@ -360,8 +374,14 @@ fn scan_page(body: &[u8], pn: u64, out: &mut Vec<Result<LineItem, Error>>) {
             pos += 1;
             continue;
         }
-        // Verify trailing float32(1.0).
-        if body[pos + 5 + QB_ID_LEN..pos + ANCHOR_LEN] != F32_ONE {
+        // Verify trailing float32(1.0). Any other plausible quantity is
+        // counted: the record may be a real line this decoder cannot read.
+        let qty = &body[pos + 5 + QB_ID_LEN..pos + ANCHOR_LEN];
+        if qty != F32_ONE {
+            let q = f32::from_le_bytes([qty[0], qty[1], qty[2], qty[3]]);
+            if q.is_finite() && q > 0.0 && q < 1.0e9 {
+                other_quantity += 1;
+            }
             pos += 1;
             continue;
         }
@@ -385,6 +405,7 @@ fn scan_page(body: &[u8], pn: u64, out: &mut Vec<Result<LineItem, Error>>) {
     for (anchor, floor, ceil) in bounds {
         out.push(parse_anchor(body, pn, anchor, floor, ceil));
     }
+    other_quantity
 }
 
 fn parse_anchor(
@@ -750,6 +771,20 @@ mod tests {
             .collect();
         assert_eq!(offsets, [0xC10]);
         assert_eq!(found.outside_live_rows, 1);
+    }
+
+    #[test]
+    fn anchor_with_another_quantity_is_counted() {
+        // S2-16: the anchor requires a float32 1.0 in the position the
+        // module docs call the quantity. A line with quantity 3 would be
+        // silently absent; it is now counted.
+        let mut page = vec![0u8; 4096];
+        put_anchor(&mut page, 0x800);
+        page[0x800 + 21..0x800 + 25].copy_from_slice(&3.0f32.to_le_bytes());
+        let decoded = DecodedPage::from_plain(9, page);
+        let found = page_lineitems(&decoded, None).unwrap();
+        assert!(found.records.is_empty());
+        assert_eq!(found.other_quantity, 1);
     }
 
     #[test]

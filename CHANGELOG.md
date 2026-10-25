@@ -106,6 +106,12 @@ Built on opensqlany 0.3 (pinned to a git revision until it is published).
 - An anchor followed by an unknown amount-type byte, or one whose amount runs
   past the page data area, is an error (`UnknownAmountType`,
   `TruncatedAmount`) instead of a line item with a zero or unknown amount.
+- Line items are read only when the field after the parent ID is
+  `float32(1.0)`, which the module documentation calls the quantity. An
+  anchor with any other plausible value there is now counted in a
+  `line_items_not_read` warning, because such a line is missing from the
+  results and from every total; earlier versions left it out silently.
+  Whether the field is the quantity is not confirmed.
 - Line items are scanned to the end of the page data area (0xFF0, was 0xFE0).
 - SQLite export: `transactions.total_cents` is NULL when any line of the
   transaction has no decoded amount; `unresolved_lines` counts them.

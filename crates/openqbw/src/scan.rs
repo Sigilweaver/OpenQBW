@@ -198,6 +198,14 @@ pub enum WarningKind {
         /// Anchors left out.
         records: u64,
     },
+    /// Line-item anchors whose quantity field is a plausible value other than
+    /// 1.0. The decoder reads only lines with quantity 1.0, so these lines are
+    /// missing from the results and from every total.
+    #[non_exhaustive]
+    LineItemsNotRead {
+        /// Anchors seen.
+        anchors: u64,
+    },
     /// `SYSTABLE` rows whose `data_root_page` cannot be a root (past the end
     /// of the file or not a data page). They carry
     /// [`RecordFlag::RootPageInvalid`] and are not used for attribution.
@@ -222,6 +230,7 @@ impl WarningKind {
             Self::LowConfidenceSectorPages { .. } => "low_confidence_sector_pages",
             Self::UnconfirmedDirectoryPages { .. } => "unconfirmed_directory_pages",
             Self::RecordsOutsideLiveRows { .. } => "records_outside_live_rows",
+            Self::LineItemsNotRead { .. } => "line_items_not_read",
             Self::InvalidRootPages { .. } => "invalid_root_pages",
             Self::AttributionGap(_) => "attribution_gap",
             Self::Other(code) => code,
@@ -269,6 +278,11 @@ impl fmt::Display for Warning {
                 f,
                 "{records} record anchors in page free space (deleted or moved records) were \
                  left out"
+            ),
+            WarningKind::LineItemsNotRead { anchors } => write!(
+                f,
+                "{anchors} line-item anchors have a quantity other than 1.0; this version reads \
+                 only quantity-1.0 lines, so these are missing from the results and totals"
             ),
             WarningKind::InvalidRootPages { tables } => write!(
                 f,
