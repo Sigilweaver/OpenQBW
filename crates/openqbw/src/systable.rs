@@ -136,11 +136,9 @@ pub fn scan_page(body: &[u8], pn: u64, out: &mut Vec<SysTableEntry>) {
 
         // Parse trailer fields if they fit in the page body.
         let trailer_start = name_end;
-        let trailer = if trailer_start + TRAILER_SCAN_LEN <= body.len() {
-            &body[trailer_start..trailer_start + TRAILER_SCAN_LEN]
-        } else {
-            &body[trailer_start..body.len().min(trailer_start + TRAILER_SCAN_LEN)]
-        };
+        // Never read past the page data area: bytes from 0xFF0 on are the page
+        // trailer (LSN, CRC), not row data.
+        let trailer = &body[trailer_start..end.min(trailer_start + TRAILER_SCAN_LEN)];
         let col_count = trailer.get(COL_COUNT_OFF).copied();
         let data_root_page = read_u32_le(trailer, DATA_ROOT_OFF);
         let last_page = read_u32_le(trailer, LAST_PAGE_OFF);
@@ -367,6 +365,22 @@ mod tests {
         assert_eq!(e.col_count, Some(20));
         assert_eq!(e.data_root_page, Some(3628));
         assert_eq!(e.last_page, Some(3072));
+    }
+
+    #[test]
+    fn trailer_fields_are_not_read_from_the_page_trailer() {
+        // Row ends at 0xFD0, so the data-root field (+34) would start at
+        // 0xFF2, inside the page trailer. It must be None, not trailer bytes.
+        let mut body = vec![0u8; 0x1000];
+        let row = synth_row(7, [0; 4], "abmc_x_header");
+        let row_off = 0xFD0 - row.len();
+        body[row_off..0xFD0].copy_from_slice(&row);
+        body[0xFF2..0xFF6].copy_from_slice(&3u32.to_le_bytes());
+        let mut out = Vec::new();
+        scan_page(&body, 0, &mut out);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].data_root_page, None);
+        assert_eq!(out[0].last_page, None);
     }
 
     #[test]

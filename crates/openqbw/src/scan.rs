@@ -61,6 +61,9 @@ pub enum RecordFlag {
     /// Two or more separate date/counter pairs sat in the search window, so
     /// no date was chosen.
     DateAmbiguous,
+    /// The row held more than one 16-character ID in the header ID shape, or
+    /// row boundaries were unknown, so the ID taken may be a foreign key.
+    HeaderIdAmbiguous,
 }
 
 impl RecordFlag {
@@ -70,6 +73,7 @@ impl RecordFlag {
             Self::AmountEncodingUnconfirmed => "amount_encoding_unconfirmed",
             Self::AmountTypeUnestablished => "amount_type_unestablished",
             Self::DateAmbiguous => "date_ambiguous",
+            Self::HeaderIdAmbiguous => "header_id_ambiguous",
         }
     }
 }
