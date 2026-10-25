@@ -21,6 +21,7 @@ mod attribution_content;
 mod attribution_schema;
 mod bv_recovery;
 mod date;
+mod decode;
 mod error;
 mod fkgraph;
 mod lineitem;
@@ -35,6 +36,9 @@ mod sysindex;
 mod sysobject;
 mod systable;
 mod transaction_header;
+
+#[cfg(test)]
+mod testutil;
 
 pub use attribution_content::{AttributionAgreement, ContentAttribution, RowSignature, SIG_LEN};
 pub use attribution_schema::{
@@ -62,7 +66,7 @@ pub use opaque::{
     OPAQUE_ENTROPY_THRESHOLD, OPAQUE_FILE_FRACTION, OpaqueCount, count_opaque_pages,
     is_opaque_high_entropy,
 };
-pub use open::{OpenOptions, SUPPORTED_VERSION, check_store, open_store};
+pub use open::{OpenOptions, SUPPORTED_VERSION, check_store, learn_model, open_store};
 pub use owner_bridge::{
     BACKREF_MAX_DISTANCE, BACKREF_MIN_DISTANCE, BackrefVotes, BridgeSource,
     DEFAULT_BACKREF_DISTANCE, OwnerBridge, bridge_owners_via_backref, extend_with_sysobject,

@@ -33,9 +33,9 @@
 
 use std::collections::BTreeMap;
 
-use opensqlany::{ApModel, Page, PageStore, PageType, SlottedPage};
+use opensqlany::{ApModel, PageStore, PageType};
 
-use crate::bv_recovery::{deobfuscate_with_bv, recover_bv_qb_data};
+use crate::decode::decode_page;
 use crate::syscolumn::{SysColumn, iter_syscolumns};
 use crate::sysobject::bridge_owners_to_tables;
 use crate::systable::iter_systable_entries;
@@ -255,20 +255,13 @@ fn median_row_body(store: &PageStore, model: &ApModel, page_number: u64) -> Opti
     if page.trailer().page_type() != PageType::Extent {
         return None;
     }
-    let raw = page.bytes();
-    let plain = if let Some(bv) = recover_bv_qb_data(page_number, raw) {
-        deobfuscate_with_bv(raw, page_number, bv)
-    } else {
-        model.deobfuscate_with_store(raw, page_number, store)
-    };
-    let p = Page::from_bytes(page_number, &plain);
-    let sp = SlottedPage::parse(p);
-    sp.directory.as_ref()?;
-    let rows = sp.row_bytes();
+    let decoded = decode_page(store, model, page_number).ok()?;
+    let sp = decoded.slotted().ok()??;
+    let rows = sp.rows();
     if rows.is_empty() {
         return None;
     }
-    let mut lens: Vec<u32> = rows.iter().map(|(_, b)| b.len() as u32).collect();
+    let mut lens: Vec<u32> = rows.iter().map(|r| r.bytes().len() as u32).collect();
     lens.sort_unstable();
     Some(lens[lens.len() / 2])
 }

@@ -1,14 +1,14 @@
 //! Opening a `.qbw` file with format checks.
 //!
-//! `PageStore::open` only checks that the file size is a multiple of 4096.
-//! [`open_store`] also checks the superblock magic and version triple and
-//! the CRC-32 footer of every page, so a file that is not a QuickBooks
+//! `PageStore::open` checks the superblock magic, the version triple and the
+//! `flags_06` base bits. [`open_store`] also checks the CRC-32 footer and the
+//! reserved trailer bytes of every page, so a file that is not a QuickBooks
 //! company file, or a page damaged on disk, is an error before any record
 //! is decoded.
 
 use std::path::Path;
 
-use opensqlany::PageStore;
+use opensqlany::{ApModel, PageStore, ReadOptions};
 
 use crate::error::{Error, Result};
 
@@ -38,25 +38,36 @@ pub fn open_store(path: impl AsRef<Path>, options: &OpenOptions) -> Result<PageS
     Ok(store)
 }
 
+/// Calibrate the AP keystream model of `store`.
+///
+/// A store whose pure-AP pages read as plaintext, or where none calibrates,
+/// is an error ([`Error::Store`]): it is not an obfuscated QuickBooks file
+/// this crate can decode.
+pub fn learn_model(store: &PageStore) -> Result<ApModel> {
+    ApModel::learn(store, &ReadOptions::strict()).map_err(|e| Error::from_store(e, None))
+}
+
 /// Check the superblock magic and version and, unless disabled, every
-/// page's CRC. Returns the first failure.
+/// page's CRC and trailer. Returns the first failure.
+///
+/// An all-zero page was never written and passes the page checks.
 pub fn check_store(store: &PageStore, options: &OpenOptions) -> Result<()> {
     // `superblock` verifies the magic.
     let sb = store
         .superblock()
         .map_err(|e| Error::from_store(e, Some(0)))?;
-    if (sb.format_major, sb.version_a, sb.version_b) != SUPPORTED_VERSION {
+    let found = (sb.format_major(), sb.version_a(), sb.version_b());
+    if found != SUPPORTED_VERSION {
         return Err(Error::UnsupportedVersion {
-            format_major: sb.format_major,
-            version_a: sb.version_a,
-            version_b: sb.version_b,
+            format_major: found.0,
+            version_a: found.1,
+            version_b: found.2,
         });
     }
     if options.verify_crc {
         for pn in 0..store.page_count() {
             store
-                .page(pn)
-                .and_then(|p| p.verify_crc())
+                .page_verified(pn)
                 .map_err(|e| Error::from_store(e, Some(pn)))?;
         }
     }
@@ -75,6 +86,7 @@ mod tests {
 
     fn store(pages: usize, magic: u32, ver: (u32, u16, u16)) -> PageStore {
         let mut b = vec![0u8; PAGE_SIZE * pages];
+        b[0x06] = opensqlany::FLAGS_06_BASE;
         b[0x10..0x14].copy_from_slice(&ver.0.to_le_bytes());
         b[0x14..0x18].copy_from_slice(&magic.to_le_bytes());
         b[0x18..0x1A].copy_from_slice(&ver.1.to_le_bytes());
@@ -82,7 +94,7 @@ mod tests {
         for p in b.chunks_mut(PAGE_SIZE) {
             seal(p);
         }
-        PageStore::from_bytes(b).unwrap()
+        PageStore::from_bytes_unchecked(b).unwrap()
     }
 
     #[test]
@@ -119,7 +131,7 @@ mod tests {
             seal(p);
         }
         b[PAGE_SIZE * 2 + 100] ^= 0xFF; // bit rot in page 2
-        let s = PageStore::from_bytes(b).unwrap();
+        let s = PageStore::from_bytes_unchecked(b).unwrap();
         let e = check_store(&s, &OpenOptions::default()).unwrap_err();
         assert!(matches!(e, Error::BadCrc { page_number: 2, .. }));
         let off = OpenOptions {

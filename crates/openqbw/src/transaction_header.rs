@@ -21,10 +21,10 @@
 
 use std::iter::FusedIterator;
 
-use opensqlany::{ApModel, Page, PageStore, PageType, SlottedPage};
+use opensqlany::{ApModel, PageStore, PageType};
 
-use crate::bv_recovery::{deobfuscate_with_bv, recover_bv_any};
 use crate::date::{DateScan, DateSource, scan_date_counter};
+use crate::decode::{DecodedPage, decode_page};
 use crate::error::Error;
 use crate::page_attribution::PageAttribution;
 use crate::scan::{RecordFlag, ScanOptions, ScanResult, ScanWarning};
@@ -178,19 +178,19 @@ fn find_date_counter(body: &[u8], start: usize) -> DateScan {
 ///
 /// Returns `Some(n)` with the number of records appended when a slot
 /// directory was found; returns `None` when no slot directory could be
-/// parsed (callers should fall back to [`scan_page`]).
+/// parsed or confirmed (callers should fall back to [`scan_page`]).
 fn scan_page_slotted(
-    plain: &[u8],
-    pn: u64,
+    decoded: &DecodedPage,
     source_table: &str,
     out: &mut Vec<TransactionHeader>,
-) -> Option<usize> {
-    let page = Page::from_bytes(pn, plain);
-    let sp = SlottedPage::parse(page);
-    sp.directory.as_ref()?;
-    let rows = sp.row_bytes();
+) -> Result<Option<usize>, Error> {
+    let pn = decoded.pn();
+    let Some(sp) = decoded.slotted()? else {
+        return Ok(None);
+    };
     let mut added = 0usize;
-    for (slot_off, row) in rows {
+    for r in sp.rows() {
+        let (slot_off, row) = (r.offset(), r.bytes());
         if row.len() < HEADER_PREFIX.len() + QB_ID_LEN {
             continue;
         }
@@ -217,6 +217,8 @@ fn scan_page_slotted(
         if candidates.len() > 1 {
             flags.push(RecordFlag::HeaderIdAmbiguous);
         }
+        let start = slot_off as usize;
+        flags.extend(decoded.flags_for(start..start + row.len()));
         out.push(TransactionHeader {
             qb_id,
             source_table: source_table.to_owned(),
@@ -229,7 +231,7 @@ fn scan_page_slotted(
         });
         added += 1;
     }
-    Some(added)
+    Ok(Some(added))
 }
 
 fn is_base62(s: &[u8]) -> bool {
@@ -277,16 +279,7 @@ impl<'a> TransactionHeaderIter<'a> {
             if page.trailer().page_type() != PageType::Extent {
                 continue;
             }
-            let raw = page.bytes();
-            // Header pages may or may not carry the QB-data anchor.
-            // Try the QB-specific recovery first, fall back to the
-            // validated E-page oracle cascade, and finally to the
-            // generic AP model.
-            let plain = if let Some(bv) = recover_bv_any(pn, raw) {
-                deobfuscate_with_bv(raw, pn, bv)
-            } else {
-                self.model.deobfuscate_with_store(raw, pn, self.store)
-            };
+            let decoded = decode_page(self.store, self.model, pn)?;
             let before = self.buffer.len();
             // Prefer slotted-page row scan when a slot directory is
             // parseable; fall back to the linear `0E 00 10` scan
@@ -294,9 +287,19 @@ impl<'a> TransactionHeaderIter<'a> {
             // most and constrains date/counter discovery to the owning
             // row, so it produces strictly more reliable headers when
             // available.
-            let slotted_added = scan_page_slotted(&plain, pn, &source_table, &mut self.buffer);
+            let slotted_added = scan_page_slotted(&decoded, &source_table, &mut self.buffer)?;
             if slotted_added.is_none() {
-                scan_page(&plain[..PAGE_DATA_END], pn, &source_table, &mut self.buffer);
+                scan_page(
+                    &decoded.bytes()[..PAGE_DATA_END],
+                    pn,
+                    &source_table,
+                    &mut self.buffer,
+                );
+                for h in &mut self.buffer[before..] {
+                    let start = h.page_offset;
+                    let end = (start + HEADER_PREFIX.len() + QB_ID_LEN + 96).min(PAGE_DATA_END);
+                    h.flags.extend(decoded.flags_for(start..end));
+                }
             }
             // Reverse for LIFO consumption to preserve source order.
             self.buffer[before..].reverse();
@@ -427,6 +430,10 @@ mod tests {
     /// rows of varying offsets and put the anchor in the first row.
     fn build_slotted_page(rows: &[(u16, &[u8])]) -> Vec<u8> {
         let mut page = vec![0u8; 4096];
+        // Prelude: the slot count as a u16 four bytes before the array,
+        // confirmed by the trailer's count byte at 0xFF0.
+        page[0xFC..0xFE].copy_from_slice(&(rows.len() as u16).to_le_bytes());
+        page[PAGE_DATA_END] = rows.len() as u8;
         // Write each row body at its offset.
         for &(off, body) in rows {
             let start = off as usize;
@@ -443,6 +450,27 @@ mod tests {
             dir += 2;
         }
         page
+    }
+
+    fn slotted(page: Vec<u8>, pn: u64, out: &mut Vec<TransactionHeader>) -> Option<usize> {
+        let decoded = DecodedPage::from_plain(pn, page);
+        scan_page_slotted(&decoded, "abmc_invoice_header", out).unwrap()
+    }
+
+    #[test]
+    fn unconfirmed_directory_falls_back_to_the_linear_scan() {
+        // Same layout without the prelude count: opensqlany cannot confirm
+        // the directory, so the slotted path declines.
+        let bodies: Vec<Vec<u8>> = (0..8).map(|i| vec![i as u8; 64]).collect();
+        let rows: Vec<(u16, &[u8])> = bodies
+            .iter()
+            .enumerate()
+            .map(|(i, b)| (0x800 + (i as u16) * 64, b.as_slice()))
+            .collect();
+        let mut page = build_slotted_page(&rows);
+        page[0xFC] = 0;
+        let mut out = Vec::new();
+        assert_eq!(slotted(page, 3, &mut out), None);
     }
 
     #[test]
@@ -471,7 +499,7 @@ mod tests {
             .collect();
         let page = build_slotted_page(&rows);
         let mut out = Vec::new();
-        let n = scan_page_slotted(&page, 4242, "abmc_invoice_header", &mut out);
+        let n = slotted(page, 4242, &mut out);
         assert_eq!(n, Some(8));
         assert_eq!(out.len(), 8);
         // Every emitted record should reference the correct page.
@@ -510,7 +538,7 @@ mod tests {
             .collect();
         let page = build_slotted_page(&rows);
         let mut out = Vec::new();
-        scan_page_slotted(&page, 1, "abmc_invoice_header", &mut out).unwrap();
+        slotted(page, 1, &mut out).unwrap();
         assert_eq!(out.len(), 8);
         let flagged: Vec<_> = out
             .iter()
@@ -525,7 +553,7 @@ mod tests {
         // All-zero page has no slot directory.
         let page = vec![0u8; 4096];
         let mut out = Vec::new();
-        let n = scan_page_slotted(&page, 1, "abmc_invoice_header", &mut out);
+        let n = slotted(page, 1, &mut out);
         assert!(n.is_none());
         assert!(out.is_empty());
     }
@@ -550,7 +578,7 @@ mod tests {
             .collect();
         let page = build_slotted_page(&rows);
         let mut out = Vec::new();
-        let n = scan_page_slotted(&page, 7, "abmc_invoice_header", &mut out);
+        let n = slotted(page, 7, &mut out);
         assert_eq!(n, Some(1));
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].qb_id, "0000000000001QBm");
@@ -576,7 +604,7 @@ mod tests {
             .collect();
         let page = build_slotted_page(&rows);
         let mut out = Vec::new();
-        let _ = scan_page_slotted(&page, 9, "abmc_invoice_header", &mut out);
+        slotted(page, 9, &mut out).unwrap();
         // The only "1QBm"/"1QBn" record we expect is the FIRST one.
         let qbm = out.iter().filter(|h| h.qb_id == "0000000000001QBm").count();
         let qbn = out.iter().filter(|h| h.qb_id == "0000000000001QBn").count();

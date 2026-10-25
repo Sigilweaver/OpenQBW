@@ -19,7 +19,7 @@ use std::iter::FusedIterator;
 
 use opensqlany::{ApModel, PageStore, PageType};
 
-use crate::bv_recovery::{deobfuscate_with_bv, recover_bv_qb_data};
+use crate::decode::decode_page;
 use crate::error::Error;
 use crate::opaque::count_opaque_pages;
 use crate::page_attribution::PageAttribution;
@@ -326,15 +326,17 @@ impl<'a> LineItemIter<'a> {
                 continue;
             }
 
-            let raw = page.bytes();
-            // Prefer QB-specific anchor-based bv recovery (C.36). Falls back
-            // to the generic AP model when the anchor is not present.
-            let plain = match recover_bv_qb_data(pn, raw) {
-                Some(bv) => deobfuscate_with_bv(raw, pn, bv),
-                None => self.model.deobfuscate_with_store(raw, pn, self.store),
-            };
+            let decoded = decode_page(self.store, self.model, pn)?;
             let before = self.buffer.len();
-            scan_page(&plain[..PAGE_DATA_END], pn, &mut self.buffer);
+            scan_page(&decoded.bytes()[..PAGE_DATA_END], pn, &mut self.buffer);
+            // A record reads up to 96 bytes before its anchor (item ID) and
+            // 64 bytes after its payload (date); flag it when any of those
+            // bytes came from an unconfirmed keystream or a weak sector.
+            for li in self.buffer[before..].iter_mut().flatten() {
+                let span = li.page_offset.saturating_sub(96)
+                    ..(li.page_offset + ANCHOR_LEN + 64).min(PAGE_DATA_END);
+                li.flags.extend(decoded.flags_for(span));
+            }
             if let Some(attr) = self.attribution
                 && let Some(entry) = attr.attribute(pn)
             {
@@ -759,13 +761,13 @@ mod tests {
             }
             page[0xFF2] = b'E';
         }
-        PageStore::from_bytes(b).unwrap()
+        crate::testutil::sealed_store(b)
     }
 
     #[test]
     fn mostly_opaque_file_is_an_error() {
         let store = random_extent_store(11, 8);
-        let model = ApModel::learn(&store);
+        let model = crate::testutil::lenient_model(&store);
         let err = scan_lineitems(&store, &model, None, &ScanOptions::strict()).unwrap_err();
         assert!(matches!(
             err,
@@ -779,7 +781,7 @@ mod tests {
     #[test]
     fn a_few_opaque_pages_are_a_warning_even_in_strict_mode() {
         let store = random_extent_store(11, 2);
-        let model = ApModel::learn(&store);
+        let model = crate::testutil::lenient_model(&store);
         let scan = scan_lineitems(&store, &model, None, &ScanOptions::strict()).unwrap();
         assert!(matches!(
             scan.warnings.as_slice(),
