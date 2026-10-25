@@ -27,6 +27,7 @@ mod nullability;
 mod opaque;
 mod owner_bridge;
 mod page_attribution;
+mod scan;
 mod syscolumn;
 mod sysindex;
 mod sysobject;
@@ -48,7 +49,7 @@ pub use date::{
 };
 pub use fkgraph::{FkEdge, FkGraphStats, build as build_fk_graph, stats as fk_graph_stats};
 pub use lineitem::{
-    AmountEncoding, AmountType, DATE_EPOCH_DAYS_BEFORE_UNIX, LineItem, LineItemError, LineItemScan,
+    AmountEncoding, AmountType, DATE_EPOCH_DAYS_BEFORE_UNIX, LineItem, LineItemError,
     iter_lineitems, iter_lineitems_with_attribution, scan_lineitems,
 };
 pub use nullability::{NullsFlagBucket, histogram as nulls_flag_histogram};
@@ -58,6 +59,7 @@ pub use owner_bridge::{
     DEFAULT_BACKREF_DISTANCE, OwnerBridge, bridge_owners_via_backref, extend_with_sysobject,
 };
 pub use page_attribution::{AttributionGap, PageAttribution};
+pub use scan::{ScanOptions, ScanResult, ScanWarning};
 pub use syscolumn::{
     SYSCOLUMN_TAG, SchemaRecovery, SysColumn, collect_unique as collect_unique_syscolumns,
     iter_syscolumns, recover_schema, scan_page as scan_syscolumn_page, schema_for,

@@ -21,6 +21,7 @@ use opensqlany::{ApModel, PageStore, PageType};
 
 use crate::bv_recovery::{deobfuscate_with_bv, recover_bv_qb_data};
 use crate::page_attribution::PageAttribution;
+use crate::scan::{ScanOptions, ScanResult, ScanWarning};
 
 pub use crate::date::DATE_EPOCH_DAYS_BEFORE_UNIX;
 
@@ -30,8 +31,28 @@ const QB_ID_LEN: usize = 16;
 const F32_ONE: [u8; 4] = [0x00, 0x00, 0x80, 0x3F];
 const PARENT_PREFIX: [u8; 5] = [0x00, 0x00, 0x00, 0x00, 0x10];
 
+impl LineItemError {
+    /// Page and byte offset the error refers to, when known.
+    pub fn location(&self) -> (Option<u64>, Option<usize>) {
+        match self {
+            Self::Page { page_number, .. } => (Some(*page_number), None),
+            Self::UnknownAmountType {
+                page_number,
+                page_offset,
+                ..
+            }
+            | Self::TruncatedAmount {
+                page_number,
+                page_offset,
+            } => (Some(*page_number), Some(*page_offset)),
+            _ => (None, None),
+        }
+    }
+}
+
 /// Errors from line-item parsing.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum LineItemError {
     /// Wrapped `opensqlany` error.
     #[error(transparent)]
@@ -77,6 +98,7 @@ pub enum LineItemError {
 /// The two readings of the same bytes disagree on about half of all values,
 /// so the reading is chosen per source table and recorded on every item.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum AmountEncoding {
     /// `[type][u24 LE]` unsigned cents. Used for invoice line-item tables.
     UnsignedU24,
@@ -116,6 +138,7 @@ impl AmountEncoding {
 
 /// Classification of the amount-type byte in a line item.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum AmountType {
     /// `0x00` - placeholder. The four bytes are not a cents value.
     None,
@@ -176,6 +199,7 @@ impl AmountType {
 
 /// Parsed invoice line-item record.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct LineItem {
     /// Parent invoice QB-ID (16 base62 characters).
     pub invoice_id: String,
@@ -208,6 +232,29 @@ pub struct LineItem {
 }
 
 impl LineItem {
+    /// Build a record with the given invoice id, source table and decoded
+    /// amount, all other fields empty. For tests and tools that need to
+    /// synthesize records; scans never call it.
+    pub fn synthetic(
+        invoice_id: &str,
+        source_table: Option<&str>,
+        amount_cents: Option<i64>,
+    ) -> Self {
+        Self {
+            invoice_id: invoice_id.to_owned(),
+            page_number: 0,
+            page_offset: 0,
+            item_qb_id: None,
+            amount_type: AmountType::Standard,
+            amount_encoding: AmountEncoding::for_source_table(source_table),
+            amount_cents,
+            amount_raw: [0; 4],
+            txn_date_raw: None,
+            counter: None,
+            source_table: source_table.map(str::to_owned),
+        }
+    }
+
     /// Attribute the item to `source_table` and decode its amount with the
     /// reading that fits that table.
     fn set_source_table(&mut self, source_table: Option<String>) {
@@ -262,32 +309,22 @@ pub fn iter_lineitems_with_attribution<'a>(
     LineItemIter::new(store, model, Some(attribution))
 }
 
-/// Result of [`scan_lineitems`].
-#[derive(Debug, Default)]
-pub struct LineItemScan {
-    /// Line items found, in page order.
-    pub items: Vec<LineItem>,
-    /// Records skipped in lenient mode, each with the reason. Always empty
-    /// in strict mode.
-    pub rejected: Vec<LineItemError>,
-}
-
 /// Collect every line item in `store`.
 ///
-/// In strict mode (`lenient == false`) the first error is returned. In
-/// lenient mode each error is moved to [`LineItemScan::rejected`] and
-/// scanning continues; callers must report that list.
+/// In strict mode (the default options) the first error is returned. In
+/// lenient mode each error becomes a [`ScanWarning::RecordSkipped`] in the
+/// result and scanning continues; callers must report the warnings.
 pub fn scan_lineitems(
     store: &PageStore,
     model: &ApModel,
     attribution: Option<&PageAttribution>,
-    lenient: bool,
-) -> Result<LineItemScan, LineItemError> {
-    let mut scan = LineItemScan::default();
+    options: &ScanOptions,
+) -> Result<ScanResult<LineItem>, LineItemError> {
+    let mut scan = ScanResult::default();
     for r in LineItemIter::new(store, model, attribution) {
         match r {
             Ok(li) => scan.items.push(li),
-            Err(e) if lenient => scan.rejected.push(e),
+            Err(e) if options.lenient => scan.warnings.push(ScanWarning::RecordSkipped(e)),
             Err(e) => return Err(e),
         }
     }

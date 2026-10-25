@@ -17,9 +17,9 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use openqbw::{
-    AmountType, AttributionGap, ContentAttribution, CrossValidation, LineItem, LineItemError,
-    PageAttribution, SysIndexEntry, SysTableEntry, TransactionHeader, iter_transaction_headers,
-    scan_lineitems,
+    AmountType, AttributionGap, ContentAttribution, CrossValidation, LineItem, PageAttribution,
+    ScanOptions, ScanWarning, SysIndexEntry, SysTableEntry, TransactionHeader,
+    iter_transaction_headers, scan_lineitems,
 };
 use opensqlany::{ApModel, PageStore};
 use rusqlite::{Connection, Transaction, params};
@@ -956,31 +956,19 @@ fn insert_transaction_line_items(tx: &Transaction<'_>, items: &[LineItem]) -> Re
     Ok(())
 }
 
-fn insert_scan_rejections(tx: &Transaction<'_>, rejected: &[LineItemError]) -> Result<()> {
+fn insert_scan_rejections(tx: &Transaction<'_>, rejected: &[ScanWarning]) -> Result<()> {
     let mut stmt = tx.prepare(
         "INSERT INTO scan_rejections (page_number, page_offset, reason) VALUES (?, ?, ?)",
     )?;
     for e in rejected {
-        let (page, offset) = rejection_location(e);
-        stmt.execute(params![page, offset, e.to_string()])?;
+        let (page, offset) = e.location();
+        stmt.execute(params![
+            page.map(|p| p as i64),
+            offset.map(|o| o as i64),
+            e.to_string()
+        ])?;
     }
     Ok(())
-}
-
-fn rejection_location(e: &LineItemError) -> (Option<i64>, Option<i64>) {
-    match e {
-        LineItemError::Page { page_number, .. } => (Some(*page_number as i64), None),
-        LineItemError::UnknownAmountType {
-            page_number,
-            page_offset,
-            ..
-        }
-        | LineItemError::TruncatedAmount {
-            page_number,
-            page_offset,
-        } => (Some(*page_number as i64), Some(*page_offset as i64)),
-        LineItemError::Sa(_) => (None, None),
-    }
 }
 
 /// Scan all line items. Strict mode stops at the first undecodable record.
@@ -990,17 +978,25 @@ fn collect_lineitems(
     model: &ApModel,
     attribution: &PageAttribution,
     lenient: bool,
-) -> Result<(Vec<LineItem>, Vec<LineItemError>)> {
-    let scan = scan_lineitems(store, model, Some(attribution), lenient).context(
-        "scanning line items (use --lenient to skip undecodable records and count them)",
-    )?;
-    if !scan.rejected.is_empty() {
+) -> Result<(Vec<LineItem>, Vec<ScanWarning>)> {
+    let scan = scan_lineitems(
+        store,
+        model,
+        Some(attribution),
+        &if lenient {
+            ScanOptions::lenient()
+        } else {
+            ScanOptions::strict()
+        },
+    )
+    .context("scanning line items (use --lenient to skip undecodable records and count them)")?;
+    if !scan.warnings.is_empty() {
         eprintln!(
             "warning: --lenient skipped {} undecodable line-item record(s); they are listed in the output",
-            scan.rejected.len()
+            scan.warnings.len()
         );
     }
-    Ok((scan.items, scan.rejected))
+    Ok((scan.items, scan.warnings))
 }
 
 fn amount_type_byte(t: AmountType) -> i64 {
@@ -1010,6 +1006,8 @@ fn amount_type_byte(t: AmountType) -> i64 {
         AmountType::Standard => 2,
         AmountType::Deferred => 3,
         AmountType::Other(b) => b as i64,
+        // AmountType is non_exhaustive; a future variant must be mapped here.
+        other => unreachable!("unmapped amount type {other:?}"),
     }
 }
 
@@ -1100,7 +1098,7 @@ fn run_migrate(
 
 struct Records {
     items: Vec<LineItem>,
-    rejected: Vec<LineItemError>,
+    rejected: Vec<ScanWarning>,
     headers: Vec<TransactionHeader>,
     store: PageStore,
     model: ApModel,
@@ -1245,7 +1243,7 @@ fn run_migrate_csv(input: PathBuf, out: PathBuf, lenient: bool) -> Result<()> {
         let mut rf = std::fs::File::create(out.join("rejected.csv"))?;
         writeln!(rf, "page_number,page_offset,reason")?;
         for e in &rejected {
-            let (page, offset) = rejection_location(e);
+            let (page, offset) = e.location();
             writeln!(
                 rf,
                 "{},{},{}",
@@ -1472,23 +1470,7 @@ mod tests {
     use openqbw::AmountEncoding;
 
     fn item(parent: &str, cents: Option<i64>) -> LineItem {
-        LineItem {
-            invoice_id: parent.to_owned(),
-            page_number: 1,
-            page_offset: 0,
-            item_qb_id: None,
-            amount_type: AmountType::Standard,
-            amount_encoding: if cents.is_some() {
-                AmountEncoding::SignBitU23
-            } else {
-                AmountEncoding::Unconfirmed
-            },
-            amount_cents: cents,
-            amount_raw: [0; 4],
-            txn_date_raw: None,
-            counter: None,
-            source_table: Some("abmc_general_journal_inventory_lineitem".to_owned()),
-        }
+        LineItem::synthetic(parent, Some(AmountEncoding::JOURNAL_TABLE), cents)
     }
 
     #[test]

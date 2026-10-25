@@ -15,15 +15,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Lines on any other table, lines without a source table, and lines with
   amount type `0x00`, `0x01` or `0x03` have no amount (`amount_cents` is
   `None` / NULL), where earlier versions reported an unsigned reading or 0.
-- `LineItem::amount_cents` is `Option<i64>`. `amount_cents_signed` is removed;
-  `amount_encoding` names the reading used.
+- `LineItem::amount_cents` is `Option<i64>` and holds the amount under
+  `amount_encoding`; `amount_cents_signed` is removed. `LineItem`,
+  `AmountType`, `AmountEncoding` and `LineItemError` are `#[non_exhaustive]`.
 - `iter_lineitems` and `iter_lineitems_with_attribution` yield
   `Result<LineItem, LineItemError>`. An anchor followed by an unknown
   amount-type byte, or one whose amount runs past the page data area, is an
-  error (`UnknownAmountType`, `TruncatedAmount`) instead of a line item
-  with a zero or unknown amount. A page read failure is an error
-  (`Page`) instead of ending the scan. `scan_lineitems` collects the
-  results.
+  error (`UnknownAmountType`, `TruncatedAmount`) instead of a line item with
+  a zero or unknown amount. A page read failure is an error (`Page`) instead
+  of ending the scan.
+- New `scan_lineitems(store, model, attribution, &ScanOptions)` returns a
+  `ScanResult` with `items` and `warnings`. `ScanOptions::strict()` (the
+  default) returns the first error; `ScanOptions::lenient()` turns each into
+  a `ScanWarning`.
 - The CLI stops at the first such error. `--lenient` skips those records,
   prints how many on stderr, and lists them (`scan_rejections` table in
   SQLite, `rejected.csv` in CSV exports).

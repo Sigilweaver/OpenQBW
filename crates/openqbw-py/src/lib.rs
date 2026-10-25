@@ -7,7 +7,7 @@
 
 use openqbw_rs::{
     collect_unique as collect_unique_systable, collect_unique_sysindex, iter_transaction_headers,
-    scan_lineitems, PageAttribution, SysIndexEntry, SysTableEntry, TransactionHeader,
+    scan_lineitems, PageAttribution, ScanOptions, SysIndexEntry, SysTableEntry, TransactionHeader,
 };
 use opensqlany::{ApModel, PageStore};
 use pyo3::exceptions::{PyIOError, PyValueError};
@@ -99,15 +99,24 @@ impl Reader {
     /// how many.
     #[pyo3(signature = (lenient=false))]
     fn line_items<'py>(&self, py: Python<'py>, lenient: bool) -> PyResult<Vec<Bound<'py, PyDict>>> {
-        let scan = scan_lineitems(&self.store, &self.model, Some(&self.attribution), lenient)
-            .map_err(|e| {
-                PyValueError::new_err(format!(
-                    "{e} (pass lenient=True to skip undecodable records and count them)"
-                ))
-            })?;
-        if !scan.rejected.is_empty() {
+        let scan = scan_lineitems(
+            &self.store,
+            &self.model,
+            Some(&self.attribution),
+            &if lenient {
+                ScanOptions::lenient()
+            } else {
+                ScanOptions::strict()
+            },
+        )
+        .map_err(|e| {
+            PyValueError::new_err(format!(
+                "{e} (pass lenient=True to skip undecodable records and count them)"
+            ))
+        })?;
+        if !scan.warnings.is_empty() {
             let first: Vec<String> = scan
-                .rejected
+                .warnings
                 .iter()
                 .take(3)
                 .map(|e| e.to_string())
@@ -117,7 +126,7 @@ impl Reader {
                 &py.get_type::<pyo3::exceptions::PyUserWarning>(),
                 &std::ffi::CString::new(format!(
                     "openqbw: skipped {} undecodable line-item record(s); first: {}",
-                    scan.rejected.len(),
+                    scan.warnings.len(),
                     first.join("; ")
                 ))
                 .map_err(|e| PyValueError::new_err(e.to_string()))?,
