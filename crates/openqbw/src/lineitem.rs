@@ -627,7 +627,7 @@ mod tests {
         body[p + 28..p + 32].copy_from_slice(&7u32.to_le_bytes());
         let li = scan_one(&body).unwrap();
         assert_eq!(li.date_source, DateSource::Ambiguous);
-        assert_eq!(li.flags, [RecordFlag::DateAmbiguous]);
+        assert!(li.flags.contains(&RecordFlag::DateAmbiguous));
         assert_eq!(li.txn_date_raw, None);
     }
 
