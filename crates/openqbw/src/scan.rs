@@ -198,6 +198,15 @@ pub enum WarningKind {
         /// Anchors left out.
         records: u64,
     },
+    /// Records whose page is not attributed to any table. Their
+    /// `source_table` is `None` and line-item amounts are not decoded.
+    #[non_exhaustive]
+    UnattributedRecords {
+        /// Records without a source table.
+        records: u64,
+        /// All records in the scan.
+        total: u64,
+    },
     /// Line-item anchors whose quantity field is a plausible value other than
     /// 1.0. The decoder reads only lines with quantity 1.0, so these lines are
     /// missing from the results and from every total.
@@ -230,6 +239,7 @@ impl WarningKind {
             Self::LowConfidenceSectorPages { .. } => "low_confidence_sector_pages",
             Self::UnconfirmedDirectoryPages { .. } => "unconfirmed_directory_pages",
             Self::RecordsOutsideLiveRows { .. } => "records_outside_live_rows",
+            Self::UnattributedRecords { .. } => "unattributed_records",
             Self::LineItemsNotRead { .. } => "line_items_not_read",
             Self::InvalidRootPages { .. } => "invalid_root_pages",
             Self::AttributionGap(_) => "attribution_gap",
@@ -278,6 +288,11 @@ impl fmt::Display for Warning {
                 f,
                 "{records} record anchors in page free space (deleted or moved records) were \
                  left out"
+            ),
+            WarningKind::UnattributedRecords { records, total } => write!(
+                f,
+                "{records} of {total} records are on pages not attributed to any table; they \
+                 have no source table and line-item amounts are not decoded"
             ),
             WarningKind::LineItemsNotRead { anchors } => write!(
                 f,

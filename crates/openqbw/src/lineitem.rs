@@ -287,6 +287,18 @@ pub(crate) fn scan_lineitems(
                 anchors: other_quantity,
             }));
     }
+    let unattributed = scan
+        .items
+        .iter()
+        .filter(|li| li.source_table.is_none())
+        .count() as u64;
+    if attribution.is_some() && unattributed > 0 {
+        scan.warnings
+            .push(Warning::new(WarningKind::UnattributedRecords {
+                records: unattributed,
+                total: scan.items.len() as u64,
+            }));
+    }
     Ok(scan)
 }
 
@@ -795,6 +807,34 @@ mod tests {
         let found = page_lineitems(&decoded, None).unwrap();
         assert_eq!(found.records.len(), 1);
         assert_eq!(found.outside_live_rows, 0);
+    }
+
+    #[test]
+    fn unattributed_line_items_are_counted() {
+        // S2-20: when attribution covers only part of the file, line items
+        // on the other pages have no source table and no decoded amount; the
+        // scan says how many.
+        let mut plain = vec![0u8; 4096];
+        put_anchor(&mut plain, 0x800);
+        plain[0xF00..0xF04].copy_from_slice(&[0x00, 0x00, 0xD5, 0x0B]);
+        plain[0xFF2] = b'E';
+        let bias = 0u8; // page 1
+        for (i, b) in plain[..PAGE_DATA_END].iter_mut().enumerate() {
+            *b = b.wrapping_add(0x5Au8.wrapping_add(1 + (i / 512) as u8).wrapping_sub(bias));
+        }
+        let mut bytes = vec![0u8; 4096];
+        bytes.extend(plain);
+        let store = crate::testutil::sealed_store(bytes);
+        let model = crate::testutil::lenient_model(&store);
+        let attribution = PageAttribution::from_catalog(Vec::new());
+        let scan =
+            scan_lineitems(&store, &model, Some(&attribution), &ReadOptions::strict()).unwrap();
+        assert_eq!(scan.items.len(), 1);
+        assert!(scan.warnings.iter().any(|w| w.kind
+            == WarningKind::UnattributedRecords {
+                records: 1,
+                total: 1
+            }));
     }
 
     fn random_extent_store(pages: usize, opaque: usize) -> PageStore {

@@ -85,6 +85,9 @@ Built on opensqlany 0.3 (pinned to a git revision until it is published).
   not been measured on a corpus.
 - When page-to-table attribution is unavailable, the catalog, line-item and
   header scans carry an `attribution_gap` warning.
+- When only part of the file is attributed, the line-item scan carries an
+  `unattributed_records` warning with the number of line items that have no
+  source table (and so no decoded amount).
 - Line-item and header dates are found in a wider window (SA-days
   10000..=40000, was 13000..20000, which stopped at Oct 2013), so records
   dated after Oct 2013 now have a date. When two separate date/counter pairs
