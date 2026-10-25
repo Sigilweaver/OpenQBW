@@ -67,11 +67,11 @@ pub fn sa_day_to_unix_seconds(sa_day: u32) -> Option<i64> {
 
 /// Lowest SA-day the date scan accepts as a candidate. A locator bound only:
 /// it keeps small integers in neighbouring fields from matching.
-pub const DATE_SCAN_MIN: u32 = 10_000;
+pub(crate) const DATE_SCAN_MIN: u32 = 10_000;
 
 /// Highest SA-day the date scan accepts as a candidate. Covers dates past
 /// 2013 (the end of the Rock Castle sample) into the 2060s.
-pub const DATE_SCAN_MAX: u32 = 40_000;
+pub(crate) const DATE_SCAN_MAX: u32 = 40_000;
 
 /// How a record's date was obtained.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -99,8 +99,7 @@ impl DateSource {
 
 /// Result of [`scan_date_counter`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct DateScan {
+pub(crate) struct DateScan {
     /// SA-day, set only when `source` is [`DateSource::WindowScan`].
     pub date: Option<u32>,
     /// Counter that followed the date, set under the same condition.
@@ -116,7 +115,12 @@ pub struct DateScan {
 ///
 /// Matches whose offsets are less than 8 bytes apart overlap and count as
 /// one pair (the first). Two or more non-overlapping pairs are ambiguous.
-pub fn scan_date_counter(body: &[u8], from: usize, to: usize, counter_limit: u32) -> DateScan {
+pub(crate) fn scan_date_counter(
+    body: &[u8],
+    from: usize,
+    to: usize,
+    counter_limit: u32,
+) -> DateScan {
     let last_start_excl = to.min((body.len() + 1).saturating_sub(8));
     let mut first: Option<(usize, u32, u32)> = None;
     let mut i = from;

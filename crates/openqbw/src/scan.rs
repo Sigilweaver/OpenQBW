@@ -58,6 +58,9 @@ pub enum RecordFlag {
     /// The amount type is one whose meaning is not established, so the
     /// amount was not decoded.
     AmountTypeUnestablished,
+    /// Two or more separate date/counter pairs sat in the search window, so
+    /// no date was chosen.
+    DateAmbiguous,
 }
 
 impl RecordFlag {
@@ -66,6 +69,7 @@ impl RecordFlag {
         match self {
             Self::AmountEncodingUnconfirmed => "amount_encoding_unconfirmed",
             Self::AmountTypeUnestablished => "amount_type_unestablished",
+            Self::DateAmbiguous => "date_ambiguous",
         }
     }
 }

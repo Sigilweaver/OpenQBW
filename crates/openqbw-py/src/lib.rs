@@ -6,9 +6,9 @@
 #![allow(clippy::useless_conversion)] // pyo3 macro expansions can trigger this on newer clippy
 
 use openqbw_rs::{
-    collect_unique as collect_unique_systable, collect_unique_sysindex, iter_transaction_headers,
-    scan_lineitems, PageAttribution, ScanOptions, ScanWarning, SysIndexEntry, SysTableEntry,
-    TransactionHeader,
+    collect_unique as collect_unique_systable, collect_unique_sysindex, scan_lineitems,
+    scan_transaction_headers, PageAttribution, ScanOptions, ScanWarning, SysIndexEntry,
+    SysTableEntry,
 };
 use opensqlany::{ApModel, PageStore};
 use pyo3::exceptions::{PyIOError, PyValueError};
@@ -71,6 +71,51 @@ fn warn_user(py: Python<'_>, msg: &str) -> PyResult<()> {
     )
 }
 
+/// Split warnings into rejected records and informational warnings, issue
+/// Python warnings for them, and build the report.
+fn make_report(
+    py: Python<'_>,
+    items: Vec<Py<PyDict>>,
+    scan_warnings: Vec<ScanWarning>,
+) -> PyResult<ScanReport> {
+    let mut rejected = Vec::new();
+    let mut warnings = Vec::new();
+    for w in &scan_warnings {
+        match w {
+            ScanWarning::RecordSkipped(e) => rejected.push(Rejected {
+                kind: e.kind().as_str().to_owned(),
+                page_number: e.page_number(),
+                page_offset: e.page_offset(),
+                message: e.to_string(),
+            }),
+            other => warnings.push(other.to_string()),
+        }
+    }
+    if !rejected.is_empty() {
+        let first: Vec<&str> = rejected
+            .iter()
+            .take(3)
+            .map(|r| r.message.as_str())
+            .collect();
+        warn_user(
+            py,
+            &format!(
+                "openqbw: skipped {} undecodable record(s); first: {}",
+                rejected.len(),
+                first.join("; ")
+            ),
+        )?;
+    }
+    for w in &warnings {
+        warn_user(py, &format!("openqbw: {w}"))?;
+    }
+    Ok(ScanReport {
+        items,
+        rejected,
+        warnings,
+    })
+}
+
 /// A record a lenient scan skipped.
 #[pyclass(module = "openqbw", frozen, get_all)]
 #[derive(Clone)]
@@ -89,17 +134,17 @@ impl Rejected {
     }
 }
 
-/// Result of `Reader.line_items()`: `items`, `rejected` and `warnings`.
+/// Result of `Reader.line_items()` and `Reader.transactions()`: `items`, `rejected` and `warnings`.
 /// Iterating or taking `len()` goes over `items`.
 #[pyclass(module = "openqbw", frozen)]
-struct LineItems {
+struct ScanReport {
     items: Vec<Py<PyDict>>,
     rejected: Vec<Rejected>,
     warnings: Vec<String>,
 }
 
 #[pymethods]
-impl LineItems {
+impl ScanReport {
     /// Decoded line items, as dicts.
     #[getter]
     fn items<'py>(&self, py: Python<'py>) -> Vec<Bound<'py, PyDict>> {
@@ -197,7 +242,7 @@ impl Reader {
         Ok(out)
     }
 
-    /// Scan all line items and return a `LineItems` result.
+    /// Scan all line items and return a `ScanReport` result.
     ///
     /// `result.items` is a list of dicts. Each carries the parent
     /// `invoice_id`, the amount fields, the source-table name, the page
@@ -211,7 +256,7 @@ impl Reader {
     /// `result.rejected`, and a `UserWarning` is issued; informational
     /// warnings are in `result.warnings` in both modes.
     #[pyo3(signature = (*, lenient=false))]
-    fn line_items(&self, py: Python<'_>, lenient: bool) -> PyResult<LineItems> {
+    fn line_items(&self, py: Python<'_>, lenient: bool) -> PyResult<ScanReport> {
         let options = if lenient {
             ScanOptions::lenient()
         } else {
@@ -240,50 +285,24 @@ impl Reader {
             d.set_item("flags", flags)?;
             items.push(d.unbind());
         }
-        let mut rejected = Vec::new();
-        let mut warnings = Vec::new();
-        for w in &scan.warnings {
-            match w {
-                ScanWarning::RecordSkipped(e) => rejected.push(Rejected {
-                    kind: e.kind().as_str().to_owned(),
-                    page_number: e.page_number(),
-                    page_offset: e.page_offset(),
-                    message: e.to_string(),
-                }),
-                other => warnings.push(other.to_string()),
-            }
-        }
-        if !rejected.is_empty() {
-            let first: Vec<&str> = rejected
-                .iter()
-                .take(3)
-                .map(|r| r.message.as_str())
-                .collect();
-            warn_user(
-                py,
-                &format!(
-                    "openqbw: skipped {} undecodable line-item record(s); first: {}",
-                    rejected.len(),
-                    first.join("; ")
-                ),
-            )?;
-        }
-        for w in &warnings {
-            warn_user(py, &format!("openqbw: {w}"))?;
-        }
-        Ok(LineItems {
-            items,
-            rejected,
-            warnings,
-        })
+        make_report(py, items, scan.warnings)
     }
 
-    /// Return all transaction headers as a list of dicts.
-    fn transactions<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyDict>>> {
-        let iter: Vec<TransactionHeader> =
-            iter_transaction_headers(&self.store, &self.model, &self.attribution).collect();
-        let mut out = Vec::with_capacity(iter.len());
-        for h in iter {
+    /// Scan all transaction headers and return a `ScanReport` like
+    /// `line_items()`. Items carry `qb_id`, `source_table`, `txn_type`,
+    /// `txn_date_raw`, `counter`, `date_source`, `flags` and the page
+    /// coordinates.
+    #[pyo3(signature = (*, lenient=false))]
+    fn transactions(&self, py: Python<'_>, lenient: bool) -> PyResult<ScanReport> {
+        let options = if lenient {
+            ScanOptions::lenient()
+        } else {
+            ScanOptions::strict()
+        };
+        let scan = scan_transaction_headers(&self.store, &self.model, &self.attribution, &options)
+            .map_err(|e| to_py_err(py, &e))?;
+        let mut items = Vec::with_capacity(scan.items.len());
+        for h in scan.items {
             let d = PyDict::new(py);
             d.set_item("qb_id", &h.qb_id)?;
             d.set_item("source_table", &h.source_table)?;
@@ -291,11 +310,13 @@ impl Reader {
             d.set_item("txn_date_raw", h.txn_date_raw)?;
             d.set_item("counter", h.counter)?;
             d.set_item("date_source", h.date_source.as_str())?;
+            let flags: Vec<&str> = h.flags.iter().map(|f| f.as_str()).collect();
+            d.set_item("flags", flags)?;
             d.set_item("page_number", h.page_number)?;
             d.set_item("page_offset", h.page_offset)?;
-            out.push(d);
+            items.push(d.unbind());
         }
-        Ok(out)
+        make_report(py, items, scan.warnings)
     }
 }
 
@@ -319,7 +340,7 @@ fn open(path: PathBuf) -> PyResult<Reader> {
 fn openqbw(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add_class::<Reader>()?;
-    m.add_class::<LineItems>()?;
+    m.add_class::<ScanReport>()?;
     m.add_class::<Rejected>()?;
     m.add("OpenQBWError", m.py().get_type::<OpenQBWError>())?;
     m.add("FormatError", m.py().get_type::<FormatError>())?;

@@ -14,7 +14,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sit in the search window, the date and counter are left unset and
   `date_source` is `ambiguous` (`window_scan` when one pair was found,
   `not_found` when none). `LineItem` and `TransactionHeader` gain
-  `date_source`; SQLite, CSV and Python outputs carry it. The SA-day to
+  `date_source` and `flags` (`RecordFlag::DateAmbiguous`); SQLite, CSV and
+  Python outputs carry them. The scan window itself is internal.
+- `iter_transaction_headers` yields `Result<TransactionHeader, Error>`, and
+  `scan_transaction_headers` collects them with `ScanOptions`. Python
+  `Reader.transactions(*, lenient=False)` returns a `ScanReport` like
+  `line_items()` (renamed from `LineItems`). `transactions.csv` gains
+  `txn_date_raw`, `counter` and `date_source`. The SA-day to
   calendar conversion uses the offset documented in `date.rs`; it is fitted to
   the Rock Castle sample and not checked against a date known from another
   source.

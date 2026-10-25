@@ -447,6 +447,9 @@ fn parse_anchor(body: &[u8], pn: u64, anchor_start: usize) -> Result<LineItem, E
         flags: Vec::new(),
     };
     li.set_source_table(None);
+    if li.date_source == DateSource::Ambiguous {
+        li.flags.push(RecordFlag::DateAmbiguous);
+    }
     Ok(li)
 }
 
@@ -624,6 +627,7 @@ mod tests {
         body[p + 28..p + 32].copy_from_slice(&7u32.to_le_bytes());
         let li = scan_one(&body).unwrap();
         assert_eq!(li.date_source, DateSource::Ambiguous);
+        assert_eq!(li.flags, [RecordFlag::DateAmbiguous]);
         assert_eq!(li.txn_date_raw, None);
     }
 
