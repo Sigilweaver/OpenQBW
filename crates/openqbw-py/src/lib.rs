@@ -130,10 +130,7 @@ impl Reader {
             let date = li.txn_date_days_since_unix();
             d.set_item("invoice_id", li.invoice_id)?;
             d.set_item("item_qb_id", li.item_qb_id)?;
-            d.set_item("amount_cents", li.amount_cents_decoded)?;
-            // Alias kept for compatibility: the decoded value, not a raw reading.
-            d.set_item("amount_cents_signed", li.amount_cents_decoded)?;
-            d.set_item("amount_cents_decoded", li.amount_cents_decoded)?;
+            d.set_item("amount_cents", li.amount_cents)?;
             d.set_item("amount_encoding", li.amount_encoding.as_str())?;
             d.set_item("amount_type", li.amount_raw[0])?;
             d.set_item("amount_raw", PyBytes::new(py, &li.amount_raw))?;
