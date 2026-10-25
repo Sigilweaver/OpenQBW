@@ -642,13 +642,13 @@ fn run_verify(
            COALESCE(SUM(CASE WHEN signed_sum = 0 THEN 1 ELSE 0 END), 0) AS balanced
          FROM (
            SELECT qb_id_parent,
-                  SUM(amount_cents) AS signed_sum,
+                  SUM(amount_cents_signed) AS signed_sum,
                   COUNT(*) AS n,
                   COUNT(DISTINCT amount_type) AS types
            FROM transaction_line_items
            WHERE source_table = 'abmc_general_journal_inventory_lineitem'
              AND amount_type = 2
-             AND amount_cents IS NOT NULL
+             AND amount_cents_signed IS NOT NULL
            GROUP BY qb_id_parent
            HAVING n = 2 AND types = 1
          )",
@@ -679,7 +679,7 @@ fn run_verify(
            COALESCE(SUM(CASE WHEN signed_sum = 0 THEN 1 ELSE 0 END), 0) AS bal
          FROM (
            SELECT qb_id_parent,
-                  COALESCE(SUM(amount_cents), 0) AS signed_sum
+                  COALESCE(SUM(amount_cents_signed), 0) AS signed_sum
            FROM transaction_line_items
            WHERE source_table = 'abmc_general_journal_inventory_lineitem'
            GROUP BY qb_id_parent
@@ -793,6 +793,8 @@ fn create_schema(conn: &Connection) -> Result<()> {
             amount_type         INTEGER NOT NULL,
             -- Decoded under amount_encoding; NULL when not decoded.
             amount_cents        INTEGER,
+            -- Same value as amount_cents (kept for older queries).
+            amount_cents_signed INTEGER,
             amount_encoding     TEXT NOT NULL,
             -- Undecoded u24 reading of the amount bytes, for diagnostics only.
             amount_raw_u24_cents INTEGER,
@@ -881,11 +883,14 @@ fn insert_synthesized_transactions(
     )?;
     for qb_id in order {
         let lines = &groups[&qb_id];
-        let unresolved = lines.iter().filter(|l| l.amount_cents.is_none()).count() as i64;
+        let unresolved = lines
+            .iter()
+            .filter(|l| l.amount_cents_decoded.is_none())
+            .count() as i64;
         // A total over some lines is not the transaction total: leave it
         // NULL when any line's amount is not decoded.
         let total: Option<i64> = if unresolved == 0 {
-            Some(lines.iter().filter_map(|l| l.amount_cents).sum())
+            Some(lines.iter().filter_map(|l| l.amount_cents_decoded).sum())
         } else {
             None
         };
@@ -921,9 +926,9 @@ fn insert_transaction_line_items(tx: &Transaction<'_>, items: &[LineItem]) -> Re
     let mut stmt = tx.prepare(
         "INSERT INTO transaction_line_items \
          (qb_id_parent, line_number, item_qb_id, amount_type, amount_cents, \
-          amount_encoding, amount_raw_u24_cents, amount_raw_hex, txn_date_raw, counter, \
-          source_table, page_number, page_offset) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          amount_cents_signed, amount_encoding, amount_raw_u24_cents, amount_raw_hex, \
+          txn_date_raw, counter, source_table, page_number, page_offset) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )?;
     let mut line_no: BTreeMap<(String, String), i64> = BTreeMap::new();
     for li in items {
@@ -942,7 +947,8 @@ fn insert_transaction_line_items(tx: &Transaction<'_>, items: &[LineItem]) -> Re
             *n,
             li.item_qb_id,
             type_byte,
-            li.amount_cents,
+            li.amount_cents_decoded,
+            li.amount_cents_decoded,
             li.amount_encoding.as_str(),
             li.amount_type.decode_cents(&li.amount_raw),
             hex,
@@ -1065,7 +1071,10 @@ fn collect_export_stats(
     )?;
     Ok(ExportStats {
         transactions_without_total: without_total,
-        unresolved_lines: items.iter().filter(|li| li.amount_cents.is_none()).count() as i64,
+        unresolved_lines: items
+            .iter()
+            .filter(|li| li.amount_cents_decoded.is_none())
+            .count() as i64,
         rejected_records,
         pages: store.page_count(),
         transactions: txns,
@@ -1221,16 +1230,23 @@ fn run_migrate_csv(input: PathBuf, out: PathBuf, lenient: bool) -> Result<()> {
     let mut lif = std::fs::File::create(out.join("lineitems.csv"))?;
     writeln!(
         lif,
-        "invoice_id,item_qb_id,amount_cents,amount_encoding,amount_decimal,txn_date,source_table,page_number,page_offset"
+        "invoice_id,item_qb_id,amount_cents,amount_signed_cents,amount_encoding,amount_decimal,txn_date,source_table,page_number,page_offset"
     )?;
     for li in &items {
-        let amt = li.amount_cents.map(|c| c.to_string()).unwrap_or_default();
-        let dec = li.amount_cents.map(format_cents).unwrap_or_default();
+        let amt = li
+            .amount_cents_decoded
+            .map(|c| c.to_string())
+            .unwrap_or_default();
+        let dec = li
+            .amount_cents_decoded
+            .map(format_cents)
+            .unwrap_or_default();
         writeln!(
             lif,
-            "{},{},{},{},{},{},{},{},{}",
+            "{},{},{},{},{},{},{},{},{},{}",
             csv_field(&li.invoice_id),
             csv_field(li.item_qb_id.as_deref().unwrap_or("")),
+            amt,
             amt,
             li.amount_encoding.as_str(),
             dec,
@@ -1262,7 +1278,10 @@ fn run_migrate_csv(input: PathBuf, out: PathBuf, lenient: bool) -> Result<()> {
         tables.len(),
         headers.len(),
         items.len(),
-        items.iter().filter(|li| li.amount_cents.is_none()).count(),
+        items
+            .iter()
+            .filter(|li| li.amount_cents_decoded.is_none())
+            .count(),
         rejected.len(),
     );
     Ok(())
@@ -1350,7 +1369,8 @@ fn render_iif(items: &[LineItem], headers: &[TransactionHeader]) -> (String, Iif
 
     for parent_id in parent_ids {
         let kids = &by_parent[parent_id];
-        let Some(cents): Option<Vec<i64>> = kids.iter().map(|li| li.amount_cents).collect() else {
+        let Some(cents): Option<Vec<i64>> = kids.iter().map(|li| li.amount_cents_decoded).collect()
+        else {
             stats.skipped_txns += 1;
             stats.skipped_lines += kids.len();
             continue;
@@ -1442,8 +1462,11 @@ fn run_forensics(input: PathBuf, lenient: bool) -> Result<()> {
     let parent_ids: HashSet<&str> = items.iter().map(|li| li.invoice_id.as_str()).collect();
     let orphan_parents = parent_ids.difference(&header_ids).count();
     let childless_headers = header_ids.difference(&parent_ids).count();
-    let decoded_cents: i64 = items.iter().filter_map(|li| li.amount_cents).sum();
-    let undecoded = items.iter().filter(|li| li.amount_cents.is_none()).count();
+    let decoded_cents: i64 = items.iter().filter_map(|li| li.amount_cents_decoded).sum();
+    let undecoded = items
+        .iter()
+        .filter(|li| li.amount_cents_decoded.is_none())
+        .count();
 
     println!("distinct parent invoice ids : {}", parent_ids.len());
     println!("orphan parents (no header)  : {}", orphan_parents);
@@ -1471,6 +1494,7 @@ mod tests {
     use super::*;
     use openqbw::AmountEncoding;
 
+    #[allow(deprecated)]
     fn item(parent: &str, cents: Option<i64>) -> LineItem {
         LineItem {
             invoice_id: parent.to_owned(),
@@ -1483,7 +1507,9 @@ mod tests {
             } else {
                 AmountEncoding::Unconfirmed
             },
-            amount_cents: cents,
+            amount_cents_decoded: cents,
+            amount_cents: None,
+            amount_cents_signed: None,
             amount_raw: [0; 4],
             txn_date_raw: None,
             counter: None,

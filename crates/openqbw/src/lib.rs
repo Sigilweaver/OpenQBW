@@ -47,9 +47,11 @@ pub use date::{
     unix_day_to_sa_day,
 };
 pub use fkgraph::{FkEdge, FkGraphStats, build as build_fk_graph, stats as fk_graph_stats};
+#[allow(deprecated)]
 pub use lineitem::{
     AmountEncoding, AmountType, DATE_EPOCH_DAYS_BEFORE_UNIX, LineItem, LineItemError, LineItemScan,
-    iter_lineitems, iter_lineitems_with_attribution, scan_lineitems,
+    iter_lineitems, iter_lineitems_checked, iter_lineitems_checked_with_attribution,
+    iter_lineitems_with_attribution, scan_lineitems,
 };
 pub use nullability::{NullsFlagBucket, histogram as nulls_flag_histogram};
 pub use opaque::{OPAQUE_ENTROPY_THRESHOLD, is_opaque_high_entropy};

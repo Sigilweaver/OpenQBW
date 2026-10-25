@@ -143,7 +143,7 @@ impl AmountType {
     }
 
     /// Read the 4 amount bytes as UNSIGNED integer cents (the raw u24 LE in
-    /// `raw[1..4]`). A raw reading only: [`LineItem::amount_cents`] applies
+    /// `raw[1..4]`). A raw reading only: [`LineItem::amount_cents_decoded`] applies
     /// the reading that fits the item's source table.
     pub fn decode_cents(self, raw: &[u8; 4]) -> Option<u32> {
         match self {
@@ -189,12 +189,20 @@ pub struct LineItem {
     pub amount_type: AmountType,
     /// Reading applied to the amount bytes, chosen from `source_table`.
     pub amount_encoding: AmountEncoding,
+    /// Undecoded UNSIGNED u24 reading of the amount bytes (type `0x01`/`0x02`).
+    /// Wrong for sign-bit amounts. Use [`LineItem::amount_cents_decoded`].
+    #[deprecated(note = "unsigned reading of the raw bytes; use amount_cents_decoded")]
+    pub amount_cents: Option<u32>,
+    /// Undecoded SIGNED (bit 7 of the first byte) reading of the amount
+    /// bytes. Wrong for unsigned amounts. Use [`LineItem::amount_cents_decoded`].
+    #[deprecated(note = "sign-bit reading of the raw bytes; use amount_cents_decoded")]
+    pub amount_cents_signed: Option<i32>,
     /// Amount in cents under `amount_encoding`. `None` when the amount type
     /// carries no cents value (`0x00`, `0x03`), when its meaning is not
     /// established (`0x01`), or when `amount_encoding` is
     /// [`AmountEncoding::Unconfirmed`]. Callers must treat `None` as
     /// "unknown", not zero.
-    pub amount_cents: Option<i64>,
+    pub amount_cents_decoded: Option<i64>,
     /// Raw 4 bytes immediately following the float32(1.0) quantity.
     pub amount_raw: [u8; 4],
     /// SA17 transaction date stored as days since 1981-01-01, when discovered.
@@ -213,7 +221,7 @@ impl LineItem {
     fn set_source_table(&mut self, source_table: Option<String>) {
         self.amount_encoding = AmountEncoding::for_source_table(source_table.as_deref());
         self.source_table = source_table;
-        self.amount_cents = match (self.amount_type, self.amount_encoding) {
+        self.amount_cents_decoded = match (self.amount_type, self.amount_encoding) {
             (AmountType::Standard, AmountEncoding::UnsignedU24) => self
                 .amount_type
                 .decode_cents(&self.amount_raw)
@@ -243,23 +251,53 @@ impl LineItem {
 /// continues with the next record. Each yielded item has
 /// `source_table = None`, so its amount is not decoded
 /// ([`AmountEncoding::Unconfirmed`]).
-pub fn iter_lineitems<'a>(
+pub fn iter_lineitems_checked<'a>(
     store: &'a PageStore,
     model: &'a ApModel,
 ) -> impl Iterator<Item = Result<LineItem, LineItemError>> + 'a {
     LineItemIter::new(store, model, None)
 }
 
-/// Like [`iter_lineitems`], but tags each emitted item with the
+/// Like [`iter_lineitems_checked`], but tags each emitted item with the
 /// `SysTableEntry::name` of the table that the line item's source page
 /// is attributed to (via [`PageAttribution`]) and decodes its amount with
-/// the reading for that table. Errors are yielded as in [`iter_lineitems`].
-pub fn iter_lineitems_with_attribution<'a>(
+/// the reading for that table. Errors are yielded as in [`iter_lineitems_checked`].
+pub fn iter_lineitems_checked_with_attribution<'a>(
     store: &'a PageStore,
     model: &'a ApModel,
     attribution: &'a PageAttribution,
 ) -> impl Iterator<Item = Result<LineItem, LineItemError>> + 'a {
     LineItemIter::new(store, model, Some(attribution))
+}
+
+/// Yields line items without surfacing record errors.
+///
+/// Anchors with an unknown amount-type byte are yielded as items with
+/// [`AmountType::Other`]; an anchor too close to the page end is yielded with
+/// zeroed amount bytes; a page read error ends the iteration. Prefer
+/// [`iter_lineitems_checked`] or [`scan_lineitems`].
+#[deprecated(note = "hides undecodable records; use iter_lineitems_checked or scan_lineitems")]
+pub fn iter_lineitems<'a>(
+    store: &'a PageStore,
+    model: &'a ApModel,
+) -> impl Iterator<Item = LineItem> + 'a {
+    let mut it = LineItemIter::new(store, model, None);
+    it.legacy = true;
+    it.map_while(Result::ok)
+}
+
+/// Like [`iter_lineitems`], with source-table attribution. Same caveats.
+#[deprecated(
+    note = "hides undecodable records; use iter_lineitems_checked_with_attribution or scan_lineitems"
+)]
+pub fn iter_lineitems_with_attribution<'a>(
+    store: &'a PageStore,
+    model: &'a ApModel,
+    attribution: &'a PageAttribution,
+) -> impl Iterator<Item = LineItem> + 'a {
+    let mut it = LineItemIter::new(store, model, Some(attribution));
+    it.legacy = true;
+    it.map_while(Result::ok)
 }
 
 /// Result of [`scan_lineitems`].
@@ -298,6 +336,7 @@ struct LineItemIter<'a> {
     store: &'a PageStore,
     model: &'a ApModel,
     attribution: Option<&'a PageAttribution>,
+    legacy: bool,
     pn: u64,
     n_pages: u64,
     buffer: Vec<Result<LineItem, LineItemError>>,
@@ -313,6 +352,7 @@ impl<'a> LineItemIter<'a> {
             store,
             model,
             attribution,
+            legacy: false,
             pn: 1, // skip superblock (page 0)
             n_pages: store.page_count(),
             buffer: Vec::new(),
@@ -340,7 +380,7 @@ impl<'a> LineItemIter<'a> {
                 None => self.model.deobfuscate_with_store(raw, pn, self.store),
             };
             let before = self.buffer.len();
-            scan_page(&plain[..PAGE_DATA_END], pn, &mut self.buffer);
+            scan_page(&plain[..PAGE_DATA_END], pn, self.legacy, &mut self.buffer);
             if let Some(attr) = self.attribution
                 && let Some(entry) = attr.attribute(pn)
             {
@@ -377,7 +417,7 @@ impl FusedIterator for LineItemIter<'_> {}
 
 /// Scan a decoded page body for line-item anchors and append parsed records
 /// to `out`. Items are appended in the order encountered.
-fn scan_page(body: &[u8], pn: u64, out: &mut Vec<Result<LineItem, LineItemError>>) {
+fn scan_page(body: &[u8], pn: u64, legacy: bool, out: &mut Vec<Result<LineItem, LineItemError>>) {
     if body.len() < ANCHOR_LEN {
         return;
     }
@@ -407,27 +447,33 @@ fn scan_page(body: &[u8], pn: u64, out: &mut Vec<Result<LineItem, LineItemError>
 
     // Reverse so we can pop in original order (iterator buffer is LIFO).
     for anchor in start.into_iter().rev() {
-        out.push(parse_anchor(body, pn, anchor));
+        out.push(parse_anchor(body, pn, anchor, legacy));
     }
 }
 
-fn parse_anchor(body: &[u8], pn: u64, anchor_start: usize) -> Result<LineItem, LineItemError> {
+fn parse_anchor(
+    body: &[u8],
+    pn: u64,
+    anchor_start: usize,
+    legacy: bool,
+) -> Result<LineItem, LineItemError> {
     let id_start = anchor_start + 5;
     let invoice_id = std::str::from_utf8(&body[id_start..id_start + QB_ID_LEN])
         .expect("anchor guarded by is_base62")
         .to_owned();
 
     let payload_start = anchor_start + ANCHOR_LEN;
-    if payload_start + 4 > body.len() {
+    let mut amount_raw = [0u8; 4];
+    if payload_start + 4 <= body.len() {
+        amount_raw.copy_from_slice(&body[payload_start..payload_start + 4]);
+    } else if !legacy {
         return Err(LineItemError::TruncatedAmount {
             page_number: pn,
             page_offset: anchor_start,
         });
     }
-    let mut amount_raw = [0u8; 4];
-    amount_raw.copy_from_slice(&body[payload_start..payload_start + 4]);
     let amount_type = AmountType::from_byte(amount_raw[0]);
-    if let AmountType::Other(type_byte) = amount_type {
+    if let (AmountType::Other(type_byte), false) = (amount_type, legacy) {
         return Err(LineItemError::UnknownAmountType {
             page_number: pn,
             page_offset: anchor_start,
@@ -464,6 +510,7 @@ fn parse_anchor(body: &[u8], pn: u64, anchor_start: usize) -> Result<LineItem, L
         }
     }
 
+    #[allow(deprecated)]
     let mut li = LineItem {
         invoice_id,
         page_number: pn,
@@ -471,7 +518,9 @@ fn parse_anchor(body: &[u8], pn: u64, anchor_start: usize) -> Result<LineItem, L
         item_qb_id,
         amount_type,
         amount_encoding: AmountEncoding::Unconfirmed,
-        amount_cents: None,
+        amount_cents: amount_type.decode_cents(&amount_raw),
+        amount_cents_signed: amount_type.decode_cents_signed(&amount_raw),
+        amount_cents_decoded: None,
         amount_raw,
         txn_date_raw,
         counter,
@@ -581,7 +630,7 @@ mod tests {
 
     fn scan_one(body: &[u8]) -> Result<LineItem, LineItemError> {
         let mut out = Vec::new();
-        scan_page(body, 7, &mut out);
+        scan_page(body, 7, false, &mut out);
         assert_eq!(out.len(), 1);
         out.pop().unwrap()
     }
@@ -602,7 +651,7 @@ mod tests {
         assert_eq!(li.counter, Some(12671));
         // No source table: the reading is not established, so no amount.
         assert_eq!(li.amount_encoding, AmountEncoding::Unconfirmed);
-        assert_eq!(li.amount_cents, None);
+        assert_eq!(li.amount_cents_decoded, None);
     }
 
     #[test]
@@ -614,8 +663,8 @@ mod tests {
         pos.set_source_table(Some(AmountEncoding::JOURNAL_TABLE.to_owned()));
         neg.set_source_table(Some(AmountEncoding::JOURNAL_TABLE.to_owned()));
         assert_eq!(pos.amount_encoding, AmountEncoding::SignBitU23);
-        assert_eq!(pos.amount_cents, Some(77_120));
-        assert_eq!(neg.amount_cents, Some(-77_120));
+        assert_eq!(pos.amount_cents_decoded, Some(77_120));
+        assert_eq!(neg.amount_cents_decoded, Some(-77_120));
     }
 
     #[test]
@@ -625,7 +674,7 @@ mod tests {
         let mut li = scan_one(&anchor_body(PAGE_DATA_END, 32, &[0x02, 0x80, 0x0F, 0x04])).unwrap();
         li.set_source_table(Some(AmountEncoding::INVOICE_TABLE.to_owned()));
         assert_eq!(li.amount_encoding, AmountEncoding::UnsignedU24);
-        assert_eq!(li.amount_cents, Some(266_112));
+        assert_eq!(li.amount_cents_decoded, Some(266_112));
     }
 
     #[test]
@@ -633,7 +682,7 @@ mod tests {
         let mut li = scan_one(&anchor_body(PAGE_DATA_END, 32, &[0x02, 0x80, 0x0F, 0x04])).unwrap();
         li.set_source_table(Some("abmc_credit_memo_inventory_lineitem".to_owned()));
         assert_eq!(li.amount_encoding, AmountEncoding::Unconfirmed);
-        assert_eq!(li.amount_cents, None);
+        assert_eq!(li.amount_cents_decoded, None);
     }
 
     #[test]
@@ -642,7 +691,7 @@ mod tests {
             let mut li =
                 scan_one(&anchor_body(PAGE_DATA_END, 32, &[first, 0x80, 0x0F, 0x04])).unwrap();
             li.set_source_table(Some(AmountEncoding::INVOICE_TABLE.to_owned()));
-            assert_eq!(li.amount_cents, None, "type {first:#x}");
+            assert_eq!(li.amount_cents_decoded, None, "type {first:#x}");
         }
     }
 
@@ -657,6 +706,31 @@ mod tests {
                 type_byte: 0x5A
             }
         ));
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn legacy_mode_keeps_old_records_and_raw_readings() {
+        let mut out = Vec::new();
+        scan_page(
+            &anchor_body(PAGE_DATA_END, 32, &[0x5A, 1, 2, 3]),
+            7,
+            true,
+            &mut out,
+        );
+        let li = out.pop().unwrap().unwrap();
+        assert_eq!(li.amount_type, AmountType::Other(0x5A));
+        let li = scan_one_legacy(&anchor_body(PAGE_DATA_END, 32, &[0x02, 0xC0, 0x2D, 0x01]));
+        assert_eq!(li.amount_cents, Some(77_248));
+        assert_eq!(li.amount_cents_signed, Some(-77_120));
+        assert_eq!(li.amount_cents_decoded, None);
+    }
+
+    #[allow(deprecated)]
+    fn scan_one_legacy(body: &[u8]) -> LineItem {
+        let mut out = Vec::new();
+        scan_page(body, 7, true, &mut out);
+        out.pop().unwrap().unwrap()
     }
 
     #[test]
