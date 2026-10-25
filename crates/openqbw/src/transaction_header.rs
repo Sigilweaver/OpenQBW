@@ -21,11 +21,13 @@
 
 use std::iter::FusedIterator;
 
-use opensqlany::{ApModel, Page, PageStore, PageType, Result as SaResult, SlottedPage};
+use opensqlany::{ApModel, Page, PageStore, PageType, SlottedPage};
 
 use crate::bv_recovery::{deobfuscate_with_bv, recover_bv_any};
 use crate::date::{DateScan, DateSource, scan_date_counter};
+use crate::error::Error;
 use crate::page_attribution::PageAttribution;
+use crate::scan::{RecordFlag, ScanOptions, ScanResult, ScanWarning};
 
 const PAGE_DATA_END: usize = 0xFF0;
 const QB_ID_LEN: usize = 16;
@@ -48,6 +50,8 @@ pub struct TransactionHeader {
     /// How `txn_date_raw` was found. `NotFound` and `Ambiguous` leave the
     /// date and counter unset.
     pub date_source: DateSource,
+    /// Reasons this record deserves less trust. Empty when no check flagged it.
+    pub flags: Vec<RecordFlag>,
     /// Source page number in the QBW file.
     pub page_number: u64,
     /// Byte offset of the QB-ID anchor within the decoded page body.
@@ -72,8 +76,27 @@ pub fn iter_transaction_headers<'a>(
     store: &'a PageStore,
     model: &'a ApModel,
     attribution: &'a PageAttribution,
-) -> impl Iterator<Item = TransactionHeader> + 'a {
+) -> impl Iterator<Item = Result<TransactionHeader, Error>> + 'a {
     TransactionHeaderIter::new(store, model, attribution)
+}
+
+/// Collect every transaction header. Strict mode returns the first error;
+/// lenient mode turns each into a [`ScanWarning::RecordSkipped`].
+pub fn scan_transaction_headers(
+    store: &PageStore,
+    model: &ApModel,
+    attribution: &PageAttribution,
+    options: &ScanOptions,
+) -> Result<ScanResult<TransactionHeader>, Error> {
+    let mut scan = ScanResult::default();
+    for r in TransactionHeaderIter::new(store, model, attribution) {
+        match r {
+            Ok(h) => scan.items.push(h),
+            Err(e) if options.is_lenient() => scan.warnings.push(ScanWarning::RecordSkipped(e)),
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(scan)
 }
 
 fn is_header_table(name: &str) -> bool {
@@ -119,11 +142,20 @@ fn scan_page(body: &[u8], pn: u64, source_table: &str, out: &mut Vec<Transaction
             txn_date_raw: scan.date,
             counter: scan.counter,
             date_source: scan.source,
+            flags: date_flags(scan.source),
             page_number: pn,
             page_offset: pos,
         });
         // Advance past the QB-ID to avoid overlapping matches.
         pos = id_start + QB_ID_LEN;
+    }
+}
+
+fn date_flags(source: DateSource) -> Vec<RecordFlag> {
+    if source == DateSource::Ambiguous {
+        vec![RecordFlag::DateAmbiguous]
+    } else {
+        Vec::new()
     }
 }
 
@@ -177,6 +209,7 @@ fn scan_page_slotted(
                         txn_date_raw: scan.date,
                         counter: scan.counter,
                         date_source: scan.source,
+                        flags: date_flags(scan.source),
                         page_number: pn,
                         page_offset: slot_off as usize + i,
                     });
@@ -216,7 +249,7 @@ impl<'a> TransactionHeaderIter<'a> {
         }
     }
 
-    fn fill_buffer(&mut self) -> SaResult<bool> {
+    fn fill_buffer(&mut self) -> Result<bool, Error> {
         while self.buffer.is_empty() && self.pn < self.n_pages {
             let pn = self.pn;
             self.pn += 1;
@@ -228,7 +261,10 @@ impl<'a> TransactionHeaderIter<'a> {
                 _ => continue,
             };
 
-            let page = self.store.page(pn)?;
+            let page = self
+                .store
+                .page(pn)
+                .map_err(|e| Error::from_store(e, Some(pn)))?;
             if page.trailer().page_type() != PageType::Extent {
                 continue;
             }
@@ -261,16 +297,19 @@ impl<'a> TransactionHeaderIter<'a> {
 }
 
 impl Iterator for TransactionHeaderIter<'_> {
-    type Item = TransactionHeader;
+    type Item = Result<TransactionHeader, Error>;
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             if let Some(h) = self.buffer.pop() {
-                return Some(h);
+                return Some(Ok(h));
             }
             match self.fill_buffer() {
                 Ok(true) => continue,
-                _ => return None,
+                Ok(false) => return None,
+                // The page counter already moved past the failing page, so
+                // the next call continues with the next page.
+                Err(e) => return Some(Err(e)),
             }
         }
     }
@@ -290,6 +329,7 @@ mod tests {
             txn_date_raw: None,
             counter: None,
             date_source: DateSource::NotFound,
+            flags: Vec::new(),
             page_number: 0,
             page_offset: 0,
         };
@@ -304,6 +344,7 @@ mod tests {
             txn_date_raw: None,
             counter: None,
             date_source: DateSource::NotFound,
+            flags: Vec::new(),
             page_number: 0,
             page_offset: 0,
         };

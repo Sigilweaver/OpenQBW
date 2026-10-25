@@ -10,34 +10,12 @@ use std::path::Path;
 
 use opensqlany::PageStore;
 
+use crate::error::{Error, Result};
+
 /// Superblock `format_major`, `version_a` and `version_b` of every supported
 /// file (SPECIFICATION.md section 2: identical from QuickBooks 2018 to
 /// Enterprise 2024).
 pub const SUPPORTED_VERSION: (u32, u16, u16) = (3, 201, 12);
-
-/// Errors from [`open_store`] and [`check_store`].
-#[derive(Debug, thiserror::Error)]
-#[non_exhaustive]
-pub enum OpenError {
-    /// The page store could not be opened, the magic is wrong, or a page
-    /// failed its CRC check.
-    #[error(transparent)]
-    Store(#[from] opensqlany::Error),
-    /// The superblock version triple is not the supported one.
-    #[error(
-        "unsupported file version (format {format_major}, version {version_a}.{version_b}); \
-         supported is {}, {}.{}",
-        SUPPORTED_VERSION.0, SUPPORTED_VERSION.1, SUPPORTED_VERSION.2
-    )]
-    UnsupportedVersion {
-        /// `format_major` found at superblock offset 0x10.
-        format_major: u32,
-        /// `version_a` found at offset 0x18.
-        version_a: u16,
-        /// `version_b` found at offset 0x1A.
-        version_b: u16,
-    },
-}
 
 /// What [`open_store`] verifies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,18 +32,21 @@ impl Default for OpenOptions {
 }
 
 /// Open `path` as a page store and run [`check_store`].
-pub fn open_store(path: impl AsRef<Path>, options: &OpenOptions) -> Result<PageStore, OpenError> {
-    let store = PageStore::open(path)?;
+pub fn open_store(path: impl AsRef<Path>, options: &OpenOptions) -> Result<PageStore> {
+    let store = PageStore::open(path).map_err(|e| Error::from_store(e, None))?;
     check_store(&store, options)?;
     Ok(store)
 }
 
 /// Check the superblock magic and version and, unless disabled, every
 /// page's CRC. Returns the first failure.
-pub fn check_store(store: &PageStore, options: &OpenOptions) -> Result<(), OpenError> {
-    let sb = store.superblock()?; // verifies the magic
+pub fn check_store(store: &PageStore, options: &OpenOptions) -> Result<()> {
+    // `superblock` verifies the magic.
+    let sb = store
+        .superblock()
+        .map_err(|e| Error::from_store(e, Some(0)))?;
     if (sb.format_major, sb.version_a, sb.version_b) != SUPPORTED_VERSION {
-        return Err(OpenError::UnsupportedVersion {
+        return Err(Error::UnsupportedVersion {
             format_major: sb.format_major,
             version_a: sb.version_a,
             version_b: sb.version_b,
@@ -73,7 +54,10 @@ pub fn check_store(store: &PageStore, options: &OpenOptions) -> Result<(), OpenE
     }
     if options.verify_crc {
         for pn in 0..store.page_count() {
-            store.page(pn)?.verify_crc()?;
+            store
+                .page(pn)
+                .and_then(|p| p.verify_crc())
+                .map_err(|e| Error::from_store(e, Some(pn)))?;
         }
     }
     Ok(())
@@ -111,10 +95,7 @@ mod tests {
     fn wrong_magic_is_an_error() {
         let s = store(2, 0x1234_5678, SUPPORTED_VERSION);
         let e = check_store(&s, &OpenOptions::default()).unwrap_err();
-        assert!(matches!(
-            e,
-            OpenError::Store(opensqlany::Error::BadMagic { .. })
-        ));
+        assert!(matches!(e, Error::BadMagic { .. }));
     }
 
     #[test]
@@ -123,7 +104,7 @@ mod tests {
         let e = check_store(&s, &OpenOptions::default()).unwrap_err();
         assert!(matches!(
             e,
-            OpenError::UnsupportedVersion { version_a: 202, .. }
+            Error::UnsupportedVersion { version_a: 202, .. }
         ));
     }
 
@@ -140,10 +121,7 @@ mod tests {
         b[PAGE_SIZE * 2 + 100] ^= 0xFF; // bit rot in page 2
         let s = PageStore::from_bytes(b).unwrap();
         let e = check_store(&s, &OpenOptions::default()).unwrap_err();
-        assert!(matches!(
-            e,
-            OpenError::Store(opensqlany::Error::BadCrc { page: 2, .. })
-        ));
+        assert!(matches!(e, Error::BadCrc { page_number: 2, .. }));
         let off = OpenOptions {
             verify_crc: false,
             ..OpenOptions::default()

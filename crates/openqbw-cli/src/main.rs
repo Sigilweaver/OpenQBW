@@ -18,8 +18,8 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use openqbw::{
     AmountType, AttributionGap, ContentAttribution, CrossValidation, LineItem, PageAttribution,
-    ScanOptions, ScanWarning, SysIndexEntry, SysTableEntry, TransactionHeader,
-    iter_transaction_headers, scan_lineitems,
+    ScanOptions, ScanWarning, SysIndexEntry, SysTableEntry, TransactionHeader, scan_lineitems,
+    scan_transaction_headers,
 };
 use opensqlany::{ApModel, PageStore};
 use rusqlite::{Connection, Transaction, params};
@@ -233,11 +233,11 @@ fn run_export(input: PathBuf, output: PathBuf, lenient: bool) -> Result<ExportSt
     let attribution = PageAttribution::build(&store, &model);
     warn_on_attribution_gap(&attribution);
 
-    let (mut items, rejected) = collect_lineitems(&store, &model, &attribution, lenient)?;
+    let (mut items, mut rejected) = collect_lineitems(&store, &model, &attribution, lenient)?;
     items.sort_by_key(|li| (li.page_number, li.page_offset));
 
-    let mut headers: Vec<TransactionHeader> =
-        iter_transaction_headers(&store, &model, &attribution).collect();
+    let (mut headers, header_warnings) = collect_headers(&store, &model, &attribution, lenient)?;
+    rejected.extend(header_warnings);
     headers.sort_by_key(|h| (h.page_number, h.page_offset));
 
     let mut conn = Connection::open(&output).with_context(|| format!("opening {:?}", output))?;
@@ -807,6 +807,8 @@ fn create_schema(conn: &Connection) -> Result<()> {
             txn_date_raw        INTEGER,
             counter             INTEGER,
             date_source         TEXT NOT NULL,
+            -- Comma-separated record flags; empty when none.
+            flags               TEXT NOT NULL,
             source_table        TEXT NOT NULL,
             page_number         INTEGER NOT NULL,
             page_offset         INTEGER NOT NULL,
@@ -816,14 +818,26 @@ fn create_schema(conn: &Connection) -> Result<()> {
         CREATE TABLE scan_rejections (
             page_number INTEGER,
             page_offset INTEGER,
-            reason      TEXT NOT NULL
+            kind        TEXT NOT NULL,
+            message     TEXT NOT NULL
         );
+
+        CREATE TABLE meta (
+            key   TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+        INSERT INTO meta (key, value) VALUES ('format_version', '1');
+        PRAGMA user_version = 1;
 
         CREATE INDEX idx_lineitems_page   ON transaction_line_items(page_number);
         CREATE INDEX idx_lineitems_source ON transaction_line_items(source_table);
         CREATE INDEX idx_tx_type          ON transactions(type);
         CREATE INDEX idx_tx_source        ON transactions(source_table);
         "#,
+    )?;
+    conn.execute(
+        "INSERT INTO meta (key, value) VALUES ('openqbw_version', ?)",
+        params![env!("CARGO_PKG_VERSION")],
     )?;
     Ok(())
 }
@@ -938,8 +952,8 @@ fn insert_transaction_line_items(tx: &Transaction<'_>, items: &[LineItem]) -> Re
         "INSERT INTO transaction_line_items \
          (qb_id_parent, line_number, item_qb_id, amount_type, amount_cents, \
           amount_encoding, amount_raw_u24_cents, amount_raw_hex, txn_date_raw, counter, date_source, \
-          source_table, page_number, page_offset) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          flags, source_table, page_number, page_offset) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )?;
     let mut line_no: BTreeMap<(String, String), i64> = BTreeMap::new();
     for li in items {
@@ -947,7 +961,7 @@ fn insert_transaction_line_items(tx: &Transaction<'_>, items: &[LineItem]) -> Re
         let key = (li.invoice_id.clone(), src.clone());
         let n = line_no.entry(key).or_insert(0);
         *n += 1;
-        let type_byte = amount_type_byte(li.amount_type);
+        let type_byte = li.amount_type_byte() as i64;
         let hex = li
             .amount_raw
             .iter()
@@ -960,11 +974,12 @@ fn insert_transaction_line_items(tx: &Transaction<'_>, items: &[LineItem]) -> Re
             type_byte,
             li.amount_cents,
             li.amount_encoding.as_str(),
-            li.amount_type.decode_cents(&li.amount_raw),
+            raw_u24_cents(li),
             hex,
             li.txn_date_raw,
             li.counter,
             li.date_source.as_str(),
+            flags_csv(li),
             src,
             li.page_number as i64,
             li.page_offset as i64,
@@ -973,9 +988,24 @@ fn insert_transaction_line_items(tx: &Transaction<'_>, items: &[LineItem]) -> Re
     Ok(())
 }
 
+/// Undecoded unsigned reading of the three amount bytes of a type 1 or 2
+/// amount, kept in the export so `verify` can compare against its baseline.
+fn flags_csv(li: &LineItem) -> String {
+    li.flags
+        .iter()
+        .map(|f| f.as_str())
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn raw_u24_cents(li: &LineItem) -> Option<i64> {
+    let r = li.amount_raw;
+    matches!(r[0], 1 | 2).then(|| r[1] as i64 | (r[2] as i64) << 8 | (r[3] as i64) << 16)
+}
+
 fn insert_scan_rejections(tx: &Transaction<'_>, rejected: &[ScanWarning]) -> Result<()> {
     let mut stmt = tx.prepare(
-        "INSERT INTO scan_rejections (page_number, page_offset, reason) VALUES (?, ?, ?)",
+        "INSERT INTO scan_rejections (page_number, page_offset, kind, message) VALUES (?, ?, ?, ?)",
     )?;
     for e in rejected {
         let (page, offset) = e.location();
@@ -986,6 +1016,31 @@ fn insert_scan_rejections(tx: &Transaction<'_>, rejected: &[ScanWarning]) -> Res
         ])?;
     }
     Ok(())
+}
+
+/// Scan all transaction headers. Same strict and lenient behavior as
+/// [`collect_lineitems`].
+fn collect_headers(
+    store: &PageStore,
+    model: &ApModel,
+    attribution: &PageAttribution,
+    lenient: bool,
+) -> Result<(Vec<TransactionHeader>, Vec<ScanWarning>)> {
+    let scan = scan_transaction_headers(
+        store,
+        model,
+        attribution,
+        &if lenient {
+            ScanOptions::lenient()
+        } else {
+            ScanOptions::strict()
+        },
+    )
+    .context("scanning transaction headers (use --lenient to skip failing pages and list them)")?;
+    for w in &scan.warnings {
+        eprintln!("warning: {w}");
+    }
+    Ok((scan.items, scan.warnings))
 }
 
 /// Scan all line items. Strict mode stops at the first undecodable record.
@@ -1011,18 +1066,6 @@ fn collect_lineitems(
         eprintln!("warning: {w}");
     }
     Ok((scan.items, scan.warnings))
-}
-
-fn amount_type_byte(t: AmountType) -> i64 {
-    match t {
-        AmountType::None => 0,
-        AmountType::OneByteOne => 1,
-        AmountType::Standard => 2,
-        AmountType::Deferred => 3,
-        AmountType::Other(b) => b as i64,
-        // AmountType is non_exhaustive; a future variant must be mapped here.
-        other => unreachable!("unmapped amount type {other:?}"),
-    }
 }
 
 #[derive(Debug)]
@@ -1123,10 +1166,10 @@ fn collect_records(input: &std::path::Path, lenient: bool) -> Result<Records> {
     let model = ApModel::learn(&store);
     let attribution = PageAttribution::build(&store, &model);
     warn_on_attribution_gap(&attribution);
-    let (mut items, rejected) = collect_lineitems(&store, &model, &attribution, lenient)?;
+    let (mut items, mut rejected) = collect_lineitems(&store, &model, &attribution, lenient)?;
     items.sort_by_key(|li| (li.page_number, li.page_offset));
-    let mut headers: Vec<TransactionHeader> =
-        iter_transaction_headers(&store, &model, &attribution).collect();
+    let (mut headers, header_warnings) = collect_headers(&store, &model, &attribution, lenient)?;
+    rejected.extend(header_warnings);
     headers.sort_by_key(|h| (h.page_number, h.page_offset));
     Ok(Records {
         items,
@@ -1216,14 +1259,20 @@ fn run_migrate_csv(input: PathBuf, out: PathBuf, lenient: bool) -> Result<()> {
 
     // transactions.csv
     let mut txf = std::fs::File::create(out.join("transactions.csv"))?;
-    writeln!(txf, "qb_id,txn_type,source_table,page_number,page_offset")?;
+    writeln!(
+        txf,
+        "qb_id,txn_type,source_table,txn_date_raw,counter,date_source,page_number,page_offset"
+    )?;
     for h in &headers {
         writeln!(
             txf,
-            "{},{},{},{},{}",
+            "{},{},{},{},{},{},{},{}",
             csv_field(&h.qb_id),
             csv_field(h.txn_type()),
             csv_field(&h.source_table),
+            h.txn_date_raw.map(|d| d.to_string()).unwrap_or_default(),
+            h.counter.map(|c| c.to_string()).unwrap_or_default(),
+            h.date_source.as_str(),
             h.page_number,
             h.page_offset,
         )?;
@@ -1233,14 +1282,14 @@ fn run_migrate_csv(input: PathBuf, out: PathBuf, lenient: bool) -> Result<()> {
     let mut lif = std::fs::File::create(out.join("lineitems.csv"))?;
     writeln!(
         lif,
-        "invoice_id,item_qb_id,amount_cents,amount_encoding,amount_decimal,txn_date,date_source,source_table,page_number,page_offset"
+        "invoice_id,item_qb_id,amount_cents,amount_encoding,amount_decimal,txn_date,date_source,flags,source_table,page_number,page_offset"
     )?;
     for li in &items {
         let amt = li.amount_cents.map(|c| c.to_string()).unwrap_or_default();
         let dec = li.amount_cents.map(format_cents).unwrap_or_default();
         writeln!(
             lif,
-            "{},{},{},{},{},{},{},{},{},{}",
+            "{},{},{},{},{},{},{},{},{},{},{}",
             csv_field(&li.invoice_id),
             csv_field(li.item_qb_id.as_deref().unwrap_or("")),
             amt,
@@ -1248,26 +1297,36 @@ fn run_migrate_csv(input: PathBuf, out: PathBuf, lenient: bool) -> Result<()> {
             dec,
             lineitem_date(li),
             li.date_source.as_str(),
+            csv_field(&flags_csv(li)),
             csv_field(li.source_table.as_deref().unwrap_or("")),
             li.page_number,
             li.page_offset,
         )?;
     }
 
-    if !rejected.is_empty() {
-        let mut rf = std::fs::File::create(out.join("rejected.csv"))?;
-        writeln!(rf, "page_number,page_offset,reason")?;
-        for e in &rejected {
-            let (page, offset) = e.location();
-            writeln!(
-                rf,
-                "{},{},{}",
-                page.map(|v| v.to_string()).unwrap_or_default(),
-                offset.map(|v| v.to_string()).unwrap_or_default(),
-                csv_field(&e.to_string()),
-            )?;
-        }
+    // Always written, so an empty list is distinguishable from a missing file.
+    let mut rf = std::fs::File::create(out.join("rejected.csv"))?;
+    writeln!(rf, "page_number,page_offset,kind,message")?;
+    for e in &rejected {
+        let (page, offset) = e.location();
+        writeln!(
+            rf,
+            "{},{},{},{}",
+            page.map(|v| v.to_string()).unwrap_or_default(),
+            offset.map(|v| v.to_string()).unwrap_or_default(),
+            e.kind_str(),
+            csv_field(&e.to_string()),
+        )?;
     }
+    std::fs::write(
+        out.join("manifest.json"),
+        format!(
+            "{{\"format_version\": 1, \"openqbw_version\": \"{}\", \"lineitems\": {}, \"rejected\": {}}}\n",
+            env!("CARGO_PKG_VERSION"),
+            items.len(),
+            rejected.len()
+        ),
+    )?;
 
     println!(
         "openqbw migrate csv: out={:?} tables={} transactions={} lineitems={} undecoded_amounts={} skipped_records={}",
@@ -1437,9 +1496,9 @@ fn run_forensics(input: PathBuf, lenient: bool) -> Result<()> {
     println!("tables total: {}", tables.len());
     println!("tables user : {}", user_tables.len());
 
-    let (items, rejected) = collect_lineitems(&store, &model, &attribution, lenient)?;
-    let headers: Vec<TransactionHeader> =
-        iter_transaction_headers(&store, &model, &attribution).collect();
+    let (items, mut rejected) = collect_lineitems(&store, &model, &attribution, lenient)?;
+    let (headers, header_warnings) = collect_headers(&store, &model, &attribution, lenient)?;
+    rejected.extend(header_warnings);
 
     println!();
     println!("=== business records ===");

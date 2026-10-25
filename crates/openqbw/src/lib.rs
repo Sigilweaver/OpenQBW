@@ -21,6 +21,7 @@ mod attribution_content;
 mod attribution_schema;
 mod bv_recovery;
 mod date;
+mod error;
 mod fkgraph;
 mod lineitem;
 mod nullability;
@@ -45,26 +46,27 @@ pub use bv_recovery::{
     recover_bv_brute, recover_bv_qb_data,
 };
 pub use date::{
-    DATE_SCAN_MAX, DATE_SCAN_MIN, DateScan, DateSource, SA_DAY_MAX_PLAUSIBLE, SA_DAY_MIN_PLAUSIBLE,
-    sa_day_to_unix_day, sa_day_to_unix_seconds, scan_date_counter, unix_day_to_sa_day,
+    DateSource, SA_DAY_MAX_PLAUSIBLE, SA_DAY_MIN_PLAUSIBLE, sa_day_to_unix_day,
+    sa_day_to_unix_seconds, unix_day_to_sa_day,
 };
+pub use error::{Error, ErrorKind, Result};
 pub use fkgraph::{FkEdge, FkGraphStats, build as build_fk_graph, stats as fk_graph_stats};
 pub use lineitem::{
-    AmountEncoding, AmountType, DATE_EPOCH_DAYS_BEFORE_UNIX, LineItem, LineItemError,
-    iter_lineitems, iter_lineitems_with_attribution, scan_lineitems,
+    AmountEncoding, AmountType, DATE_EPOCH_DAYS_BEFORE_UNIX, LineItem, iter_lineitems,
+    iter_lineitems_with_attribution, scan_lineitems,
 };
 pub use nullability::{NullsFlagBucket, histogram as nulls_flag_histogram};
 pub use opaque::{
     OPAQUE_ENTROPY_THRESHOLD, OPAQUE_FILE_FRACTION, OpaqueCount, count_opaque_pages,
     is_opaque_high_entropy,
 };
-pub use open::{OpenError, OpenOptions, SUPPORTED_VERSION, check_store, open_store};
+pub use open::{OpenOptions, SUPPORTED_VERSION, check_store, open_store};
 pub use owner_bridge::{
     BACKREF_MAX_DISTANCE, BACKREF_MIN_DISTANCE, BackrefVotes, BridgeSource,
     DEFAULT_BACKREF_DISTANCE, OwnerBridge, bridge_owners_via_backref, extend_with_sysobject,
 };
 pub use page_attribution::{AttributionGap, PageAttribution};
-pub use scan::{ScanOptions, ScanResult, ScanWarning};
+pub use scan::{RecordFlag, ScanOptions, ScanResult, ScanWarning, Strictness};
 pub use syscolumn::{
     SYSCOLUMN_TAG, SchemaRecovery, SysColumn, collect_unique as collect_unique_syscolumns,
     iter_syscolumns, recover_schema, scan_page as scan_syscolumn_page, schema_for,
@@ -77,4 +79,6 @@ pub use sysobject::{SYSOBJECT_NAME_OFFSET, bridge_owners_to_tables};
 pub use systable::{
     SysTableEntry, collect_unique, iter_systable_entries, scan_page as scan_systable_page,
 };
-pub use transaction_header::{TransactionHeader, iter_transaction_headers};
+pub use transaction_header::{
+    TransactionHeader, iter_transaction_headers, scan_transaction_headers,
+};
