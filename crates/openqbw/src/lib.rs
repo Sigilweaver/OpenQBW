@@ -50,7 +50,9 @@ pub use date::{
     sa_day_to_unix_seconds, unix_day_to_sa_day,
 };
 pub use error::{Error, ErrorKind, Result};
-pub use fkgraph::{FkEdge, FkGraphStats, build as build_fk_graph, stats as fk_graph_stats};
+pub use fkgraph::{
+    FkEdge, FkGraph, FkGraphStats, build as build_fk_graph, stats as fk_graph_stats,
+};
 pub use lineitem::{
     AmountEncoding, AmountType, DATE_EPOCH_DAYS_BEFORE_UNIX, LineItem, iter_lineitems,
     iter_lineitems_with_attribution, scan_lineitems,
@@ -68,8 +70,9 @@ pub use owner_bridge::{
 pub use page_attribution::{AttributionGap, PageAttribution};
 pub use scan::{RecordFlag, ScanOptions, ScanResult, ScanWarning, Strictness};
 pub use syscolumn::{
-    SYSCOLUMN_TAG, SchemaRecovery, SysColumn, collect_unique as collect_unique_syscolumns,
-    iter_syscolumns, recover_schema, scan_page as scan_syscolumn_page, schema_for,
+    SYSCOLUMN_TAG, SchemaRecovery, SysColumn, SyscolumnStats,
+    collect_unique as collect_unique_syscolumns, iter_syscolumns, recover_schema,
+    scan_page as scan_syscolumn_page, scan_syscolumns, schema_for,
 };
 pub use sysindex::{
     AuditOutcome, CrossValidation, DISAGREE_SAMPLE_LIMIT, SYSINDEX_CREATOR, SysIndexEntry,

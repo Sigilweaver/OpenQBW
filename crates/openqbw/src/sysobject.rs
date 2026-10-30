@@ -123,16 +123,35 @@ pub fn bridge_owners_to_tables(
 
     let mut bridge: HashMap<u32, String> = HashMap::new();
     for (oid, cands) in votes {
-        if let Some((name, _)) = cands.into_iter().max_by_key(|(_, c)| *c) {
+        if let Some(name) = winning_name(cands) {
             bridge.insert(oid, name);
         }
     }
     bridge
 }
 
+/// The name with strictly the most votes. A tie bridges nothing: picking one
+/// would depend on hash order and could name the wrong table.
+fn winning_name(cands: HashMap<String, u32>) -> Option<String> {
+    let best = cands.values().copied().max()?;
+    let mut top = cands.into_iter().filter(|(_, c)| *c == best);
+    let (name, _) = top.next()?;
+    top.next().is_none().then_some(name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tied_names_bridge_nothing() {
+        let tied: HashMap<String, u32> =
+            [("a_table".to_owned(), 3), ("b_table".to_owned(), 3)].into();
+        assert_eq!(winning_name(tied), None);
+        let clear: HashMap<String, u32> =
+            [("a_table".to_owned(), 3), ("b_table".to_owned(), 2)].into();
+        assert_eq!(winning_name(clear).as_deref(), Some("a_table"));
+    }
 
     #[test]
     fn identifier_check_basic() {

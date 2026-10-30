@@ -400,12 +400,31 @@ fn scan_page(body: &[u8], pn: u64, out: &mut Vec<Result<LineItem, Error>>) {
     }
 
     // Reverse so we can pop in original order (iterator buffer is LIFO).
-    for anchor in start.into_iter().rev() {
-        out.push(parse_anchor(body, pn, anchor));
+    // Each record's search windows stop at its neighbours' anchors, so a
+    // field of the previous or next record is never read as this one's.
+    let bounds: Vec<(usize, usize, usize)> = (0..start.len())
+        .map(|i| {
+            let floor = if i == 0 {
+                0
+            } else {
+                start[i - 1] + ANCHOR_LEN + 4
+            };
+            let ceil = start.get(i + 1).copied().unwrap_or(body.len());
+            (start[i], floor, ceil)
+        })
+        .collect();
+    for (anchor, floor, ceil) in bounds.into_iter().rev() {
+        out.push(parse_anchor(body, pn, anchor, floor, ceil));
     }
 }
 
-fn parse_anchor(body: &[u8], pn: u64, anchor_start: usize) -> Result<LineItem, Error> {
+fn parse_anchor(
+    body: &[u8],
+    pn: u64,
+    anchor_start: usize,
+    floor: usize,
+    ceil: usize,
+) -> Result<LineItem, Error> {
     let id_start = anchor_start + 5;
     let invoice_id = std::str::from_utf8(&body[id_start..id_start + QB_ID_LEN])
         .expect("anchor guarded by is_base62")
@@ -429,21 +448,17 @@ fn parse_anchor(body: &[u8], pn: u64, anchor_start: usize) -> Result<LineItem, E
     };
 
     // Forward search for a date+counter pair after the amount bytes.
-    let scan = scan_date_counter(body, payload_start + 4, payload_start + 64, 1_000_000);
+    let scan = scan_date_counter(
+        body,
+        payload_start + 4,
+        (payload_start + 64).min(ceil.saturating_sub(7)),
+        1_000_000,
+    );
 
-    // Backward search for item QB-ID prefixed by `04 00 10`.
-    let mut item_qb_id = None;
-    let back_start = anchor_start.saturating_sub(96);
-    let back_slice = &body[back_start..anchor_start];
-    if let Some(rel) = find_subslice(back_slice, &[0x04, 0x00, 0x10]) {
-        let id_off = rel + 3;
-        if id_off + QB_ID_LEN <= back_slice.len() {
-            let id_bytes = &back_slice[id_off..id_off + QB_ID_LEN];
-            if is_base62(id_bytes) {
-                item_qb_id = Some(std::str::from_utf8(id_bytes).unwrap().to_owned());
-            }
-        }
-    }
+    // Backward search for the nearest item QB-ID prefixed by `04 00 10`,
+    // not reaching into the previous record.
+    let back_start = anchor_start.saturating_sub(96).max(floor);
+    let item_qb_id = find_item_id_nearest(&body[back_start..anchor_start]);
 
     let mut li = LineItem {
         invoice_id,
@@ -472,16 +487,19 @@ fn is_base62(s: &[u8]) -> bool {
         .all(|&b| matches!(b, b'0'..=b'9' | b'A'..=b'Z' | b'a'..=b'z'))
 }
 
-fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    if needle.is_empty() || haystack.len() < needle.len() {
+/// The `04 00 10 <16 base62>` item ID closest to the end of `window`.
+fn find_item_id_nearest(window: &[u8]) -> Option<String> {
+    const PREFIX: [u8; 3] = [0x04, 0x00, 0x10];
+    if window.len() < PREFIX.len() + QB_ID_LEN {
         return None;
     }
-    for i in 0..=haystack.len() - needle.len() {
-        if &haystack[i..i + needle.len()] == needle {
-            return Some(i);
-        }
-    }
-    None
+    (0..=window.len() - PREFIX.len() - QB_ID_LEN)
+        .rev()
+        .find_map(|rel| {
+            let id = &window[rel + 3..rel + 3 + QB_ID_LEN];
+            (window[rel..rel + 3] == PREFIX && is_base62(id))
+                .then(|| String::from_utf8_lossy(id).into_owned())
+        })
 }
 
 #[cfg(test)]
@@ -643,6 +661,52 @@ mod tests {
         assert_eq!(li.date_source, DateSource::Ambiguous);
         assert!(li.flags.contains(&RecordFlag::DateAmbiguous));
         assert_eq!(li.txn_date_raw, None);
+    }
+
+    #[test]
+    fn close_records_keep_their_own_item_ids() {
+        // Two records 60 bytes apart; the second record's window would
+        // include the first record's item id (which sits earlier).
+        let mut body = vec![0xAAu8; PAGE_DATA_END];
+        let put = |body: &mut Vec<u8>, at: usize, item: &[u8; 16]| {
+            body[at - 19..at - 16].copy_from_slice(&[0x04, 0x00, 0x10]);
+            body[at - 16..at].copy_from_slice(item);
+            body[at..at + 5].copy_from_slice(&PARENT_PREFIX);
+            body[at + 5..at + 21].copy_from_slice(b"0000000000001QBm");
+            body[at + 21..at + 25].copy_from_slice(&F32_ONE);
+            body[at + 25..at + 29].copy_from_slice(&[0x02, 0x40, 0x0F, 0x04]);
+        };
+        put(&mut body, 100, b"AAAAAAAAAAAAAAAA");
+        put(&mut body, 160, b"BBBBBBBBBBBBBBBB");
+        let mut out = Vec::new();
+        scan_page(&body, 7, &mut out);
+        let ids: Vec<_> = out
+            .into_iter()
+            .map(|r| r.unwrap().item_qb_id.unwrap())
+            .collect();
+        // Output is LIFO (last record first).
+        assert_eq!(ids, ["BBBBBBBBBBBBBBBB", "AAAAAAAAAAAAAAAA"]);
+    }
+
+    #[test]
+    fn item_id_belonging_to_previous_record_is_not_taken() {
+        // Second record has no item id of its own.
+        let mut body = anchor_body(PAGE_DATA_END, 100, &[0x02, 0x40, 0x0F, 0x04]);
+        body[81..84].copy_from_slice(&[0x04, 0x00, 0x10]);
+        body[84..100].copy_from_slice(b"AAAAAAAAAAAAAAAA");
+        let second = 140;
+        body[second..second + 5].copy_from_slice(&PARENT_PREFIX);
+        body[second + 5..second + 21].copy_from_slice(b"0000000000001QBm");
+        body[second + 21..second + 25].copy_from_slice(&F32_ONE);
+        body[second + 25..second + 29].copy_from_slice(&[0x02, 0x40, 0x0F, 0x04]);
+        let mut out = Vec::new();
+        scan_page(&body, 7, &mut out);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].as_ref().unwrap().item_qb_id, None);
+        assert_eq!(
+            out[1].as_ref().unwrap().item_qb_id.as_deref(),
+            Some("AAAAAAAAAAAAAAAA")
+        );
     }
 
     #[test]

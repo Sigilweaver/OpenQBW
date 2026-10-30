@@ -44,10 +44,29 @@ pub const SYSCOLUMN_TAG: [u8; 8] = [0x01, 0x52, 0x00, 0x01, 0x00, 0x00, 0x00, 0x
 
 const NAME_LEN_MIN: usize = 1;
 const NAME_LEN_MAX: usize = 40;
-/// Possible byte gaps between the column name and the [`SYSCOLUMN_TAG`].
-/// A non-zero peel skips over an optional default-value length-prefixed
-/// string sitting between the name and the tag.
-const DEFAULT_PEELS: [usize; 7] = [0, 1, 2, 3, 4, 8, 16];
+/// Largest byte gap tried between the column name and the [`SYSCOLUMN_TAG`].
+/// A peel of `p > 0` skips a default value stored as a length byte `p - 1`
+/// followed by `p - 1` characters; peel 0 means no default.
+const MAX_PEEL: usize = 33;
+
+/// Counts of what a `SYSCOLUMN` scan saw, so rows that were not turned into
+/// columns are visible instead of silently absent.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SyscolumnStats {
+    /// Row tags found.
+    pub tags_seen: usize,
+    /// Tags that became a [`SysColumn`].
+    pub rows_parsed: usize,
+    /// Tags with no identifier before them under any layout.
+    pub rows_no_name: usize,
+    /// Tags where two layouts gave different names, so none was chosen.
+    pub rows_ambiguous_name: usize,
+    /// Tags whose fields after the tag did not have the expected shape.
+    pub rows_bad_layout: usize,
+    /// `E` pages skipped because no slot directory could be read.
+    pub pages_without_directory: usize,
+}
 
 /// One parsed `SYSCOLUMN` row.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,12 +91,25 @@ pub struct SysColumn {
     pub tag_offset: usize,
 }
 
-/// Walk back from `tag_pos` and try to locate a length-prefixed ASCII
-/// identifier that ends immediately before the tag, optionally separated
-/// from it by a default-value length-prefixed string.
-fn find_name_before(body: &[u8], tag_pos: usize) -> Option<String> {
-    for peel in DEFAULT_PEELS {
+/// Outcome of looking for the column name before a tag.
+#[derive(Debug, PartialEq, Eq)]
+enum NameMatch {
+    None,
+    One(String),
+    Ambiguous,
+}
+
+/// Walk back from `tag_pos` and look for a length-prefixed ASCII identifier
+/// that ends before the tag, optionally followed by a default-value
+/// length-prefixed string. Every layout is tried; the default's length byte
+/// must agree with the gap. Two different names are `Ambiguous`.
+fn find_name_before(body: &[u8], tag_pos: usize) -> NameMatch {
+    let mut found: Option<String> = None;
+    for peel in 0..=MAX_PEEL {
         if tag_pos < peel + NAME_LEN_MIN + 1 {
+            break;
+        }
+        if peel > 0 && body[tag_pos - peel] as usize != peel - 1 {
             continue;
         }
         let inner = tag_pos - peel;
@@ -96,14 +128,19 @@ fn find_name_before(body: &[u8], tag_pos: usize) -> Option<String> {
             if !(s[0].is_ascii_alphabetic() || s[0] == b'_') {
                 continue;
             }
-            return Some(s.iter().map(|&b| b as char).collect());
+            let name: String = s.iter().map(|&b| b as char).collect();
+            match &found {
+                None => found = Some(name),
+                Some(prev) if *prev != name => return NameMatch::Ambiguous,
+                Some(_) => {}
+            }
         }
     }
-    None
+    found.map_or(NameMatch::None, NameMatch::One)
 }
 
 /// Parse all `SYSCOLUMN` rows out of a single slotted-page row body.
-fn parse_rows_in_body(body: &[u8], pn: u64, out: &mut Vec<SysColumn>) {
+fn parse_rows_in_body(body: &[u8], pn: u64, out: &mut Vec<SysColumn>, stats: &mut SyscolumnStats) {
     let n = body.len();
     if n < SYSCOLUMN_TAG.len() + 17 {
         return;
@@ -114,27 +151,41 @@ fn parse_rows_in_body(body: &[u8], pn: u64, out: &mut Vec<SysColumn>) {
             i += 1;
             continue;
         }
-        let Some(name) = find_name_before(body, i) else {
-            i += SYSCOLUMN_TAG.len();
-            continue;
+        stats.tags_seen += 1;
+        let name = match find_name_before(body, i) {
+            NameMatch::One(name) => name,
+            NameMatch::None => {
+                stats.rows_no_name += 1;
+                i += SYSCOLUMN_TAG.len();
+                continue;
+            }
+            NameMatch::Ambiguous => {
+                stats.rows_ambiguous_name += 1;
+                i += SYSCOLUMN_TAG.len();
+                continue;
+            }
         };
         let p = i + SYSCOLUMN_TAG.len() + 4;
         if p + 9 > n {
+            stats.rows_bad_layout += 1;
             break;
         }
         let owner = u32::from_le_bytes([body[p], body[p + 1], body[p + 2], body[p + 3]]);
         let col_id = u32::from_le_bytes([body[p + 4], body[p + 5], body[p + 6], body[p + 7]]);
         let nulls_flag = body[p + 8];
         if body[p + 10] != 0x01 {
+            stats.rows_bad_layout += 1;
             i += SYSCOLUMN_TAG.len();
             continue;
         }
         let domain_char = body[p + 11];
         let width = body[p + 12];
         if !domain_char.is_ascii_alphabetic() {
+            stats.rows_bad_layout += 1;
             i += SYSCOLUMN_TAG.len();
             continue;
         }
+        stats.rows_parsed += 1;
         out.push(SysColumn {
             name,
             owner_object_id: owner,
@@ -151,15 +202,24 @@ fn parse_rows_in_body(body: &[u8], pn: u64, out: &mut Vec<SysColumn>) {
 
 /// Scan every slotted-page row body on a single decoded page for
 /// `SYSCOLUMN` rows.
-pub fn scan_page(plain: &[u8], pn: u64, out: &mut Vec<SysColumn>) {
+pub fn scan_page(plain: &[u8], pn: u64, out: &mut Vec<SysColumn>, stats: &mut SyscolumnStats) {
     let page = Page::from_bytes(pn, plain);
     let sp = SlottedPage::parse(page);
     if sp.directory.is_none() {
+        stats.pages_without_directory += 1;
         return;
     }
     for (_off, body) in sp.row_bytes() {
-        parse_rows_in_body(body, pn, out);
+        parse_rows_in_body(body, pn, out, stats);
     }
+}
+
+/// Recover every `SYSCOLUMN` row from `store` together with counts of the
+/// rows and pages that did not yield a column.
+pub fn scan_syscolumns(store: &PageStore, model: &ApModel) -> (Vec<SysColumn>, SyscolumnStats) {
+    let mut it = SysColumnIter::new(store, model);
+    let cols: Vec<SysColumn> = it.by_ref().collect();
+    (cols, it.stats)
 }
 
 /// Iterate every `SYSCOLUMN` row recovered from `store`.
@@ -215,6 +275,13 @@ pub struct SchemaRecovery {
     /// The table's columns, ordered by `column_id`. Empty when the table
     /// could not be bridged to an owner.
     pub columns: Vec<SysColumn>,
+    /// Owners the table name resolved to. More than one means the choice
+    /// of `owner` (most columns, then lowest id) was a tie-break.
+    pub candidate_owners: Vec<u32>,
+    /// Column count the `SYSTABLE` row declares, when parsed.
+    pub catalog_col_count: Option<u8>,
+    /// What the `SYSCOLUMN` scan saw and could not turn into columns.
+    pub scan_stats: SyscolumnStats,
 }
 
 impl SchemaRecovery {
@@ -256,6 +323,17 @@ impl SchemaRecovery {
         }
     }
 
+    /// How many columns the `SYSTABLE` row declares beyond the distinct
+    /// ordinals recovered. `None` when the catalog count is unknown;
+    /// `Some(0)` when the schema is complete by count. Unlike
+    /// [`Self::missing_column_ids`] this also sees missing leading and
+    /// trailing columns.
+    pub fn columns_short_of_catalog(&self) -> Option<usize> {
+        let expected = self.catalog_col_count? as usize;
+        let recovered: BTreeSet<u32> = self.plausible_columns().map(|c| c.column_id).collect();
+        Some(expected.saturating_sub(recovered.len()))
+    }
+
     /// `true` when the recovered `column_id`s have holes.
     pub fn has_column_gaps(&self) -> bool {
         self.missing_column_ids() > 0
@@ -280,7 +358,7 @@ pub fn schema_for(store: &PageStore, model: &ApModel, table_name: &str) -> Vec<S
 /// file and, on the files measured so far, adds little the
 /// back-reference has not already covered.
 pub fn recover_schema(store: &PageStore, model: &ApModel, table_name: &str) -> SchemaRecovery {
-    let columns: Vec<SysColumn> = iter_syscolumns(store, model).collect();
+    let (columns, scan_stats) = scan_syscolumns(store, model);
     let tables = crate::iter_systable_entries(store, model).collect::<Vec<_>>();
 
     let catalog_row = tables.iter().find(|t| t.name == table_name);
@@ -301,6 +379,9 @@ pub fn recover_schema(store: &PageStore, model: &ApModel, table_name: &str) -> S
         from_backref: 0,
         from_sysobject: 0,
         columns: Vec::new(),
+        candidate_owners: Vec::new(),
+        catalog_col_count: catalog_row.and_then(|t| t.col_count),
+        scan_stats,
     };
 
     let mut bridge =
@@ -313,6 +394,7 @@ pub fn recover_schema(store: &PageStore, model: &ApModel, table_name: &str) -> S
     out.from_backref = bridge.from_backref;
     out.from_sysobject = bridge.from_sysobject;
 
+    out.candidate_owners = bridge.owners_for(table_name);
     // A name can attract more than one owner; take the owner with the
     // most recovered columns, lowest id first for determinism.
     let Some(owner) = bridge
@@ -349,6 +431,7 @@ struct SysColumnIter<'a> {
     pn: u64,
     n_pages: u64,
     buffer: Vec<SysColumn>,
+    stats: SyscolumnStats,
 }
 
 impl<'a> SysColumnIter<'a> {
@@ -359,6 +442,7 @@ impl<'a> SysColumnIter<'a> {
             pn: 1,
             n_pages: store.page_count(),
             buffer: Vec::new(),
+            stats: SyscolumnStats::default(),
         }
     }
 
@@ -377,7 +461,7 @@ impl<'a> SysColumnIter<'a> {
                 self.model.deobfuscate_with_store(raw, pn, self.store)
             };
             let mut found = Vec::new();
-            scan_page(&plain, pn, &mut found);
+            scan_page(&plain, pn, &mut found, &mut self.stats);
             for c in found.into_iter().rev() {
                 self.buffer.push(c);
             }
@@ -445,7 +529,7 @@ mod tests {
     fn parses_single_row_without_default() {
         let body = synth_row("account_id", None, 0x80000001, 3680, 1, 2, b'N', 4);
         let mut out = Vec::new();
-        parse_rows_in_body(&body, 42, &mut out);
+        parse_rows_in_body(&body, 42, &mut out, &mut SyscolumnStats::default());
         assert_eq!(out.len(), 1);
         let c = &out[0];
         assert_eq!(c.name, "account_id");
@@ -462,7 +546,7 @@ mod tests {
         let mut body = synth_row("amount_amt", None, 1, 100, 7, 2, b'Y', 8);
         body.extend(synth_row("memo", None, 2, 100, 8, 1, b'Y', 64));
         let mut out = Vec::new();
-        parse_rows_in_body(&body, 0, &mut out);
+        parse_rows_in_body(&body, 0, &mut out, &mut SyscolumnStats::default());
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].name, "amount_amt");
         assert_eq!(out[1].name, "memo");
@@ -473,7 +557,7 @@ mod tests {
     fn handles_underscore_and_digits_in_name() {
         let body = synth_row("col_42_xy", None, 0, 5, 1, 0, b'N', 1);
         let mut out = Vec::new();
-        parse_rows_in_body(&body, 0, &mut out);
+        parse_rows_in_body(&body, 0, &mut out, &mut SyscolumnStats::default());
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].name, "col_42_xy");
     }
@@ -485,7 +569,7 @@ mod tests {
         let mark = body.len() - 3;
         body[mark] = 0x00;
         let mut out = Vec::new();
-        parse_rows_in_body(&body, 0, &mut out);
+        parse_rows_in_body(&body, 0, &mut out, &mut SyscolumnStats::default());
         assert!(out.is_empty());
     }
 
@@ -493,7 +577,7 @@ mod tests {
     fn rejects_non_alpha_domain() {
         let body = synth_row("col", None, 0, 1, 1, 0, 0xFF, 4);
         let mut out = Vec::new();
-        parse_rows_in_body(&body, 0, &mut out);
+        parse_rows_in_body(&body, 0, &mut out, &mut SyscolumnStats::default());
         assert!(out.is_empty());
     }
 
@@ -503,7 +587,7 @@ mod tests {
         let mut body = vec![0xAA, 0xBB, 0xCC, 0xDD];
         body.extend(synth_row("real_name", None, 0, 1, 1, 0, b'N', 4));
         let mut out = Vec::new();
-        parse_rows_in_body(&body, 0, &mut out);
+        parse_rows_in_body(&body, 0, &mut out, &mut SyscolumnStats::default());
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].name, "real_name");
     }
@@ -521,6 +605,9 @@ mod tests {
             bridged_tables: 422,
             from_backref: 421,
             from_sysobject: 0,
+            candidate_owners: vec![3073],
+            catalog_col_count: None,
+            scan_stats: SyscolumnStats::default(),
             columns: ids
                 .iter()
                 .map(|id| SysColumn {
@@ -543,6 +630,17 @@ mod tests {
         assert_eq!(r.column_id_range(), Some((1, 4)));
         assert_eq!(r.missing_column_ids(), 0);
         assert!(!r.has_column_gaps());
+    }
+
+    #[test]
+    fn missing_leading_and_trailing_columns_are_seen_via_catalog_count() {
+        let mut r = recovery_with_ids(&[3, 4, 5]);
+        r.catalog_col_count = Some(6);
+        // ids 3..=5 have no holes, but the catalog declares 6 columns.
+        assert_eq!(r.missing_column_ids(), 0);
+        assert_eq!(r.columns_short_of_catalog(), Some(3));
+        r.catalog_col_count = None;
+        assert_eq!(r.columns_short_of_catalog(), None);
     }
 
     #[test]
@@ -578,5 +676,48 @@ mod tests {
         assert_eq!(r.column_id_range(), Some((1, 3)));
         assert_eq!(r.missing_column_ids(), 0);
         assert_eq!(r.implausible_column_ids(), 1);
+    }
+
+    fn parse_one(name: &str, default: Option<&str>) -> (Vec<SysColumn>, SyscolumnStats) {
+        let mut body = synth_row(name, default, 1, 77, 3, 0, b'N', 4);
+        body.extend_from_slice(&[0u8; 8]);
+        let mut out = Vec::new();
+        let mut stats = SyscolumnStats::default();
+        parse_rows_in_body(&body, 1, &mut out, &mut stats);
+        (out, stats)
+    }
+
+    #[test]
+    fn default_that_looks_like_a_name_is_ambiguous_not_a_wrong_name() {
+        // `09 is_active 01 Y <tag>`: `Y` is a valid 1-char name for the
+        // layout with no default, and `is_active` fits the layout with a
+        // 1-char default. Neither is chosen; the row is counted.
+        let (cols, stats) = parse_one("is_active", Some("Y"));
+        assert!(cols.is_empty());
+        assert_eq!((stats.tags_seen, stats.rows_ambiguous_name), (1, 1));
+    }
+
+    #[test]
+    fn defaults_of_any_length_are_peeled() {
+        // Digit-led defaults cannot be names, so the layout is unique.
+        for d in ["0", "12", "12345", "0123456789", "01234567890123456"] {
+            let (cols, stats) = parse_one("col_name", Some(d));
+            assert_eq!(cols.len(), 1, "default {d:?}");
+            assert_eq!(cols[0].name, "col_name", "default {d:?}");
+            assert_eq!(stats.rows_ambiguous_name, 0);
+        }
+    }
+
+    #[test]
+    fn skipped_rows_are_counted() {
+        // A tag with no identifier before it.
+        let mut body = vec![0xEEu8; 16];
+        body.extend_from_slice(&SYSCOLUMN_TAG);
+        body.extend_from_slice(&[0u8; 32]);
+        let mut out = Vec::new();
+        let mut stats = SyscolumnStats::default();
+        parse_rows_in_body(&body, 1, &mut out, &mut stats);
+        assert!(out.is_empty());
+        assert_eq!((stats.tags_seen, stats.rows_no_name), (1, 1));
     }
 }

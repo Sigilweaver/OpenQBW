@@ -8,6 +8,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Behavior changes
 
+- Line items take the nearest `04 00 10 <id>` item ID instead of the farthest
+  in the 96 bytes before the anchor, and their search windows stop at the
+  neighbouring records' anchors, so a record no longer reports the previous
+  record's item ID or date.
+- Transaction headers whose row holds more than one 16-character ID in the
+  header shape, and all headers on pages without a readable slot directory,
+  carry `RecordFlag::HeaderIdAmbiguous`.
+- `SYSTABLE` trailer fields (`col_count`, `data_root_page`, `last_page`) are no
+  longer read from the page trailer bytes at 0xFF0 and above; a row too close
+  to the end of the page data area gets `None` for fields that do not fit.
+- `SYSCOLUMN` name recovery tries every default-value length and requires the
+  default's length byte to agree. A column whose default value is itself a
+  valid identifier (for example `is_active` with default `Y`) is counted in
+  `SyscolumnStats::rows_ambiguous_name` and left out, where earlier versions
+  reported the default as the column name. Defaults of any length are
+  recognized. `scan_page` takes a `&mut SyscolumnStats`.
+- `SchemaRecovery` gains `candidate_owners`, `catalog_col_count`, `scan_stats`
+  and `columns_short_of_catalog()`. `openqbw schema` warns about columns
+  missing relative to the `SYSTABLE` count, owners that tied, and rows or pages
+  it could not read.
+- A `SYSOBJECT` owner whose candidate table names tie on votes is left
+  unbridged instead of taking an arbitrary one.
+- `build_fk_graph` returns an `FkGraph` and joins column owners to tables
+  through the owner bridge; columns that cannot be placed are counted
+  (`columns_unbridged`) instead of dropped, and `openqbw fkgraph` prints the
+  count. Earlier versions joined on `data_root_page`, which names unrelated
+  tables for most owners.
 - Opening a file checks the superblock magic, the version triple (3, 201.12)
   and the CRC-32 footer of every page. A file that is not a QuickBooks
   company file (a `.QBB`, a `.TLG`, any 4 KiB-aligned file), has another

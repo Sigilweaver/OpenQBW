@@ -142,7 +142,12 @@ fn scan_page(body: &[u8], pn: u64, source_table: &str, out: &mut Vec<Transaction
             txn_date_raw: scan.date,
             counter: scan.counter,
             date_source: scan.source,
-            flags: date_flags(scan.source),
+            flags: {
+                // Without row boundaries any candidate may be a foreign key.
+                let mut f = date_flags(scan.source);
+                f.push(RecordFlag::HeaderIdAmbiguous);
+                f
+            },
             page_number: pn,
             page_offset: pos,
         });
@@ -190,35 +195,39 @@ fn scan_page_slotted(
             continue;
         }
         let limit = row.len() - (HEADER_PREFIX.len() + QB_ID_LEN);
+        // Every `0E 00 10 <16 base62>` in the row is a candidate for the
+        // row's own ID; foreign keys have the same shape. The first is
+        // taken, and the row is flagged when there was more than one.
+        let mut candidates = Vec::new();
         let mut i = 0usize;
         while i <= limit {
-            if row[i] == HEADER_PREFIX[0]
-                && row[i + 1] == HEADER_PREFIX[1]
-                && row[i + 2] == HEADER_PREFIX[2]
-            {
-                let id_bytes = &row[i + 3..i + 3 + QB_ID_LEN];
-                if is_base62(id_bytes) {
-                    let qb_id = std::str::from_utf8(id_bytes)
-                        .expect("guarded by is_base62")
-                        .to_owned();
-                    let after = i + 3 + QB_ID_LEN;
-                    let scan = find_date_counter(row, after);
-                    out.push(TransactionHeader {
-                        qb_id,
-                        source_table: source_table.to_owned(),
-                        txn_date_raw: scan.date,
-                        counter: scan.counter,
-                        date_source: scan.source,
-                        flags: date_flags(scan.source),
-                        page_number: pn,
-                        page_offset: slot_off as usize + i,
-                    });
-                    added += 1;
-                    break;
-                }
+            if row[i..i + 3] == HEADER_PREFIX && is_base62(&row[i + 3..i + 3 + QB_ID_LEN]) {
+                candidates.push(i);
+                i += 3 + QB_ID_LEN;
+            } else {
+                i += 1;
             }
-            i += 1;
         }
+        let Some(&first) = candidates.first() else {
+            continue;
+        };
+        let qb_id = String::from_utf8_lossy(&row[first + 3..first + 3 + QB_ID_LEN]).into_owned();
+        let scan = find_date_counter(row, first + 3 + QB_ID_LEN);
+        let mut flags = date_flags(scan.source);
+        if candidates.len() > 1 {
+            flags.push(RecordFlag::HeaderIdAmbiguous);
+        }
+        out.push(TransactionHeader {
+            qb_id,
+            source_table: source_table.to_owned(),
+            txn_date_raw: scan.date,
+            counter: scan.counter,
+            date_source: scan.source,
+            flags,
+            page_number: pn,
+            page_offset: slot_off as usize + first,
+        });
+        added += 1;
     }
     Some(added)
 }
@@ -478,6 +487,37 @@ mod tests {
         let mut want = qb_ids.clone();
         want.sort();
         assert_eq!(got, want);
+    }
+
+    #[test]
+    fn row_with_two_id_shaped_strings_is_flagged() {
+        // Row 0 holds its own ID and then a foreign key in the same shape.
+        let mut bodies: Vec<Vec<u8>> = Vec::new();
+        for i in 0..8 {
+            let mut body = vec![0u8; 96];
+            body[0..3].copy_from_slice(&HEADER_PREFIX);
+            body[3..19].copy_from_slice(format!("00000000000{:05}", i + 1000).as_bytes());
+            if i == 0 {
+                body[40..43].copy_from_slice(&HEADER_PREFIX);
+                body[43..59].copy_from_slice(b"FOREIGNKEYFOREIG");
+            }
+            bodies.push(body);
+        }
+        let rows: Vec<(u16, &[u8])> = bodies
+            .iter()
+            .enumerate()
+            .map(|(i, b)| (0x800 + (i as u16) * 96, b.as_slice()))
+            .collect();
+        let page = build_slotted_page(&rows);
+        let mut out = Vec::new();
+        scan_page_slotted(&page, 1, "abmc_invoice_header", &mut out).unwrap();
+        assert_eq!(out.len(), 8);
+        let flagged: Vec<_> = out
+            .iter()
+            .filter(|h| h.flags.contains(&RecordFlag::HeaderIdAmbiguous))
+            .collect();
+        assert_eq!(flagged.len(), 1);
+        assert_eq!(flagged[0].qb_id, "0000000000001000");
     }
 
     #[test]

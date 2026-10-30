@@ -335,6 +335,41 @@ fn run_schema(input: PathBuf, table: String) -> Result<()> {
             last
         );
     }
+    if let Some(short) = found.columns_short_of_catalog()
+        && short > 0
+    {
+        eprintln!(
+            "warning: SYSTABLE declares {} columns for {}, {} more than were recovered, so the \
+             listing below is incomplete",
+            found.catalog_col_count.unwrap_or_default(),
+            table,
+            short
+        );
+    }
+    if found.candidate_owners.len() > 1 {
+        eprintln!(
+            "warning: {} SYSCOLUMN owners resolved to {}: {:?}; the one with the most columns \
+             was listed",
+            found.candidate_owners.len(),
+            table,
+            found.candidate_owners
+        );
+    }
+    let st = &found.scan_stats;
+    let unread = st.rows_no_name + st.rows_ambiguous_name + st.rows_bad_layout;
+    if unread > 0 || st.pages_without_directory > 0 {
+        eprintln!(
+            "warning: SYSCOLUMN scan: {} of {} rows not read ({} without a name, {} with an \
+             ambiguous name, {} with an unexpected layout); {} pages skipped for lack of a \
+             slot directory",
+            unread,
+            st.tags_seen,
+            st.rows_no_name,
+            st.rows_ambiguous_name,
+            st.rows_bad_layout,
+            st.pages_without_directory
+        );
+    }
     if found.implausible_column_ids() > 0 {
         eprintln!(
             "warning: {} row(s) below carry an implausible column_id and are likely \
@@ -394,8 +429,9 @@ fn schema_miss_report(found: &openqbw::SchemaRecovery) -> String {
 fn run_fkgraph(input: PathBuf, resolved_only: bool) -> Result<()> {
     let store = open_checked(&input)?;
     let model = ApModel::learn(&store);
-    let edges = openqbw::build_fk_graph(&store, &model);
-    let s = openqbw::fk_graph_stats(&edges);
+    let graph = openqbw::build_fk_graph(&store, &model);
+    let s = openqbw::fk_graph_stats(&graph);
+    let edges = &graph.edges;
     println!(
         "edges={}  resolved={}  strong(>=900)={}  resolved_rate={:.1}%",
         s.edges,
@@ -407,11 +443,17 @@ fn run_fkgraph(input: PathBuf, resolved_only: bool) -> Result<()> {
             100.0 * s.resolved as f64 / s.edges as f64
         }
     );
+    if s.columns_unbridged > 0 {
+        eprintln!(
+            "warning: {} of {} *_id columns belong to a table that could not be named and are not in the graph",
+            s.columns_unbridged, graph.columns_considered
+        );
+    }
     println!(
         "{:<40}  {:>4}  {:<28}  {:<40}  {:>5}",
         "source_table", "col", "source_column", "target_table", "score"
     );
-    for e in &edges {
+    for e in edges {
         if resolved_only && e.target_table.is_none() {
             continue;
         }

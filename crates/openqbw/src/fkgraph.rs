@@ -13,11 +13,9 @@
 //! Results are heuristic; an unresolved edge is still surfaced with
 //! `target_table = None` so callers can audit it.
 
-use std::collections::BTreeMap;
-
 use opensqlany::{ApModel, PageStore};
 
-use crate::{SysColumn, SysTableEntry, iter_syscolumns};
+use crate::{SysColumn, SysTableEntry};
 
 /// One inferred foreign-key edge.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,33 +76,48 @@ fn match_score(stem: &str, table: &str) -> u32 {
     0
 }
 
+/// Result of [`build`]: the edges and how many candidate columns could not
+/// be placed in a table.
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct FkGraph {
+    /// Inferred edges, sorted by (source_table, source_column_id).
+    pub edges: Vec<FkEdge>,
+    /// `*_id` columns considered.
+    pub columns_considered: usize,
+    /// Of those, columns whose owner could not be bridged to a table name
+    /// and so produced no edge.
+    pub columns_unbridged: usize,
+}
+
 /// Build a heuristic FK edge list from the parsed SYSTABLE + SYSCOLUMN
-/// catalogs. The list is sorted by (source_table, source_column_id).
-pub fn build(store: &PageStore, model: &ApModel) -> Vec<FkEdge> {
+/// catalogs. Column owners are bridged to table names with the same
+/// owner bridge `schema` uses ([`crate::owner_bridge`]); columns that do
+/// not bridge are counted in [`FkGraph::columns_unbridged`].
+pub fn build(store: &PageStore, model: &ApModel) -> FkGraph {
     let tables: Vec<SysTableEntry> = crate::collect_unique(store, model);
-    // Map data_root_page -> name so we can name each SYSCOLUMN owner.
-    let mut name_by_root: BTreeMap<u32, String> = BTreeMap::new();
-    for t in &tables {
-        if let Some(root) = t.data_root_page {
-            name_by_root.entry(root).or_insert(t.name.clone());
-        }
-    }
+    let (columns, _stats) = crate::scan_syscolumns(store, model);
+    let mut bridge =
+        crate::owner_bridge::bridge_owners_via_backref(store, model, &columns, &tables);
+    crate::owner_bridge::extend_with_sysobject(&mut bridge, store, model, &columns, &tables);
     let table_names: Vec<String> = tables.iter().map(|t| t.name.clone()).collect();
 
-    let mut edges: Vec<FkEdge> = Vec::new();
-    for c in iter_syscolumns(store, model) {
+    let mut graph = FkGraph::default();
+    for c in &columns {
         let Some(stem) = strip_id_suffix(&c.name) else {
             continue;
         };
         if stem.is_empty() {
             continue;
         }
-        let Some(src) = name_by_root.get(&c.owner_object_id) else {
+        graph.columns_considered += 1;
+        let Some(src) = bridge.table_for(c.owner_object_id) else {
+            graph.columns_unbridged += 1;
             continue;
         };
         let (best, score) = pick_best(stem, &table_names);
-        edges.push(FkEdge {
-            source_table: src.clone(),
+        graph.edges.push(FkEdge {
+            source_table: src.to_owned(),
             source_column: c.name.clone(),
             source_column_id: c.column_id,
             stem: stem.to_owned(),
@@ -112,17 +125,17 @@ pub fn build(store: &PageStore, model: &ApModel) -> Vec<FkEdge> {
             score,
         });
     }
-    edges.sort_by(|a, b| {
+    graph.edges.sort_by(|a, b| {
         a.source_table
             .cmp(&b.source_table)
             .then(a.source_column_id.cmp(&b.source_column_id))
     });
-    edges.dedup_by(|a, b| {
+    graph.edges.dedup_by(|a, b| {
         a.source_table == b.source_table
             && a.source_column == b.source_column
             && a.source_column_id == b.source_column_id
     });
-    edges
+    graph
 }
 
 fn pick_best(stem: &str, tables: &[String]) -> (Option<String>, u32) {
@@ -144,7 +157,10 @@ fn pick_best(stem: &str, tables: &[String]) -> (Option<String>, u32) {
 
 /// Summary of edge resolution rates.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct FkGraphStats {
+    /// `*_id` columns whose owner did not bridge to a table.
+    pub columns_unbridged: usize,
     /// Total inferred edges.
     pub edges: usize,
     /// Edges with a resolved target table.
@@ -154,8 +170,10 @@ pub struct FkGraphStats {
 }
 
 /// Compute simple counts over an edge set.
-pub fn stats(edges: &[FkEdge]) -> FkGraphStats {
+pub fn stats(graph: &FkGraph) -> FkGraphStats {
+    let edges = &graph.edges;
     FkGraphStats {
+        columns_unbridged: graph.columns_unbridged,
         edges: edges.len(),
         resolved: edges.iter().filter(|e| e.target_table.is_some()).count(),
         strong: edges.iter().filter(|e| e.score >= 900).count(),
