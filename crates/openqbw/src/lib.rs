@@ -21,12 +21,14 @@ mod attribution_content;
 mod attribution_schema;
 mod bv_recovery;
 mod date;
+mod error;
 mod fkgraph;
 mod lineitem;
 mod nullability;
 mod opaque;
 mod owner_bridge;
 mod page_attribution;
+mod scan;
 mod syscolumn;
 mod sysindex;
 mod sysobject;
@@ -46,10 +48,11 @@ pub use date::{
     SA_DAY_MAX_PLAUSIBLE, SA_DAY_MIN_PLAUSIBLE, sa_day_to_unix_day, sa_day_to_unix_seconds,
     unix_day_to_sa_day,
 };
+pub use error::{Error, ErrorKind, Result};
 pub use fkgraph::{FkEdge, FkGraphStats, build as build_fk_graph, stats as fk_graph_stats};
 pub use lineitem::{
-    AmountType, DATE_EPOCH_DAYS_BEFORE_UNIX, LineItem, LineItemError, iter_lineitems,
-    iter_lineitems_with_attribution,
+    AmountEncoding, AmountType, DATE_EPOCH_DAYS_BEFORE_UNIX, LineItem, iter_lineitems,
+    iter_lineitems_with_attribution, scan_lineitems,
 };
 pub use nullability::{NullsFlagBucket, histogram as nulls_flag_histogram};
 pub use opaque::{OPAQUE_ENTROPY_THRESHOLD, is_opaque_high_entropy};
@@ -58,6 +61,7 @@ pub use owner_bridge::{
     DEFAULT_BACKREF_DISTANCE, OwnerBridge, bridge_owners_via_backref, extend_with_sysobject,
 };
 pub use page_attribution::{AttributionGap, PageAttribution};
+pub use scan::{RecordFlag, ScanOptions, ScanResult, ScanWarning, Strictness};
 pub use syscolumn::{
     SYSCOLUMN_TAG, SchemaRecovery, SysColumn, collect_unique as collect_unique_syscolumns,
     iter_syscolumns, recover_schema, scan_page as scan_syscolumn_page, schema_for,
