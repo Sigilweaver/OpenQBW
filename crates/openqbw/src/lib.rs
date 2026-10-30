@@ -45,8 +45,8 @@ pub use bv_recovery::{
     recover_bv_brute, recover_bv_qb_data,
 };
 pub use date::{
-    SA_DAY_MAX_PLAUSIBLE, SA_DAY_MIN_PLAUSIBLE, sa_day_to_unix_day, sa_day_to_unix_seconds,
-    unix_day_to_sa_day,
+    DateSource, SA_DAY_MAX_PLAUSIBLE, SA_DAY_MIN_PLAUSIBLE, sa_day_to_unix_day,
+    sa_day_to_unix_seconds, unix_day_to_sa_day,
 };
 pub use error::{Error, ErrorKind, Result};
 pub use fkgraph::{FkEdge, FkGraphStats, build as build_fk_graph, stats as fk_graph_stats};
@@ -74,4 +74,6 @@ pub use sysobject::{SYSOBJECT_NAME_OFFSET, bridge_owners_to_tables};
 pub use systable::{
     SysTableEntry, collect_unique, iter_systable_entries, scan_page as scan_systable_page,
 };
-pub use transaction_header::{TransactionHeader, iter_transaction_headers};
+pub use transaction_header::{
+    TransactionHeader, iter_transaction_headers, scan_transaction_headers,
+};

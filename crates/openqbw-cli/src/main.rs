@@ -18,8 +18,8 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use openqbw::{
     AmountType, AttributionGap, ContentAttribution, CrossValidation, LineItem, PageAttribution,
-    ScanOptions, ScanWarning, SysIndexEntry, SysTableEntry, TransactionHeader,
-    iter_transaction_headers, scan_lineitems,
+    ScanOptions, ScanWarning, SysIndexEntry, SysTableEntry, TransactionHeader, scan_lineitems,
+    scan_transaction_headers,
 };
 use opensqlany::{ApModel, PageStore};
 use rusqlite::{Connection, Transaction, params};
@@ -227,11 +227,11 @@ fn run_export(input: PathBuf, output: PathBuf, lenient: bool) -> Result<ExportSt
     let attribution = PageAttribution::build(&store, &model);
     warn_on_attribution_gap(&attribution);
 
-    let (mut items, rejected) = collect_lineitems(&store, &model, &attribution, lenient)?;
+    let (mut items, mut rejected) = collect_lineitems(&store, &model, &attribution, lenient)?;
     items.sort_by_key(|li| (li.page_number, li.page_offset));
 
-    let mut headers: Vec<TransactionHeader> =
-        iter_transaction_headers(&store, &model, &attribution).collect();
+    let (mut headers, header_warnings) = collect_headers(&store, &model, &attribution, lenient)?;
+    rejected.extend(header_warnings);
     headers.sort_by_key(|h| (h.page_number, h.page_offset));
 
     let mut conn = Connection::open(&output).with_context(|| format!("opening {:?}", output))?;
@@ -778,6 +778,7 @@ fn create_schema(conn: &Connection) -> Result<()> {
             source_table TEXT NOT NULL,
             txn_date_raw INTEGER,
             counter      INTEGER,
+            date_source  TEXT NOT NULL,
             line_count   INTEGER NOT NULL,
             -- NULL when any line's amount is not decoded (see unresolved_lines).
             total_cents  INTEGER,
@@ -799,6 +800,9 @@ fn create_schema(conn: &Connection) -> Result<()> {
             amount_raw_hex      TEXT NOT NULL,
             txn_date_raw        INTEGER,
             counter             INTEGER,
+            date_source         TEXT NOT NULL,
+            -- Comma-separated record flags; empty when none.
+            flags               TEXT NOT NULL,
             source_table        TEXT NOT NULL,
             page_number         INTEGER NOT NULL,
             page_offset         INTEGER NOT NULL,
@@ -842,9 +846,9 @@ fn insert_transaction_headers(
     }
     let mut stmt = tx.prepare(
         "INSERT INTO transactions \
-         (qb_id, type, source_table, txn_date_raw, counter, \
+         (qb_id, type, source_table, txn_date_raw, counter, date_source, \
           line_count, total_cents, has_deferred, unresolved_lines, source_page) \
-         VALUES (?, ?, ?, ?, ?, 0, 0, 0, 0, ?)",
+         VALUES (?, ?, ?, ?, ?, ?, 0, 0, 0, 0, ?)",
     )?;
     let mut ordered: Vec<&TransactionHeader> = map.values().collect();
     ordered.sort_by_key(|h| (h.page_number, h.page_offset));
@@ -855,6 +859,7 @@ fn insert_transaction_headers(
             h.source_table,
             h.txn_date_raw,
             h.counter,
+            h.date_source.as_str(),
             h.page_number as i64,
         ])?;
     }
@@ -887,9 +892,9 @@ fn insert_synthesized_transactions(
     )?;
     let mut insert_stmt = tx.prepare(
         "INSERT INTO transactions \
-         (qb_id, type, source_table, txn_date_raw, counter, \
+         (qb_id, type, source_table, txn_date_raw, counter, date_source, \
           line_count, total_cents, has_deferred, unresolved_lines, source_page) \
-         VALUES (?, 'unknown', ?, ?, ?, ?, ?, ?, ?, ?)",
+         VALUES (?, 'unknown', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )?;
     for qb_id in order {
         let lines = &groups[&qb_id];
@@ -909,6 +914,12 @@ fn insert_synthesized_transactions(
         }
         let date = lines.iter().find_map(|l| l.txn_date_raw);
         let counter = lines.iter().find_map(|l| l.counter);
+        let date_source = lines
+            .iter()
+            .find(|l| l.txn_date_raw.is_some())
+            .or(lines.first())
+            .map(|l| l.date_source)
+            .unwrap_or(openqbw::DateSource::NotFound);
         let src = lines
             .iter()
             .find_map(|l| l.source_table.clone())
@@ -919,6 +930,7 @@ fn insert_synthesized_transactions(
             src,
             date,
             counter,
+            date_source.as_str(),
             line_count,
             total,
             has_deferred,
@@ -933,9 +945,9 @@ fn insert_transaction_line_items(tx: &Transaction<'_>, items: &[LineItem]) -> Re
     let mut stmt = tx.prepare(
         "INSERT INTO transaction_line_items \
          (qb_id_parent, line_number, item_qb_id, amount_type, amount_cents, \
-          amount_encoding, amount_raw_u24_cents, amount_raw_hex, txn_date_raw, counter, \
-          source_table, page_number, page_offset) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          amount_encoding, amount_raw_u24_cents, amount_raw_hex, txn_date_raw, counter, date_source, \
+          flags, source_table, page_number, page_offset) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )?;
     let mut line_no: BTreeMap<(String, String), i64> = BTreeMap::new();
     for li in items {
@@ -960,6 +972,8 @@ fn insert_transaction_line_items(tx: &Transaction<'_>, items: &[LineItem]) -> Re
             hex,
             li.txn_date_raw,
             li.counter,
+            li.date_source.as_str(),
+            flags_csv(li),
             src,
             li.page_number as i64,
             li.page_offset as i64,
@@ -970,6 +984,14 @@ fn insert_transaction_line_items(tx: &Transaction<'_>, items: &[LineItem]) -> Re
 
 /// Undecoded unsigned reading of the three amount bytes of a type 1 or 2
 /// amount, kept in the export so `verify` can compare against its baseline.
+fn flags_csv(li: &LineItem) -> String {
+    li.flags
+        .iter()
+        .map(|f| f.as_str())
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 fn raw_u24_cents(li: &LineItem) -> Option<i64> {
     let r = li.amount_raw;
     matches!(r[0], 1 | 2).then(|| r[1] as i64 | (r[2] as i64) << 8 | (r[3] as i64) << 16)
@@ -988,6 +1010,31 @@ fn insert_scan_rejections(tx: &Transaction<'_>, rejected: &[ScanWarning]) -> Res
         ])?;
     }
     Ok(())
+}
+
+/// Scan all transaction headers. Same strict and lenient behavior as
+/// [`collect_lineitems`].
+fn collect_headers(
+    store: &PageStore,
+    model: &ApModel,
+    attribution: &PageAttribution,
+    lenient: bool,
+) -> Result<(Vec<TransactionHeader>, Vec<ScanWarning>)> {
+    let scan = scan_transaction_headers(
+        store,
+        model,
+        attribution,
+        &if lenient {
+            ScanOptions::lenient()
+        } else {
+            ScanOptions::strict()
+        },
+    )
+    .context("scanning transaction headers (use --lenient to skip failing pages and list them)")?;
+    for w in &scan.warnings {
+        eprintln!("warning: {w}");
+    }
+    Ok((scan.items, scan.warnings))
 }
 
 /// Scan all line items. Strict mode stops at the first undecodable record.
@@ -1116,10 +1163,10 @@ fn collect_records(input: &PathBuf, lenient: bool) -> Result<Records> {
     let model = ApModel::learn(&store);
     let attribution = PageAttribution::build(&store, &model);
     warn_on_attribution_gap(&attribution);
-    let (mut items, rejected) = collect_lineitems(&store, &model, &attribution, lenient)?;
+    let (mut items, mut rejected) = collect_lineitems(&store, &model, &attribution, lenient)?;
     items.sort_by_key(|li| (li.page_number, li.page_offset));
-    let mut headers: Vec<TransactionHeader> =
-        iter_transaction_headers(&store, &model, &attribution).collect();
+    let (mut headers, header_warnings) = collect_headers(&store, &model, &attribution, lenient)?;
+    rejected.extend(header_warnings);
     headers.sort_by_key(|h| (h.page_number, h.page_offset));
     Ok(Records {
         items,
@@ -1209,14 +1256,20 @@ fn run_migrate_csv(input: PathBuf, out: PathBuf, lenient: bool) -> Result<()> {
 
     // transactions.csv
     let mut txf = std::fs::File::create(out.join("transactions.csv"))?;
-    writeln!(txf, "qb_id,txn_type,source_table,page_number,page_offset")?;
+    writeln!(
+        txf,
+        "qb_id,txn_type,source_table,txn_date_raw,counter,date_source,page_number,page_offset"
+    )?;
     for h in &headers {
         writeln!(
             txf,
-            "{},{},{},{},{}",
+            "{},{},{},{},{},{},{},{}",
             csv_field(&h.qb_id),
             csv_field(h.txn_type()),
             csv_field(&h.source_table),
+            h.txn_date_raw.map(|d| d.to_string()).unwrap_or_default(),
+            h.counter.map(|c| c.to_string()).unwrap_or_default(),
+            h.date_source.as_str(),
             h.page_number,
             h.page_offset,
         )?;
@@ -1226,20 +1279,22 @@ fn run_migrate_csv(input: PathBuf, out: PathBuf, lenient: bool) -> Result<()> {
     let mut lif = std::fs::File::create(out.join("lineitems.csv"))?;
     writeln!(
         lif,
-        "invoice_id,item_qb_id,amount_cents,amount_encoding,amount_decimal,txn_date,source_table,page_number,page_offset"
+        "invoice_id,item_qb_id,amount_cents,amount_encoding,amount_decimal,txn_date,date_source,flags,source_table,page_number,page_offset"
     )?;
     for li in &items {
         let amt = li.amount_cents.map(|c| c.to_string()).unwrap_or_default();
         let dec = li.amount_cents.map(format_cents).unwrap_or_default();
         writeln!(
             lif,
-            "{},{},{},{},{},{},{},{},{}",
+            "{},{},{},{},{},{},{},{},{},{},{}",
             csv_field(&li.invoice_id),
             csv_field(li.item_qb_id.as_deref().unwrap_or("")),
             amt,
             li.amount_encoding.as_str(),
             dec,
             lineitem_date(li),
+            li.date_source.as_str(),
+            csv_field(&flags_csv(li)),
             csv_field(li.source_table.as_deref().unwrap_or("")),
             li.page_number,
             li.page_offset,
@@ -1440,9 +1495,9 @@ fn run_forensics(input: PathBuf, lenient: bool) -> Result<()> {
     println!("tables total: {}", tables.len());
     println!("tables user : {}", user_tables.len());
 
-    let (items, rejected) = collect_lineitems(&store, &model, &attribution, lenient)?;
-    let headers: Vec<TransactionHeader> =
-        iter_transaction_headers(&store, &model, &attribution).collect();
+    let (items, mut rejected) = collect_lineitems(&store, &model, &attribution, lenient)?;
+    let (headers, header_warnings) = collect_headers(&store, &model, &attribution, lenient)?;
+    rejected.extend(header_warnings);
 
     println!();
     println!("=== business records ===");

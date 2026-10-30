@@ -25,6 +25,7 @@ use crate::page_attribution::PageAttribution;
 use crate::scan::{RecordFlag, ScanOptions, ScanResult, ScanWarning};
 
 pub use crate::date::DATE_EPOCH_DAYS_BEFORE_UNIX;
+use crate::date::{DateSource, sa_day_to_unix_day, scan_date_counter};
 
 const PAGE_DATA_END: usize = 0xFF0;
 const ANCHOR_LEN: usize = 25;
@@ -146,10 +147,14 @@ pub struct LineItem {
     pub amount_cents: Option<i64>,
     /// Raw 4 bytes immediately following the float32(1.0) quantity.
     pub amount_raw: [u8; 4],
-    /// SA17 transaction date stored as days since 1981-01-01, when discovered.
+    /// SA17 transaction date (SA-day), set only when `date_source` is
+    /// [`DateSource::WindowScan`].
     pub txn_date_raw: Option<u32>,
-    /// SA17 transaction counter, when discovered.
+    /// SA17 transaction counter, set under the same condition.
     pub counter: Option<u32>,
+    /// How `txn_date_raw` was found. `NotFound` and `Ambiguous` leave the
+    /// date and counter unset.
+    pub date_source: DateSource,
     /// Owning `SYSTABLE` name (e.g. `abmc_invoice_inventory_lineitem`) when
     /// the line item's page was attributable. Populated by
     /// [`iter_lineitems_with_attribution`]; `None` otherwise.
@@ -184,6 +189,7 @@ impl LineItem {
             amount_raw: [0; 4],
             txn_date_raw: None,
             counter: None,
+            date_source: DateSource::NotFound,
             source_table: source_table.map(str::to_owned),
             flags: Vec::new(),
         }
@@ -211,13 +217,12 @@ impl LineItem {
         }
     }
 
-    /// Convert the SA17 transaction date to days since the Unix epoch (1970-01-01).
-    /// Returns `None` if the raw date is missing or implausible (over ~30k days
-    /// past the SA epoch).
+    /// Convert the SA17 transaction date to days since the Unix epoch
+    /// (1970-01-01) with the crate's epoch offset (see [`crate::date`]).
+    /// Returns `None` if the raw date is missing or outside the plausible
+    /// SA-day range.
     pub fn txn_date_days_since_unix(&self) -> Option<i64> {
-        self.txn_date_raw
-            .filter(|&d| d > 0 && d < 30_000)
-            .map(|d| d as i64 - DATE_EPOCH_DAYS_BEFORE_UNIX)
+        self.txn_date_raw.and_then(sa_day_to_unix_day)
     }
 }
 
@@ -409,20 +414,8 @@ fn parse_anchor(body: &[u8], pn: u64, anchor_start: usize) -> Result<LineItem, E
         });
     };
 
-    // Forward search for date+counter pair: SA date as u32 LE in 13000..20000,
-    // followed by 4-byte counter > 0.
-    let mut txn_date_raw = None;
-    let mut counter = None;
-    let end = (payload_start + 64).min(body.len().saturating_sub(8));
-    for off in (payload_start + 4)..end {
-        let d = u32::from_le_bytes([body[off], body[off + 1], body[off + 2], body[off + 3]]);
-        let c = u32::from_le_bytes([body[off + 4], body[off + 5], body[off + 6], body[off + 7]]);
-        if (13_000..20_000).contains(&d) && c > 0 && c < 1_000_000 {
-            txn_date_raw = Some(d);
-            counter = Some(c);
-            break;
-        }
-    }
+    // Forward search for a date+counter pair after the amount bytes.
+    let scan = scan_date_counter(body, payload_start + 4, payload_start + 64, 1_000_000);
 
     // Backward search for item QB-ID prefixed by `04 00 10`.
     let mut item_qb_id = None;
@@ -447,12 +440,16 @@ fn parse_anchor(body: &[u8], pn: u64, anchor_start: usize) -> Result<LineItem, E
         amount_encoding: AmountEncoding::Unconfirmed,
         amount_cents: None,
         amount_raw,
-        txn_date_raw,
-        counter,
+        txn_date_raw: scan.date,
+        counter: scan.counter,
+        date_source: scan.source,
         source_table: None,
         flags: Vec::new(),
     };
     li.set_source_table(None);
+    if li.date_source == DateSource::Ambiguous {
+        li.flags.push(RecordFlag::DateAmbiguous);
+    }
     Ok(li)
 }
 
@@ -561,6 +558,7 @@ mod tests {
         assert_eq!(li.amount_raw, [0x02, 0x40, 0x0F, 0x04]);
         assert_eq!(li.txn_date_raw, Some(15511));
         assert_eq!(li.counter, Some(12671));
+        assert_eq!(li.date_source, DateSource::WindowScan);
         // No source table: the reading is not established, so no amount.
         assert_eq!(li.amount_encoding, AmountEncoding::Unconfirmed);
         assert_eq!(li.amount_cents, None);
@@ -605,6 +603,32 @@ mod tests {
             li.set_source_table(Some(AmountEncoding::INVOICE_TABLE.to_owned()));
             assert_eq!(li.amount_cents, None, "type {first:#x}");
         }
+    }
+
+    #[test]
+    fn date_after_2013_is_found() {
+        let mut body = anchor_body(PAGE_DATA_END, 32, &[0x02, 0x40, 0x0F, 0x04]);
+        let p = 32 + ANCHOR_LEN;
+        // SA-day 23817 is unix day 19800 (2024) under the crate's offset.
+        body[p + 8..p + 12].copy_from_slice(&23_817u32.to_le_bytes());
+        body[p + 12..p + 16].copy_from_slice(&500u32.to_le_bytes());
+        let li = scan_one(&body).unwrap();
+        assert_eq!(li.txn_date_raw, Some(23_817));
+        assert_eq!(li.txn_date_days_since_unix(), Some(19_800));
+    }
+
+    #[test]
+    fn two_date_pairs_leave_the_date_unset() {
+        let mut body = anchor_body(PAGE_DATA_END, 32, &[0x02, 0x40, 0x0F, 0x04]);
+        let p = 32 + ANCHOR_LEN;
+        body[p + 8..p + 12].copy_from_slice(&23_817u32.to_le_bytes());
+        body[p + 12..p + 16].copy_from_slice(&500u32.to_le_bytes());
+        body[p + 24..p + 28].copy_from_slice(&15_000u32.to_le_bytes());
+        body[p + 28..p + 32].copy_from_slice(&7u32.to_le_bytes());
+        let li = scan_one(&body).unwrap();
+        assert_eq!(li.date_source, DateSource::Ambiguous);
+        assert!(li.flags.contains(&RecordFlag::DateAmbiguous));
+        assert_eq!(li.txn_date_raw, None);
     }
 
     #[test]
