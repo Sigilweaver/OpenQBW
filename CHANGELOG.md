@@ -8,6 +8,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Behavior changes
 
+- Opening a file checks the superblock magic, the version triple (3, 201.12)
+  and the CRC-32 footer of every page. A file that is not a QuickBooks
+  company file (a `.QBB`, a `.TLG`, any 4 KiB-aligned file), has another
+  version, or has a damaged page now fails to open with a specific error
+  instead of exporting zero or spurious records. The CLI and Python
+  `openqbw.open()` use `openqbw::open_store`; Python raises `FormatError`.
+- Line-item scans count pages whose body is indistinguishable from random
+  bytes. When more than half of the data pages are opaque (as in a
+  password-protected file) the scan fails with `ContentOpaque`; otherwise
+  the count is reported as a `ScanWarning::OpaquePages` (CLI stderr, Python
+  `UserWarning`). The 50% threshold has not been measured on a corpus.
+- Python `open()` issues a `UserWarning` when page-to-table attribution is
+  unavailable, and `Reader.attribution_gap` names the reason.
+- `Reader.file_size` and `openqbw forensics` report the size of the opened
+  store instead of 0 when file metadata cannot be read.
 - Line-item and header dates are found in a wider window (SA-days
   10000..=40000, was 13000..20000, which stopped at Oct 2013), so records
   dated after Oct 2013 now have a date. When two separate date/counter pairs

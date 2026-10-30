@@ -6,9 +6,9 @@
 #![allow(clippy::useless_conversion)] // pyo3 macro expansions can trigger this on newer clippy
 
 use openqbw_rs::{
-    collect_unique as collect_unique_systable, collect_unique_sysindex, scan_lineitems,
-    scan_transaction_headers, PageAttribution, ScanOptions, ScanWarning, SysIndexEntry,
-    SysTableEntry,
+    collect_unique as collect_unique_systable, collect_unique_sysindex, open_store, scan_lineitems,
+    scan_transaction_headers, OpenOptions, PageAttribution, ScanOptions, ScanWarning,
+    SysIndexEntry, SysTableEntry,
 };
 use opensqlany::{ApModel, PageStore};
 use pyo3::exceptions::{PyIOError, PyValueError};
@@ -190,6 +190,13 @@ impl Reader {
         self.path.display().to_string()
     }
 
+    /// Why page-to-table attribution is unavailable (`"NoCatalogRows"` or
+    /// `"AllRootsZeroed"`), or `None` when it is available.
+    #[getter]
+    fn attribution_gap(&self) -> Option<String> {
+        self.attribution.gap().map(|g| format!("{g:?}"))
+    }
+
     /// Number of pages in the underlying page-store.
     #[getter]
     fn page_count(&self) -> u64 {
@@ -199,7 +206,7 @@ impl Reader {
     /// File size in bytes.
     #[getter]
     fn file_size(&self) -> u64 {
-        std::fs::metadata(&self.path).map(|m| m.len()).unwrap_or(0)
+        self.store.size_bytes()
     }
 
     fn __repr__(&self) -> String {
@@ -321,12 +328,26 @@ impl Reader {
 }
 
 /// Open a QBW file and return a `Reader`.
+///
+/// Raises `OSError` when the file cannot be read and `FormatError` when it
+/// is not a supported QuickBooks company file (bad magic, unsupported
+/// version, or a page that fails its CRC check). Issues a `UserWarning`
+/// when page-to-table attribution is unavailable; see
+/// `Reader.attribution_gap`.
 #[pyfunction]
-fn open(path: PathBuf) -> PyResult<Reader> {
-    let store = PageStore::open(&path)
-        .map_err(|e| PyIOError::new_err(format!("opening {:?}: {e}", path)))?;
+fn open(py: Python<'_>, path: PathBuf) -> PyResult<Reader> {
+    let store = open_store(&path, &OpenOptions::default()).map_err(|e| to_py_err(py, &e))?;
     let model = ApModel::learn(&store);
     let attribution = PageAttribution::build(&store, &model);
+    if let Some(gap) = attribution.gap() {
+        warn_user(
+            py,
+            &format!(
+                "openqbw: page-to-table attribution is unavailable ({gap:?}); \
+                 line items have no source_table and transactions are empty"
+            ),
+        )?;
+    }
     Ok(Reader {
         path,
         store: Arc::new(store),

@@ -80,6 +80,14 @@ impl RecordFlag {
 pub enum ScanWarning {
     /// A line-item record was skipped.
     RecordSkipped(Error),
+    /// Some `E` pages are indistinguishable from random bytes and were not
+    /// decoded (compressed or separately encrypted blobs).
+    OpaquePages {
+        /// Opaque `E` pages.
+        opaque: u64,
+        /// All `E` pages.
+        extent: u64,
+    },
 }
 
 impl ScanWarning {
@@ -87,6 +95,7 @@ impl ScanWarning {
     pub fn location(&self) -> (Option<u64>, Option<usize>) {
         match self {
             Self::RecordSkipped(e) => (e.page_number(), e.page_offset()),
+            Self::OpaquePages { .. } => (None, None),
         }
     }
 }
@@ -96,6 +105,7 @@ impl ScanWarning {
     pub fn kind_str(&self) -> &'static str {
         match self {
             Self::RecordSkipped(e) => e.kind().as_str(),
+            Self::OpaquePages { .. } => "opaque_pages",
         }
     }
 }
@@ -104,6 +114,12 @@ impl std::fmt::Display for ScanWarning {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::RecordSkipped(e) => write!(f, "record skipped: {e}"),
+            Self::OpaquePages { opaque, extent } => {
+                write!(
+                    f,
+                    "{opaque} of {extent} data pages are opaque and were not decoded"
+                )
+            }
         }
     }
 }

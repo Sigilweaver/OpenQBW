@@ -26,6 +26,7 @@ mod fkgraph;
 mod lineitem;
 mod nullability;
 mod opaque;
+mod open;
 mod owner_bridge;
 mod page_attribution;
 mod scan;
@@ -55,7 +56,11 @@ pub use lineitem::{
     iter_lineitems_with_attribution, scan_lineitems,
 };
 pub use nullability::{NullsFlagBucket, histogram as nulls_flag_histogram};
-pub use opaque::{OPAQUE_ENTROPY_THRESHOLD, is_opaque_high_entropy};
+pub use opaque::{
+    OPAQUE_ENTROPY_THRESHOLD, OPAQUE_FILE_FRACTION, OpaqueCount, count_opaque_pages,
+    is_opaque_high_entropy,
+};
+pub use open::{OpenOptions, SUPPORTED_VERSION, check_store, open_store};
 pub use owner_bridge::{
     BACKREF_MAX_DISTANCE, BACKREF_MIN_DISTANCE, BackrefVotes, BridgeSource,
     DEFAULT_BACKREF_DISTANCE, OwnerBridge, bridge_owners_via_backref, extend_with_sysobject,
