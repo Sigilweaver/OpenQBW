@@ -31,12 +31,12 @@
 //! are independent integer namespaces (see `re/NOTES.md` C.52).
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::iter::FusedIterator;
 
-use opensqlany::{ApModel, Page, PageStore, PageType, Result as SaResult, SlottedPage};
+use opensqlany::{ApModel, Page, PageStore, ReadOptions as SaReadOptions, SlottedPage};
 
-use crate::bv_recovery::{deobfuscate_with_bv, recover_bv_any};
+use crate::error::Result;
 use crate::owner_bridge::BridgeSource;
+use crate::scan::{ReadOptions, RecordFlag, Scan, Warning, WarningKind, for_each_extent_page};
 
 /// Fixed 8-byte anchor that precedes the numeric portion of every
 /// `SYSCOLUMN` row body.
@@ -66,15 +66,19 @@ pub struct SyscolumnStats {
     pub rows_bad_layout: usize,
     /// `E` pages skipped because no slot directory could be read.
     pub pages_without_directory: usize,
+    /// `E` pages skipped because the page prelude did not confirm the slot
+    /// directory found on them, so row boundaries are unknown.
+    pub pages_unconfirmed_directory: usize,
 }
 
 /// One parsed `SYSCOLUMN` row.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SysColumn {
     /// Column name (ASCII identifier).
     pub name: String,
     /// SA17 table id. Bridged to a table name via the `SYSTABLE` row
-    /// prefix (see [`crate::owner_bridge`]).
+    /// prefix (see `owner_bridge`).
     pub owner_object_id: u32,
     /// Ordinal position of this column inside its owning table.
     pub column_id: u32,
@@ -89,6 +93,8 @@ pub struct SysColumn {
     pub page_number: u64,
     /// Byte offset of the tag within the decoded page body.
     pub tag_offset: usize,
+    /// Reasons this record deserves less trust. Empty when no check flagged it.
+    pub flags: Vec<RecordFlag>,
 }
 
 /// Outcome of looking for the column name before a tag.
@@ -195,6 +201,7 @@ fn parse_rows_in_body(body: &[u8], pn: u64, out: &mut Vec<SysColumn>, stats: &mu
             width,
             page_number: pn,
             tag_offset: i,
+            flags: Vec::new(),
         });
         i += SYSCOLUMN_TAG.len();
     }
@@ -203,52 +210,90 @@ fn parse_rows_in_body(body: &[u8], pn: u64, out: &mut Vec<SysColumn>, stats: &mu
 /// Scan every slotted-page row body on a single decoded page for
 /// `SYSCOLUMN` rows.
 pub fn scan_page(plain: &[u8], pn: u64, out: &mut Vec<SysColumn>, stats: &mut SyscolumnStats) {
-    let page = Page::from_bytes(pn, plain);
-    let sp = SlottedPage::parse(page);
-    if sp.directory.is_none() {
-        stats.pages_without_directory += 1;
-        return;
-    }
-    for (_off, body) in sp.row_bytes() {
-        parse_rows_in_body(body, pn, out, stats);
+    // A page whose directory the parser cannot confirm is counted; its rows
+    // are not read.
+    let sp = match Page::from_bytes(pn, plain)
+        .and_then(|page| SlottedPage::parse(page, &SaReadOptions::strict()))
+    {
+        Ok(sp) if sp.directory().is_some() => sp,
+        Ok(_) => {
+            stats.pages_without_directory += 1;
+            return;
+        }
+        Err(_) => {
+            stats.pages_unconfirmed_directory += 1;
+            return;
+        }
+    };
+    for row in sp.rows() {
+        parse_rows_in_body(row.bytes(), pn, out, stats);
     }
 }
 
 /// Recover every `SYSCOLUMN` row from `store` together with counts of the
-/// rows and pages that did not yield a column.
-pub fn scan_syscolumns(store: &PageStore, model: &ApModel) -> (Vec<SysColumn>, SyscolumnStats) {
-    let mut it = SysColumnIter::new(store, model);
-    let cols: Vec<SysColumn> = it.by_ref().collect();
-    (cols, it.stats)
-}
-
-/// Iterate every `SYSCOLUMN` row recovered from `store`.
-pub fn iter_syscolumns<'a>(
-    store: &'a PageStore,
-    model: &'a ApModel,
-) -> impl Iterator<Item = SysColumn> + 'a {
-    SysColumnIter::new(store, model)
+/// rows and pages that did not yield a column. Pages that fail to decode are
+/// rejected per `options`.
+pub(crate) fn scan_syscolumns(
+    store: &PageStore,
+    model: &ApModel,
+    options: &ReadOptions,
+) -> Result<(Scan<SysColumn>, SyscolumnStats)> {
+    let mut scan = Scan::default();
+    let mut stats = SyscolumnStats::default();
+    for_each_extent_page(
+        store,
+        model,
+        options,
+        &mut scan,
+        |_| true,
+        |decoded, scan| {
+            let before = scan.items.len();
+            scan_page(decoded.bytes(), decoded.pn(), &mut scan.items, &mut stats);
+            for c in &mut scan.items[before..] {
+                // The name sits before the tag; the fields after it.
+                let start = c.tag_offset.saturating_sub(MAX_PEEL + NAME_LEN_MAX + 1);
+                let end = (c.tag_offset + SYSCOLUMN_TAG.len() + 16).min(0xFF0);
+                c.flags.extend(decoded.flags_for(start..end));
+            }
+            Ok(())
+        },
+    )?;
+    if stats.pages_unconfirmed_directory > 0 {
+        scan.warnings
+            .push(Warning::new(WarningKind::UnconfirmedDirectoryPages {
+                pages: stats.pages_unconfirmed_directory as u64,
+            }));
+    }
+    Ok((scan, stats))
 }
 
 /// Deduplicate `SYSCOLUMN` rows by `(owner_object_id, column_id, name)`
 /// and return them ordered by `(owner_object_id, column_id)`.
-pub fn collect_unique(store: &PageStore, model: &ApModel) -> Vec<SysColumn> {
-    let mut uniq: BTreeMap<(u32, u32, String), SysColumn> = BTreeMap::new();
-    for c in iter_syscolumns(store, model) {
-        uniq.entry((c.owner_object_id, c.column_id, c.name.clone()))
-            .or_insert(c);
-    }
-    uniq.into_values().collect()
+pub(crate) fn collect_unique(
+    store: &PageStore,
+    model: &ApModel,
+    options: &ReadOptions,
+) -> Result<Scan<SysColumn>> {
+    let (scan, _) = scan_syscolumns(store, model, options)?;
+    Ok(scan.map_items(|items| {
+        let mut uniq: BTreeMap<(u32, u32, String), SysColumn> = BTreeMap::new();
+        for c in items {
+            uniq.entry((c.owner_object_id, c.column_id, c.name.clone()))
+                .or_insert(c);
+        }
+        uniq.into_values().collect()
+    }))
 }
 
 /// Largest `column_id` treated as a real ordinal rather than the
 /// residue of a mis-parsed row.
 const MAX_PLAUSIBLE_COLUMN_ID: u32 = 4096;
 
-/// Everything [`recover_schema`] learned while looking a table up, so a
+/// Everything `recover_schema` learned while looking a table up, so a
 /// caller can explain a miss instead of reporting a bare "not found"
 /// (openqbw#19).
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct SchemaRecovery {
     /// Table that was asked for.
     pub table: String,
@@ -282,6 +327,10 @@ pub struct SchemaRecovery {
     pub catalog_col_count: Option<u8>,
     /// What the `SYSCOLUMN` scan saw and could not turn into columns.
     pub scan_stats: SyscolumnStats,
+    /// Pages a lenient read skipped because they failed to decode.
+    pub pages_rejected: usize,
+    /// Run-level warnings from the scans the lookup made.
+    pub warnings: Vec<Warning>,
 }
 
 impl SchemaRecovery {
@@ -340,15 +389,6 @@ impl SchemaRecovery {
     }
 }
 
-/// Return all columns for the table named `table_name`, ordered by
-/// `column_id`.
-///
-/// Returns an empty vector if the table cannot be bridged to a
-/// SYSCOLUMN owner. Use [`recover_schema`] to find out why.
-pub fn schema_for(store: &PageStore, model: &ApModel, table_name: &str) -> Vec<SysColumn> {
-    recover_schema(store, model, table_name).columns
-}
-
 /// Look a table's columns up, reporting what the lookup found on the way.
 ///
 /// Owners are bridged to table names by the `SYSTABLE` back-reference
@@ -357,9 +397,22 @@ pub fn schema_for(store: &PageStore, model: &ApModel, table_name: &str) -> Vec<S
 /// resolve the requested table - the fallback costs a full pass over the
 /// file and, on the files measured so far, adds little the
 /// back-reference has not already covered.
-pub fn recover_schema(store: &PageStore, model: &ApModel, table_name: &str) -> SchemaRecovery {
-    let (columns, scan_stats) = scan_syscolumns(store, model);
-    let tables = crate::iter_systable_entries(store, model).collect::<Vec<_>>();
+///
+/// Pages that fail to decode are rejected per `options` and counted in
+/// [`SchemaRecovery::pages_rejected`].
+pub(crate) fn recover_schema(
+    store: &PageStore,
+    model: &ApModel,
+    table_name: &str,
+    options: &ReadOptions,
+) -> Result<SchemaRecovery> {
+    let (column_scan, scan_stats) = scan_syscolumns(store, model, options)?;
+    let table_scan = crate::systable::scan_systable(store, model, options)?;
+    let pages_rejected = column_scan.rejected.len() + table_scan.rejected.len();
+    let mut warnings = column_scan.warnings;
+    warnings.extend(table_scan.warnings);
+    let columns = column_scan.items;
+    let tables = table_scan.items;
 
     let catalog_row = tables.iter().find(|t| t.name == table_name);
     let mut out = SchemaRecovery {
@@ -382,13 +435,23 @@ pub fn recover_schema(store: &PageStore, model: &ApModel, table_name: &str) -> S
         candidate_owners: Vec::new(),
         catalog_col_count: catalog_row.and_then(|t| t.col_count),
         scan_stats,
+        pages_rejected,
+        warnings,
     };
 
     let mut bridge =
-        crate::owner_bridge::bridge_owners_via_backref(store, model, &columns, &tables);
+        crate::owner_bridge::bridge_owners_via_backref(store, model, &columns, &tables, options)?;
     if bridge.owners_for(table_name).is_empty() {
-        crate::owner_bridge::extend_with_sysobject(&mut bridge, store, model, &columns, &tables);
+        crate::owner_bridge::extend_with_sysobject(
+            &mut bridge,
+            store,
+            model,
+            &columns,
+            &tables,
+            options,
+        )?;
     }
+    out.pages_rejected += bridge.pages_rejected;
     out.backref_distance = bridge.backref_distance;
     out.bridged_tables = bridge.tables();
     out.from_backref = bridge.from_backref;
@@ -410,7 +473,7 @@ pub fn recover_schema(store: &PageStore, model: &ApModel, table_name: &str) -> S
             (n, std::cmp::Reverse(*owner))
         })
     else {
-        return out;
+        return Ok(out);
     };
     out.owner = Some(owner);
     out.source = bridge.source_for(owner);
@@ -422,71 +485,8 @@ pub fn recover_schema(store: &PageStore, model: &ApModel, table_name: &str) -> S
     cols.sort_by_key(|c| c.column_id);
     cols.dedup_by(|a, b| a.column_id == b.column_id && a.name == b.name);
     out.columns = cols;
-    out
+    Ok(out)
 }
-
-struct SysColumnIter<'a> {
-    store: &'a PageStore,
-    model: &'a ApModel,
-    pn: u64,
-    n_pages: u64,
-    buffer: Vec<SysColumn>,
-    stats: SyscolumnStats,
-}
-
-impl<'a> SysColumnIter<'a> {
-    fn new(store: &'a PageStore, model: &'a ApModel) -> Self {
-        Self {
-            store,
-            model,
-            pn: 1,
-            n_pages: store.page_count(),
-            buffer: Vec::new(),
-            stats: SyscolumnStats::default(),
-        }
-    }
-
-    fn fill_buffer(&mut self) -> SaResult<bool> {
-        while self.buffer.is_empty() && self.pn < self.n_pages {
-            let pn = self.pn;
-            self.pn += 1;
-            let page = self.store.page(pn)?;
-            if page.trailer().page_type() != PageType::Extent {
-                continue;
-            }
-            let raw = page.bytes();
-            let plain = if let Some(bv) = recover_bv_any(pn, raw) {
-                deobfuscate_with_bv(raw, pn, bv)
-            } else {
-                self.model.deobfuscate_with_store(raw, pn, self.store)
-            };
-            let mut found = Vec::new();
-            scan_page(&plain, pn, &mut found, &mut self.stats);
-            for c in found.into_iter().rev() {
-                self.buffer.push(c);
-            }
-        }
-        Ok(!self.buffer.is_empty())
-    }
-}
-
-impl Iterator for SysColumnIter<'_> {
-    type Item = SysColumn;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            if let Some(c) = self.buffer.pop() {
-                return Some(c);
-            }
-            match self.fill_buffer() {
-                Ok(true) => continue,
-                _ => return None,
-            }
-        }
-    }
-}
-
-impl FusedIterator for SysColumnIter<'_> {}
 
 #[cfg(test)]
 mod tests {
@@ -608,6 +608,8 @@ mod tests {
             candidate_owners: vec![3073],
             catalog_col_count: None,
             scan_stats: SyscolumnStats::default(),
+            pages_rejected: 0,
+            warnings: Vec::new(),
             columns: ids
                 .iter()
                 .map(|id| SysColumn {
@@ -619,6 +621,7 @@ mod tests {
                     width: 4,
                     page_number: 710,
                     tag_offset: 0,
+                    flags: Vec::new(),
                 })
                 .collect(),
         }

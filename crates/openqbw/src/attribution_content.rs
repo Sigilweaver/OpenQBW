@@ -27,17 +27,21 @@
 
 use std::collections::BTreeMap;
 
-use opensqlany::{ApModel, Page, PageStore, PageType, SlottedPage};
+use opensqlany::{ApModel, PageStore, PageType};
 
-use crate::bv_recovery::{deobfuscate_with_bv, recover_bv_qb_data};
+use crate::decode::decode_page;
+use crate::error::Result;
 use crate::page_attribution::PageAttribution;
-use crate::systable::{SysTableEntry, iter_systable_entries};
+use crate::reader::Reader;
+use crate::scan::ReadOptions;
+use crate::systable::SysTableEntry;
 
 /// Length in bytes of the row-0 prefix used as a table signature.
 pub const SIG_LEN: usize = 12;
 
 /// A row-0 prefix used as a per-table fingerprint.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
 pub struct RowSignature(Vec<u8>);
 
 impl RowSignature {
@@ -65,6 +69,7 @@ impl RowSignature {
 
 /// Content-signature attribution map.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct ContentAttribution {
     /// Signature -> the SysTable entry whose `data_root_page` carries
     /// this row-0 prefix. Ambiguous signatures (shared by multiple
@@ -82,6 +87,7 @@ pub struct ContentAttribution {
 /// Statistics from comparing position-based and content-based
 /// attribution over a set of pages.
 #[derive(Debug, Default, Clone, Copy)]
+#[non_exhaustive]
 pub struct AttributionAgreement {
     /// Pages where both attributors return the same table name.
     pub agree: u64,
@@ -105,8 +111,13 @@ impl AttributionAgreement {
 impl ContentAttribution {
     /// Build the signature map by scanning every `SYSTABLE` entry's
     /// `data_root_page` and extracting the row-0 prefix.
-    pub fn build(store: &PageStore, model: &ApModel) -> Self {
-        let entries: Vec<SysTableEntry> = iter_systable_entries(store, model).collect();
+    ///
+    /// A catalog page that fails to decode is an error in strict mode; a
+    /// root page whose signature cannot be read is counted in
+    /// [`ContentAttribution::skipped_count`].
+    pub(crate) fn build(store: &PageStore, model: &ApModel, options: &ReadOptions) -> Result<Self> {
+        let entries: Vec<SysTableEntry> =
+            crate::systable::scan_systable(store, model, options)?.items;
         let mut sig_to_tables: BTreeMap<RowSignature, Vec<SysTableEntry>> = BTreeMap::new();
         let mut skipped = 0usize;
 
@@ -131,11 +142,11 @@ impl ContentAttribution {
             }
         }
 
-        Self {
+        Ok(Self {
             unique,
             ambiguous_count: ambiguous,
             skipped_count: skipped,
-        }
+        })
     }
 
     /// Look up the table whose `data_root_page` row-0 signature matches
@@ -144,13 +155,8 @@ impl ContentAttribution {
     /// Returns `None` when the page cannot be decoded, has no slot
     /// directory, has no rows, or its signature is shared by multiple
     /// tables (ambiguous).
-    pub fn attribute(
-        &self,
-        store: &PageStore,
-        model: &ApModel,
-        page_number: u64,
-    ) -> Option<&SysTableEntry> {
-        let sig = extract_signature(store, model, page_number)?;
+    pub fn attribute(&self, reader: &Reader, page_number: u64) -> Option<&SysTableEntry> {
+        let sig = extract_signature(reader.store(), reader.model(), page_number)?;
         self.unique.get(&sig)
     }
 
@@ -179,8 +185,7 @@ impl ContentAttribution {
     /// attribution across `pages`. Returns the agreement breakdown.
     pub fn compare<I>(
         &self,
-        store: &PageStore,
-        model: &ApModel,
+        reader: &Reader,
         position: &PageAttribution,
         pages: I,
     ) -> AttributionAgreement
@@ -190,7 +195,7 @@ impl ContentAttribution {
         let mut out = AttributionAgreement::default();
         for pn in pages {
             let pos_name = position.attribute(pn).map(|e| e.name.as_str());
-            let con_name = self.attribute(store, model, pn).map(|e| e.name.as_str());
+            let con_name = self.attribute(reader, pn).map(|e| e.name.as_str());
             match (pos_name, con_name) {
                 (Some(a), Some(b)) if a == b => out.agree += 1,
                 (Some(_), Some(_)) => out.disagree += 1,
@@ -209,18 +214,11 @@ fn extract_signature(store: &PageStore, model: &ApModel, page_number: u64) -> Op
     if page.trailer().page_type() != PageType::Extent {
         return None;
     }
-    let raw = page.bytes();
-    let plain = if let Some(bv) = recover_bv_qb_data(page_number, raw) {
-        deobfuscate_with_bv(raw, page_number, bv)
-    } else {
-        model.deobfuscate_with_store(raw, page_number, store)
-    };
-    let p = Page::from_bytes(page_number, &plain);
-    let sp = SlottedPage::parse(p);
-    sp.directory.as_ref()?;
-    let rows = sp.row_bytes();
-    let (_slot, first_row) = rows.first()?;
-    Some(RowSignature::from_row(first_row))
+    let decoded = decode_page(store, model, page_number).ok()?;
+    let sp = decoded.slotted().ok()?.confirmed()?;
+    let rows = sp.rows();
+    let first_row = rows.first()?;
+    Some(RowSignature::from_row(first_row.bytes()))
 }
 
 #[cfg(test)]

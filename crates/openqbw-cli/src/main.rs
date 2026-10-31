@@ -5,23 +5,25 @@
 //! ```text
 //! openqbw export    <input.qbw> <output.db>   # multi-transaction SQLite export
 //! openqbw catalog   <input.qbw>               # SYSTABLE listing
-//! openqbw verify    <input.qbw>               # validation summary
-//! openqbw indexes   <input.qbw>               # SYSINDEX listing + attribution audit
+//! openqbw schema    <input.qbw> <table>       # recovered columns of a table
 //! openqbw migrate   <input.qbw> --format=...  # data-liberation export (csv/sqlite/iif)
-//! openqbw forensics <input.qbw>               # file-level discovery summary
+//! openqbw verify    <input.qbw>               # validation summary
+//! openqbw debug     <command> <input.qbw>     # reverse-engineering diagnostics
 //! ```
+//!
+//! The `debug` commands print heuristic cross-checks for people studying
+//! the format. Their names, flags and output may change in any release.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use openqbw::diagnostics::{self, CrossValidation};
 use openqbw::{
-    AmountType, AttributionGap, ContentAttribution, CrossValidation, LineItem, PageAttribution,
-    ScanOptions, ScanWarning, SysIndexEntry, SysTableEntry, TransactionHeader, scan_lineitems,
-    scan_transaction_headers,
+    AmountType, Error as QbwError, LineItem, ReadOptions, Reader, SysTableEntry, TransactionHeader,
+    Warning,
 };
-use opensqlany::{ApModel, PageStore};
 use rusqlite::{Connection, Transaction, params};
 
 const PHASE5_INVOICE_TOTAL_CENTS: i64 = 39_991_479_278;
@@ -34,10 +36,11 @@ const PHASE5_INVOICE_COUNT: i64 = 13_375;
     about = "QuickBooks .qbw inspector and exporter"
 )]
 struct Cli {
-    /// Skip line-item records that cannot be decoded (unknown amount-type
-    /// byte, amount cut off by the page end) instead of stopping with an
-    /// error. Every skipped record is counted on stderr and listed in the
-    /// export (`scan_rejections` table in SQLite, `rejected.csv` in CSV).
+    /// Skip records and pages that cannot be decoded (unknown amount-type
+    /// byte, amount cut off by the page end, a page that fails to decode)
+    /// instead of stopping with an error. Every skipped record is printed on
+    /// stderr and listed in the export (`scan_rejections` table in SQLite,
+    /// `rejected.csv` in CSV).
     #[arg(long, global = true)]
     lenient: bool,
 
@@ -88,6 +91,38 @@ enum Cmd {
         /// Table name to inspect.
         table: String,
     },
+    /// Data-liberation export: emit line items and transaction
+    /// headers in a portable format suitable for handing to a
+    /// different accounting product or for archival.
+    Migrate {
+        /// Input QBW file.
+        input: PathBuf,
+        /// Output destination. For `csv` this is a directory and
+        /// will be created if it does not exist; for `sqlite` and
+        /// `iif` it is a single output file.
+        #[arg(long)]
+        out: PathBuf,
+        /// Output format.
+        #[arg(long, value_enum, default_value_t = MigrateFormat::Csv)]
+        format: MigrateFormat,
+        /// IIF only: write the export even though account names and
+        /// transaction types are not decoded. Every TRNS posts to the
+        /// placeholder account `Accounts Receivable` and every SPL uses the
+        /// internal source-table name as its account. Transactions with an
+        /// undecoded amount are left out and counted.
+        #[arg(long)]
+        placeholder_accounts: bool,
+    },
+    /// Reverse-engineering diagnostics. Names, flags and output of these
+    /// commands may change in any release.
+    Debug {
+        #[command(subcommand)]
+        cmd: DebugCmd,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum DebugCmd {
     /// Print heuristic foreign-key edges inferred from column names
     /// matching `*_id` / `*_id_h` (Phase 6, WP-6B).
     Fkgraph {
@@ -122,28 +157,6 @@ enum Cmd {
         #[arg(long)]
         summary_only: bool,
     },
-    /// Data-liberation export: emit line items and transaction
-    /// headers in a portable format suitable for handing to a
-    /// different accounting product or for archival.
-    Migrate {
-        /// Input QBW file.
-        input: PathBuf,
-        /// Output destination. For `csv` this is a directory and
-        /// will be created if it does not exist; for `sqlite` and
-        /// `iif` it is a single output file.
-        #[arg(long)]
-        out: PathBuf,
-        /// Output format.
-        #[arg(long, value_enum, default_value_t = MigrateFormat::Csv)]
-        format: MigrateFormat,
-        /// IIF only: write the export even though account names and
-        /// transaction types are not decoded. Every TRNS posts to the
-        /// placeholder account `Accounts Receivable` and every SPL uses the
-        /// internal source-table name as its account. Transactions with an
-        /// undecoded amount are left out and counted.
-        #[arg(long)]
-        placeholder_accounts: bool,
-    },
     /// File-level forensic discovery summary: size, page-type
     /// histogram, table inventory, and high-level signals useful
     /// for triage in audit or litigation contexts.
@@ -164,10 +177,37 @@ enum MigrateFormat {
     Iif,
 }
 
-/// Open a company file, checking the magic, version and every page CRC.
-fn open_checked(path: &std::path::Path) -> Result<PageStore> {
-    openqbw::open_store(path, &openqbw::OpenOptions::default())
-        .with_context(|| format!("opening {:?}", path))
+/// Open a company file. Opening checks the magic, version and every page
+/// CRC and reads the catalog; its warnings and skipped pages are printed.
+fn open_reader(path: &std::path::Path, lenient: bool) -> Result<Reader> {
+    let options = if lenient {
+        ReadOptions::lenient()
+    } else {
+        ReadOptions::strict()
+    };
+    let reader = Reader::open(path, &options).with_context(|| {
+        format!(
+            "opening {:?}{}",
+            path,
+            if lenient {
+                ""
+            } else {
+                " (use --lenient to skip pages that fail to decode and list them)"
+            }
+        )
+    })?;
+    report(&reader.catalog().warnings, &reader.catalog().rejected);
+    Ok(reader)
+}
+
+/// Print run-level warnings and skipped records on stderr.
+fn report(warnings: &[Warning], rejected: &[QbwError]) {
+    for w in warnings {
+        eprintln!("warning: {w}");
+    }
+    for e in rejected {
+        eprintln!("warning: skipped: {e}");
+    }
 }
 
 fn main() -> Result<()> {
@@ -175,51 +215,33 @@ fn main() -> Result<()> {
     let lenient = cli.lenient;
     match cli.cmd {
         Cmd::Export { input, output } => run_export(input, output, lenient).map(|_| ()),
-        Cmd::Catalog { input, user_only } => run_catalog(input, user_only),
+        Cmd::Catalog { input, user_only } => run_catalog(input, user_only, lenient),
         Cmd::Verify {
             input,
             output,
             strict_attribution,
         } => run_verify(input, output, strict_attribution, lenient),
-        Cmd::Schema { input, table } => run_schema(input, table),
-        Cmd::Fkgraph {
-            input,
-            resolved_only,
-        } => run_fkgraph(input, resolved_only),
-        Cmd::Nulls { input } => run_nulls(input),
-        Cmd::ValidateAttribution { input } => run_validate_attribution(input),
-        Cmd::Indexes {
-            input,
-            fk_only,
-            summary_only,
-        } => run_indexes(input, fk_only, summary_only),
+        Cmd::Schema { input, table } => run_schema(input, table, lenient),
         Cmd::Migrate {
             input,
             out,
             format,
             placeholder_accounts,
         } => run_migrate(input, out, format, placeholder_accounts, lenient),
-        Cmd::Forensics { input } => run_forensics(input, lenient),
-    }
-}
-
-/// Print a diagnostic to stderr when page-to-table attribution has no
-/// usable entries, explaining why rather than leaving it to show up as
-/// silently-empty/unattributed output downstream.
-fn warn_on_attribution_gap(attribution: &PageAttribution) {
-    match attribution.gap() {
-        None => {}
-        Some(AttributionGap::NoCatalogRows) => {
-            eprintln!("warning: no SYSTABLE rows found; page-to-table attribution is unavailable");
-        }
-        Some(AttributionGap::AllRootsZeroed) => {
-            eprintln!(
-                "warning: SYSTABLE rows were found, but every data_root_page is zero, so \
-                 page-to-table attribution has no B-tree root to anchor on (seen on some \
-                 QuickBooks Enterprise 24.0 files - see openqbw#16). Attribution-dependent \
-                 output below will be empty; the table listing itself is unaffected."
-            );
-        }
+        Cmd::Debug { cmd } => match cmd {
+            DebugCmd::Fkgraph {
+                input,
+                resolved_only,
+            } => run_fkgraph(input, resolved_only, lenient),
+            DebugCmd::Nulls { input } => run_nulls(input, lenient),
+            DebugCmd::ValidateAttribution { input } => run_validate_attribution(input, lenient),
+            DebugCmd::Indexes {
+                input,
+                fk_only,
+                summary_only,
+            } => run_indexes(input, fk_only, summary_only, lenient),
+            DebugCmd::Forensics { input } => run_forensics(input, lenient),
+        },
     }
 }
 
@@ -228,17 +250,12 @@ fn run_export(input: PathBuf, output: PathBuf, lenient: bool) -> Result<ExportSt
         std::fs::remove_file(&output).with_context(|| format!("removing existing {:?}", output))?;
     }
 
-    let store = open_checked(&input)?;
-    let model = ApModel::learn(&store);
-    let attribution = PageAttribution::build(&store, &model);
-    warn_on_attribution_gap(&attribution);
-
-    let (mut items, mut rejected) = collect_lineitems(&store, &model, &attribution, lenient)?;
-    items.sort_by_key(|li| (li.page_number, li.page_offset));
-
-    let (mut headers, header_warnings) = collect_headers(&store, &model, &attribution, lenient)?;
-    rejected.extend(header_warnings);
-    headers.sort_by_key(|h| (h.page_number, h.page_offset));
+    let reader = open_reader(&input, lenient)?;
+    let Records {
+        items,
+        rejected,
+        headers,
+    } = collect_records(&reader)?;
 
     let mut conn = Connection::open(&output).with_context(|| format!("opening {:?}", output))?;
     create_schema(&conn)?;
@@ -252,18 +269,16 @@ fn run_export(input: PathBuf, output: PathBuf, lenient: bool) -> Result<ExportSt
         tx.commit()?;
     }
 
-    let stats = collect_export_stats(&conn, &store, &items, &headers, rejected.len())?;
+    let stats = collect_export_stats(&conn, &reader, &items, &headers, rejected.len())?;
     println!("{}", stats.summary());
     Ok(stats)
 }
 
-fn run_catalog(input: PathBuf, user_only: bool) -> Result<()> {
-    let store = open_checked(&input)?;
-    let model = ApModel::learn(&store);
+fn run_catalog(input: PathBuf, user_only: bool, lenient: bool) -> Result<()> {
+    let reader = open_reader(&input, lenient)?;
 
-    let mut entries: Vec<SysTableEntry> = openqbw::collect_unique(&store, &model);
+    let mut entries: Vec<SysTableEntry> = reader.catalog().items.clone();
     entries.sort_by_key(|e| e.table_id);
-    warn_on_attribution_gap(&PageAttribution::from_catalog(entries.clone()));
 
     let total = entries.len();
     let user: Vec<&SysTableEntry> = entries
@@ -274,7 +289,7 @@ fn run_catalog(input: PathBuf, user_only: bool) -> Result<()> {
     println!(
         "file: {}  pages={}  unique_tables={}  user_tables={}",
         input.file_name().and_then(|s| s.to_str()).unwrap_or("?"),
-        store.page_count(),
+        reader.page_count(),
         total,
         user.len(),
     );
@@ -308,10 +323,16 @@ fn run_catalog(input: PathBuf, user_only: bool) -> Result<()> {
     Ok(())
 }
 
-fn run_schema(input: PathBuf, table: String) -> Result<()> {
-    let store = open_checked(&input)?;
-    let model = ApModel::learn(&store);
-    let found = openqbw::recover_schema(&store, &model, &table);
+fn run_schema(input: PathBuf, table: String, lenient: bool) -> Result<()> {
+    let reader = open_reader(&input, lenient)?;
+    let found = reader.schema(&table)?;
+    report(&found.warnings, &[]);
+    if found.pages_rejected > 0 {
+        eprintln!(
+            "warning: {} pages failed to decode and were skipped",
+            found.pages_rejected
+        );
+    }
     let cols = &found.columns;
     if cols.is_empty() {
         anyhow::bail!("{}", schema_miss_report(&found));
@@ -357,17 +378,18 @@ fn run_schema(input: PathBuf, table: String) -> Result<()> {
     }
     let st = &found.scan_stats;
     let unread = st.rows_no_name + st.rows_ambiguous_name + st.rows_bad_layout;
-    if unread > 0 || st.pages_without_directory > 0 {
+    if unread > 0 || st.pages_without_directory > 0 || st.pages_unconfirmed_directory > 0 {
         eprintln!(
             "warning: SYSCOLUMN scan: {} of {} rows not read ({} without a name, {} with an \
              ambiguous name, {} with an unexpected layout); {} pages skipped for lack of a \
-             slot directory",
+             slot directory, {} because their slot directory is not confirmed",
             unread,
             st.tags_seen,
             st.rows_no_name,
             st.rows_ambiguous_name,
             st.rows_bad_layout,
-            st.pages_without_directory
+            st.pages_without_directory,
+            st.pages_unconfirmed_directory
         );
     }
     if found.implausible_column_ids() > 0 {
@@ -426,11 +448,16 @@ fn schema_miss_report(found: &openqbw::SchemaRecovery) -> String {
     out
 }
 
-fn run_fkgraph(input: PathBuf, resolved_only: bool) -> Result<()> {
-    let store = open_checked(&input)?;
-    let model = ApModel::learn(&store);
-    let graph = openqbw::build_fk_graph(&store, &model);
-    let s = openqbw::fk_graph_stats(&graph);
+fn run_fkgraph(input: PathBuf, resolved_only: bool, lenient: bool) -> Result<()> {
+    let reader = open_reader(&input, lenient)?;
+    let graph = diagnostics::fk_graph(&reader)?;
+    let s = diagnostics::fk_graph_stats(&graph);
+    if graph.pages_rejected > 0 {
+        eprintln!(
+            "warning: {} pages failed to decode and were skipped",
+            graph.pages_rejected
+        );
+    }
     let edges = &graph.edges;
     println!(
         "edges={}  resolved={}  strong(>=900)={}  resolved_rate={:.1}%",
@@ -466,13 +493,13 @@ fn run_fkgraph(input: PathBuf, resolved_only: bool) -> Result<()> {
     Ok(())
 }
 
-fn run_indexes(input: PathBuf, fk_only: bool, summary_only: bool) -> Result<()> {
-    let store = open_checked(&input)?;
-    let model = ApModel::learn(&store);
-    let entries: Vec<SysIndexEntry> = openqbw::collect_unique_sysindex(&store, &model);
-    let tables: Vec<SysTableEntry> = openqbw::collect_unique(&store, &model);
-    let position = PageAttribution::build(&store, &model);
-    let audit = CrossValidation::run(&entries, &position, &tables);
+fn run_indexes(input: PathBuf, fk_only: bool, summary_only: bool, lenient: bool) -> Result<()> {
+    let reader = open_reader(&input, lenient)?;
+    let scan = reader.indexes()?;
+    report(&scan.warnings, &scan.rejected);
+    let entries = &scan.items;
+    let tables = &reader.catalog().items;
+    let audit = diagnostics::sysindex_cross_validation(&reader)?;
 
     let fk_count = entries.iter().filter(|e| e.is_foreign_key()).count();
     println!(
@@ -488,14 +515,14 @@ fn run_indexes(input: PathBuf, fk_only: bool, summary_only: bool) -> Result<()> 
     }
 
     let mut name_by_tid: BTreeMap<u32, String> = BTreeMap::new();
-    for t in &tables {
+    for t in tables {
         name_by_tid
             .entry(t.table_id)
             .or_insert_with(|| t.name.clone());
     }
     println!();
     println!("{:>8}  {:>8}  {:<40}  index_name", "tid", "root", "owner");
-    for e in &entries {
+    for e in entries {
         if fk_only && !e.is_foreign_key() {
             continue;
         }
@@ -531,19 +558,18 @@ fn print_audit_summary(audit: &CrossValidation) {
     }
 }
 
-fn run_validate_attribution(input: PathBuf) -> Result<()> {
-    let store = open_checked(&input)?;
-    let model = ApModel::learn(&store);
-    let position = openqbw::PageAttribution::build(&store, &model);
-    let schema = openqbw::SchemaAttribution::build(&store, &model);
+fn run_validate_attribution(input: PathBuf, lenient: bool) -> Result<()> {
+    let reader = open_reader(&input, lenient)?;
+    let position = reader.attribution();
+    let schema = diagnostics::schema_attribution(&reader)?;
     println!(
         "tables with width bands: {}  total pages: {}",
         schema.len(),
-        store.page_count()
+        reader.page_count()
     );
-    let pairs = (1..store.page_count())
+    let pairs = (1..reader.page_count())
         .filter_map(|pn| position.attribute(pn).map(|e| (pn, e.name.clone())));
-    let stats = schema.validate_corpus(&store, &model, pairs);
+    let stats = schema.validate_corpus(&reader, pairs);
     let total = stats.total().max(1);
     println!(
         "{:>10}  {:>10}  {:>10}  {:>10}  {:>10}",
@@ -565,10 +591,11 @@ fn run_validate_attribution(input: PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn run_nulls(input: PathBuf) -> Result<()> {
-    let store = open_checked(&input)?;
-    let model = ApModel::learn(&store);
-    let buckets = openqbw::nulls_flag_histogram(&store, &model);
+fn run_nulls(input: PathBuf, lenient: bool) -> Result<()> {
+    let reader = open_reader(&input, lenient)?;
+    let scan = diagnostics::nulls_flag_histogram(&reader)?;
+    report(&scan.warnings, &scan.rejected);
+    let buckets = &scan.items;
     let total: usize = buckets.iter().map(|b| b.count).sum();
     println!(
         "total syscolumn rows: {}  distinct nulls_flag values: {}",
@@ -576,7 +603,7 @@ fn run_nulls(input: PathBuf) -> Result<()> {
         buckets.len()
     );
     println!("{:>6}  {:>8}  sample_columns", "byte", "count");
-    for b in &buckets {
+    for b in buckets {
         let samples = b.sample_columns.join(", ");
         println!("0x{:02x}    {:>8}  {}", b.flag, b.count, samples);
     }
@@ -749,13 +776,10 @@ fn run_verify(
 
     println!();
     println!("=== SYSINDEX cross-validation (WP-6Z.3) ===");
+    let reader = open_reader(&input, lenient)?;
     {
-        let store = open_checked(&input)?;
-        let model = ApModel::learn(&store);
-        let entries = openqbw::collect_unique_sysindex(&store, &model);
-        let tables: Vec<SysTableEntry> = openqbw::collect_unique(&store, &model);
-        let position = PageAttribution::build(&store, &model);
-        let audit = CrossValidation::run(&entries, &position, &tables);
+        let entries = reader.indexes()?.items;
+        let audit = diagnostics::sysindex_cross_validation(&reader)?;
         let fk_count = entries.iter().filter(|e| e.is_foreign_key()).count();
         println!(
             "  sysindex entries: {} (fk: {})  distinct (tid,root) pairs: {}",
@@ -769,10 +793,8 @@ fn run_verify(
     if strict_attribution {
         println!();
         println!("=== content-signature attribution (--strict-attribution) ===");
-        let store = open_checked(&input)?;
-        let model = ApModel::learn(&store);
-        let content = ContentAttribution::build(&store, &model);
-        let position = PageAttribution::build(&store, &model);
+        let content = diagnostics::content_attribution(&reader)?;
+        let position = reader.attribution();
         println!(
             "  unique signatures: {}  ambiguous: {}  skipped roots: {}",
             content.len(),
@@ -791,7 +813,7 @@ fn run_verify(
             .filter_map(|r| r.ok())
             .map(|n| n as u64)
             .collect();
-        let agree = content.compare(&store, &model, &position, pages.iter().copied());
+        let agree = content.compare(&reader, position, pages.iter().copied());
         let total = agree.total().max(1);
         println!(
             "  pages compared: {}  agree: {} ({:.2}%)  disagree: {}  only_position: {}  only_content: {}  neither: {}",
@@ -1045,70 +1067,19 @@ fn raw_u24_cents(li: &LineItem) -> Option<i64> {
     matches!(r[0], 1 | 2).then(|| r[1] as i64 | (r[2] as i64) << 8 | (r[3] as i64) << 16)
 }
 
-fn insert_scan_rejections(tx: &Transaction<'_>, rejected: &[ScanWarning]) -> Result<()> {
+fn insert_scan_rejections(tx: &Transaction<'_>, rejected: &[QbwError]) -> Result<()> {
     let mut stmt = tx.prepare(
         "INSERT INTO scan_rejections (page_number, page_offset, kind, message) VALUES (?, ?, ?, ?)",
     )?;
     for e in rejected {
-        let (page, offset) = e.location();
         stmt.execute(params![
-            page.map(|p| p as i64),
-            offset.map(|o| o as i64),
-            e.kind_str(),
+            e.page_number().map(|p| p as i64),
+            e.page_offset().map(|o| o as i64),
+            e.kind().as_str(),
             e.to_string()
         ])?;
     }
     Ok(())
-}
-
-/// Scan all transaction headers. Same strict and lenient behavior as
-/// [`collect_lineitems`].
-fn collect_headers(
-    store: &PageStore,
-    model: &ApModel,
-    attribution: &PageAttribution,
-    lenient: bool,
-) -> Result<(Vec<TransactionHeader>, Vec<ScanWarning>)> {
-    let scan = scan_transaction_headers(
-        store,
-        model,
-        attribution,
-        &if lenient {
-            ScanOptions::lenient()
-        } else {
-            ScanOptions::strict()
-        },
-    )
-    .context("scanning transaction headers (use --lenient to skip failing pages and list them)")?;
-    for w in &scan.warnings {
-        eprintln!("warning: {w}");
-    }
-    Ok((scan.items, scan.warnings))
-}
-
-/// Scan all line items. Strict mode stops at the first undecodable record.
-/// Lenient mode returns the skipped records and prints their count to stderr.
-fn collect_lineitems(
-    store: &PageStore,
-    model: &ApModel,
-    attribution: &PageAttribution,
-    lenient: bool,
-) -> Result<(Vec<LineItem>, Vec<ScanWarning>)> {
-    let scan = scan_lineitems(
-        store,
-        model,
-        Some(attribution),
-        &if lenient {
-            ScanOptions::lenient()
-        } else {
-            ScanOptions::strict()
-        },
-    )
-    .context("scanning line items (use --lenient to skip undecodable records and list them)")?;
-    for w in &scan.warnings {
-        eprintln!("warning: {w}");
-    }
-    Ok((scan.items, scan.warnings))
 }
 
 #[derive(Debug)]
@@ -1145,7 +1116,7 @@ impl ExportStats {
 
 fn collect_export_stats(
     conn: &Connection,
-    store: &PageStore,
+    reader: &Reader,
     items: &[LineItem],
     headers: &[TransactionHeader],
     rejected_records: usize,
@@ -1165,7 +1136,7 @@ fn collect_export_stats(
         transactions_without_total: without_total,
         unresolved_lines: items.iter().filter(|li| li.amount_cents.is_none()).count() as i64,
         rejected_records,
-        pages: store.page_count(),
+        pages: reader.page_count(),
         transactions: txns,
         headers: headers.len() as i64,
         line_items: items.len() as i64,
@@ -1198,28 +1169,37 @@ fn run_migrate(
 
 struct Records {
     items: Vec<LineItem>,
-    rejected: Vec<ScanWarning>,
+    /// Records and pages the line-item and header scans skipped.
+    rejected: Vec<QbwError>,
     headers: Vec<TransactionHeader>,
-    store: PageStore,
-    model: ApModel,
 }
 
-fn collect_records(input: &std::path::Path, lenient: bool) -> Result<Records> {
-    let store = open_checked(input)?;
-    let model = ApModel::learn(&store);
-    let attribution = PageAttribution::build(&store, &model);
-    warn_on_attribution_gap(&attribution);
-    let (mut items, mut rejected) = collect_lineitems(&store, &model, &attribution, lenient)?;
+/// Scan line items and headers. Strict mode stops at the first undecodable
+/// record; lenient mode returns the skipped ones and prints each on stderr.
+fn collect_records(reader: &Reader) -> Result<Records> {
+    let lines = reader
+        .line_items()
+        .context("scanning line items (use --lenient to skip undecodable records and list them)")?;
+    let heads = reader.transactions().context(
+        "scanning transaction headers (use --lenient to skip failing pages and list them)",
+    )?;
+    let mut warnings = lines.warnings;
+    for w in heads.warnings {
+        if !warnings.contains(&w) {
+            warnings.push(w);
+        }
+    }
+    let mut rejected = lines.rejected;
+    rejected.extend(heads.rejected);
+    report(&warnings, &rejected);
+    let mut items = lines.items;
     items.sort_by_key(|li| (li.page_number, li.page_offset));
-    let (mut headers, header_warnings) = collect_headers(&store, &model, &attribution, lenient)?;
-    rejected.extend(header_warnings);
+    let mut headers = heads.items;
     headers.sort_by_key(|h| (h.page_number, h.page_offset));
     Ok(Records {
         items,
         rejected,
         headers,
-        store,
-        model,
     })
 }
 
@@ -1274,19 +1254,18 @@ fn lineitem_date(li: &LineItem) -> String {
 
 fn run_migrate_csv(input: PathBuf, out: PathBuf, lenient: bool) -> Result<()> {
     std::fs::create_dir_all(&out).with_context(|| format!("creating {:?}", out))?;
+    let reader = open_reader(&input, lenient)?;
     let Records {
         items,
         rejected,
         headers,
-        store,
-        model,
-    } = collect_records(&input, lenient)?;
+    } = collect_records(&reader)?;
 
     // catalog.csv
     let mut cat = std::fs::File::create(out.join("catalog.csv"))?;
     use std::io::Write;
     writeln!(cat, "table_id,name,column_count,data_root_page,last_page")?;
-    let mut tables: Vec<SysTableEntry> = openqbw::collect_unique(&store, &model);
+    let mut tables: Vec<SysTableEntry> = reader.catalog().items.clone();
     tables.sort_by_key(|e| e.table_id);
     for t in &tables {
         writeln!(
@@ -1351,13 +1330,12 @@ fn run_migrate_csv(input: PathBuf, out: PathBuf, lenient: bool) -> Result<()> {
     let mut rf = std::fs::File::create(out.join("rejected.csv"))?;
     writeln!(rf, "page_number,page_offset,kind,message")?;
     for e in &rejected {
-        let (page, offset) = e.location();
         writeln!(
             rf,
             "{},{},{},{}",
-            page.map(|v| v.to_string()).unwrap_or_default(),
-            offset.map(|v| v.to_string()).unwrap_or_default(),
-            e.kind_str(),
+            e.page_number().map(|v| v.to_string()).unwrap_or_default(),
+            e.page_offset().map(|v| v.to_string()).unwrap_or_default(),
+            e.kind().as_str(),
             csv_field(&e.to_string()),
         )?;
     }
@@ -1399,12 +1377,12 @@ fn run_migrate_iif(
              an undecoded amount are left out and counted)."
         );
     }
+    let reader = open_reader(&input, lenient)?;
     let Records {
         items,
         rejected,
         headers,
-        ..
-    } = collect_records(&input, lenient)?;
+    } = collect_records(&reader)?;
     let (text, stats) = render_iif(&items, &headers);
     std::fs::write(&out, text).with_context(|| format!("writing {:?}", out))?;
     println!(
@@ -1509,12 +1487,10 @@ fn render_iif(items: &[LineItem], headers: &[TransactionHeader]) -> (String, Iif
 // =========================================================================
 
 fn run_forensics(input: PathBuf, lenient: bool) -> Result<()> {
-    let store = open_checked(&input)?;
-    let model = ApModel::learn(&store);
-    let attribution = PageAttribution::build(&store, &model);
+    let reader = open_reader(&input, lenient)?;
 
-    let file_size = store.size_bytes();
-    let page_count = store.page_count();
+    let file_size = reader.file_size();
+    let page_count = reader.page_count();
 
     println!("=== file ===");
     println!("path        : {:?}", input);
@@ -1526,12 +1502,13 @@ fn run_forensics(input: PathBuf, lenient: bool) -> Result<()> {
     println!("pages       : {} (4096 B each)", page_count);
     println!(
         "ap learned  : {} / {} blocks ({:.1}%)",
-        model.learned_block_count(),
+        diagnostics::learned_block_count(&reader),
         page_count.div_ceil(16),
-        100.0 * model.learned_block_count() as f64 / page_count.div_ceil(16).max(1) as f64,
+        100.0 * diagnostics::learned_block_count(&reader) as f64
+            / page_count.div_ceil(16).max(1) as f64,
     );
 
-    let tables: Vec<SysTableEntry> = openqbw::collect_unique(&store, &model);
+    let tables = &reader.catalog().items;
     let user_tables: Vec<&SysTableEntry> =
         tables.iter().filter(|t| !is_system_name(&t.name)).collect();
     println!();
@@ -1539,9 +1516,11 @@ fn run_forensics(input: PathBuf, lenient: bool) -> Result<()> {
     println!("tables total: {}", tables.len());
     println!("tables user : {}", user_tables.len());
 
-    let (items, mut rejected) = collect_lineitems(&store, &model, &attribution, lenient)?;
-    let (headers, header_warnings) = collect_headers(&store, &model, &attribution, lenient)?;
-    rejected.extend(header_warnings);
+    let Records {
+        items,
+        rejected,
+        headers,
+    } = collect_records(&reader)?;
 
     println!();
     println!("=== business records ===");
@@ -1587,24 +1566,20 @@ mod tests {
     fn scan_rejections_are_stored_with_their_kind() {
         let conn = Connection::open_in_memory().unwrap();
         create_schema(&conn).unwrap();
-        let rejected = [ScanWarning::RecordSkipped(Error::UnknownAmountType {
-            page_number: 7,
-            page_offset: 0x5e7,
-            type_byte: 0x30,
-        })];
+        let rejected = [Error::Io(std::io::Error::other("disk gone"))];
         let tx = conn.unchecked_transaction().unwrap();
         insert_scan_rejections(&tx, &rejected).unwrap();
         tx.commit().unwrap();
-        let (page, offset, kind, message): (i64, i64, String, String) = conn
+        let (page, offset, kind, message): (Option<i64>, Option<i64>, String, String) = conn
             .query_row(
                 "SELECT page_number, page_offset, kind, message FROM scan_rejections",
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
             .unwrap();
-        assert_eq!((page, offset), (7, 0x5e7));
-        assert_eq!(kind, "unknown_amount_type");
-        assert!(message.contains("0x30"), "{message}");
+        assert_eq!((page, offset), (None, None));
+        assert_eq!(kind, "io");
+        assert!(message.contains("disk gone"), "{message}");
     }
 
     use super::*;

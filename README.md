@@ -100,20 +100,23 @@ full Python API.
 # Inventory the user tables in a company file
 $ openqbw catalog mybooks.qbw
 
-# Cross-validate page-to-table attribution against SYSINDEX
-$ openqbw verify mybooks.qbw
+# Columns recovered for one table
+$ openqbw schema mybooks.qbw abmc_invoice_header
 
-# List indexes (FK indexes only, summary mode)
-$ openqbw indexes mybooks.qbw --fk-only --summary-only
-
-# Export the catalog and lineitems to SQLite for inspection in any
+# Export transactions and line items to SQLite for inspection in any
 # SQL tool (DB Browser, Datasette, pandas, ...)
-$ openqbw export mybooks.qbw --out books.sqlite
+$ openqbw export mybooks.qbw books.sqlite
 
-# Other introspection subcommands
-$ openqbw schema mybooks.qbw
-$ openqbw nulls mybooks.qbw
-$ openqbw validate-attribution mybooks.qbw
+# CSV directory, or IIF with placeholder accounts
+$ openqbw migrate mybooks.qbw --format csv --out books/
+
+# Skip undecodable records instead of stopping; each is listed
+$ openqbw --lenient export mybooks.qbw books.sqlite
+
+# Reverse-engineering diagnostics (output may change in any release)
+$ openqbw debug indexes mybooks.qbw --fk-only --summary-only
+$ openqbw debug nulls mybooks.qbw
+$ openqbw debug validate-attribution mybooks.qbw
 ```
 
 See [docs/cli.md](docs/cli.md) for the full subcommand reference.
@@ -121,20 +124,23 @@ See [docs/cli.md](docs/cli.md) for the full subcommand reference.
 ## Library usage
 
 ```rust,no_run
-use openqbw::{iter_lineitems_with_attribution, PageAttribution};
-use opensqlany::{ApModel, PageStore};
+use openqbw::{ReadOptions, Reader};
 
-let store = PageStore::open("mybooks.qbw")?;
-let model = ApModel::learn(&store);
-let attrib = PageAttribution::build(&store, &model)?;
-
-let mut total_cents: i128 = 0;
-for li in iter_lineitems_with_attribution(&store, &model, &attrib) {
-    total_cents += li.amount_cents as i128;
+let reader = Reader::open("mybooks.qbw", &ReadOptions::default())?;
+let lines = reader.line_items()?;
+for w in &lines.warnings {
+    eprintln!("warning: {w}");
 }
-println!("invoice grand total: ${:.2}", total_cents as f64 / 100.0);
-# Ok::<(), anyhow::Error>(())
+// `None` means the amount was not decoded, not zero.
+let decoded: i64 = lines.items.iter().filter_map(|li| li.amount_cents).sum();
+let undecoded = lines.items.iter().filter(|li| li.amount_cents.is_none()).count();
+println!("decoded total: {decoded} cents; {undecoded} lines not decoded");
+# Ok::<(), openqbw::Error>(())
 ```
+
+Reads are strict: a record the decoder cannot read with confidence is an
+error. `ReadOptions::lenient()` skips such records and lists them in
+`rejected`; records that were kept but deserve less trust carry `flags`.
 
 ## Documentation
 
