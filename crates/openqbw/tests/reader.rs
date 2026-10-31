@@ -14,9 +14,13 @@ fn fixture_dir() -> PathBuf {
 fn committed_fixtures_match_the_generator() {
     // Set OPENQBW_REGEN_FIXTURES=1 to rewrite them after changing the
     // generator.
-    for (name, bad) in [("synthetic.qbw", false), ("synthetic-bad-record.qbw", true)] {
+    let fixtures = [
+        ("synthetic.qbw", common::synthetic_qbw(false)),
+        ("synthetic-bad-record.qbw", common::synthetic_qbw(true)),
+        ("synthetic-counts.qbw", common::synthetic_qbw_counts()),
+    ];
+    for (name, bytes) in fixtures {
         let path = fixture_dir().join(name);
-        let bytes = common::synthetic_qbw(bad);
         if std::env::var_os("OPENQBW_REGEN_FIXTURES").is_some() {
             std::fs::create_dir_all(fixture_dir()).unwrap();
             std::fs::write(&path, &bytes).unwrap();

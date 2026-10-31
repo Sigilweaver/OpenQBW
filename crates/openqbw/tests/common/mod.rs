@@ -13,6 +13,11 @@
 //! | 5 | `E` | `abmc_invoice_inventory_lineitem`: two invoice lines |
 //! | 6 | `E` | `abmc_general_journal_inventory_lineitem`: a balanced pair |
 //! | 7 | `E` | same table; with `bad_record`, one anchor with amount type 0x5A |
+//!
+//! The counts variant ([`synthetic_qbw_counts`]) adds a bogus `SYSTABLE` row
+//! (as [`synthetic_qbw_bad_root`]), a line on page 5 whose quantity is 3.0,
+//! and page 8, the `abmc_bill_header` table, which repeats the header ID of
+//! page 4 under another transaction type.
 
 #![allow(dead_code)] // each test binary uses a different subset
 
@@ -29,16 +34,24 @@ pub const SA_DAY: u32 = 23_817;
 /// The fixture as bytes. With `bad_record`, page 7 holds a line-item anchor
 /// followed by an unknown amount-type byte.
 pub fn synthetic_qbw(bad_record: bool) -> Vec<u8> {
-    build(bad_record, false)
+    build(bad_record, false, false)
 }
 
 /// The fixture with a fourth `SYSTABLE` row, `abmc_bogus`, whose
 /// `data_root_page` is page 1, the `@` calibration page.
 pub fn synthetic_qbw_bad_root() -> Vec<u8> {
-    build(false, true)
+    build(false, true, false)
 }
 
-fn build(bad_record: bool, bad_root: bool) -> Vec<u8> {
+/// The fixture with one of each countable condition: an invalid root page, a
+/// line-item anchor with quantity 3.0, and a header ID that appears on two
+/// header pages under two transaction types (the first, in page order, is
+/// `abmc_invoice_header`).
+pub fn synthetic_qbw_counts() -> Vec<u8> {
+    build(false, true, true)
+}
+
+fn build(bad_record: bool, bad_root: bool, counts: bool) -> Vec<u8> {
     let mut pages: Vec<Vec<u8>> = Vec::new();
     pages.push(superblock());
     pages.push(encode(&[0u8; PAGE], 1, b'@', [3, 5, 7, 9, 11, 13, 15, 17]));
@@ -64,6 +77,9 @@ fn build(bad_record: bool, bad_root: bool) -> Vec<u8> {
     if bad_root {
         put_systable_row(&mut systable, 0x500, 103, "abmc_bogus", 1, 1);
     }
+    if counts {
+        put_systable_row(&mut systable, 0x600, 104, "abmc_bill_header", 8, 8);
+    }
     pages.push(e_page(systable, 2));
     pages.push(e_page(vec![0u8; PAGE], 3));
 
@@ -86,6 +102,16 @@ fn build(bad_record: bool, bad_root: bool) -> Vec<u8> {
         b"ITEM000000000002",
         [0x02, 0x80, 0x0F, 0x04],
     );
+    if counts {
+        put_lineitem(
+            &mut invoice,
+            0x800,
+            HEADER_ID,
+            b"ITEM000000000009",
+            [0x02, 0x40, 0x0F, 0x04],
+        );
+        invoice[0x800 + 21..0x800 + 25].copy_from_slice(&3.0f32.to_le_bytes());
+    }
     pages.push(e_page(invoice, 5));
 
     let mut journal = vec![0u8; PAGE];
@@ -116,6 +142,12 @@ fn build(bad_record: bool, bad_root: bool) -> Vec<u8> {
         );
     }
     pages.push(e_page(tail, 7));
+
+    if counts {
+        let mut bill = vec![0u8; PAGE];
+        put_header(&mut bill, 0x400, HEADER_ID, 42);
+        pages.push(e_page(bill, 8));
+    }
 
     pages.concat()
 }

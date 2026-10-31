@@ -132,3 +132,58 @@ fn not_a_company_file_fails_with_exit_1() {
     assert_eq!(out.status.code(), Some(1), "{out:?}");
     assert!(String::from_utf8_lossy(&out.stderr).contains("bad superblock magic"));
 }
+
+#[test]
+fn duplicate_header_ids_are_resolved_the_same_way_in_every_format() {
+    // The fixture repeats one header ID on an invoice header page (first in
+    // page order) and a bill header page. Every format keeps the first.
+    let dir = tmp("dupes");
+    let fixture = fixture("synthetic-counts.qbw");
+
+    let db = dir.join("out.sqlite");
+    let out = openqbw(&["export".as_ref(), os(&fixture), os(&db)]);
+    assert!(out.status.success(), "{out:?}");
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let kinds: Vec<String> = conn
+        .prepare("SELECT type FROM transactions WHERE qb_id = '0000000000001QBm'")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(kinds, ["invoice"]);
+
+    let csv = dir.join("csv");
+    let out = openqbw(&[
+        "migrate".as_ref(),
+        os(&fixture),
+        "--format".as_ref(),
+        "csv".as_ref(),
+        "--out".as_ref(),
+        os(&csv),
+    ]);
+    assert!(out.status.success(), "{out:?}");
+    let rows = std::fs::read_to_string(csv.join("transactions.csv")).unwrap();
+    let data: Vec<&str> = rows.lines().skip(1).collect();
+    assert_eq!(data.len(), 1, "{rows}");
+    assert!(data[0].starts_with("0000000000001QBm,invoice,"), "{rows}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("repeat an earlier qb_id"), "{stderr}");
+
+    let iif = dir.join("out.iif");
+    let out = openqbw(&[
+        "migrate".as_ref(),
+        os(&fixture),
+        "--format".as_ref(),
+        "iif".as_ref(),
+        "--out".as_ref(),
+        os(&iif),
+        "--placeholder-accounts".as_ref(),
+    ]);
+    assert!(out.status.success(), "{out:?}");
+    let text = std::fs::read_to_string(&iif).unwrap();
+    assert!(text.contains("\tINVOICE\t"), "{text}");
+    assert!(!text.contains("\tBILL\t"), "{text}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("repeat an earlier qb_id"), "{stderr}");
+}

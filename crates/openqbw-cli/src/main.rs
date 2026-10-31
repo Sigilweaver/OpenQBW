@@ -300,6 +300,7 @@ fn run_export(input: PathBuf, output: PathBuf, lenient: bool) -> Result<ExportSt
         items,
         rejected,
         headers,
+        ..
     } = collect_records(&reader)?;
 
     let mut conn = Connection::open(&output).with_context(|| format!("opening {:?}", output))?;
@@ -1029,44 +1030,42 @@ struct HeaderDupes {
     conflicting_types: usize,
 }
 
-/// One header per `qb_id`, keeping the first sighting in page order, and
-/// the count of the others.
-fn dedupe_headers(
-    headers: &[TransactionHeader],
-) -> (HashMap<String, TransactionHeader>, HeaderDupes) {
-    let mut map: HashMap<String, TransactionHeader> = HashMap::new();
-    let mut conflicting: std::collections::HashSet<&str> = Default::default();
+/// One header per `qb_id`, keeping the first sighting in the order given
+/// (page order), and the count of the others. Every export format applies
+/// this rule through [`collect_records`].
+fn dedupe_headers(headers: Vec<TransactionHeader>) -> (Vec<TransactionHeader>, HeaderDupes) {
+    let mut first_type: HashMap<String, String> = HashMap::new();
+    let mut conflicting: std::collections::HashSet<String> = Default::default();
     let mut dupes = HeaderDupes::default();
+    let mut unique = Vec::with_capacity(headers.len());
     for h in headers {
-        match map.get(&h.qb_id) {
+        match first_type.get(&h.qb_id) {
             None => {
-                map.insert(h.qb_id.clone(), h.clone());
+                first_type.insert(h.qb_id.clone(), h.txn_type().to_owned());
+                unique.push(h);
             }
             Some(first) => {
                 dupes.duplicates += 1;
-                if first.txn_type() != h.txn_type() {
-                    conflicting.insert(h.qb_id.as_str());
+                if first != h.txn_type() {
+                    conflicting.insert(h.qb_id);
                 }
             }
         }
     }
     dupes.conflicting_types = conflicting.len();
-    (map, dupes)
+    (unique, dupes)
 }
 
+/// Insert one row per header. `headers` holds one header per `qb_id`
+/// (see [`dedupe_headers`]).
 fn insert_transaction_headers(
     tx: &Transaction<'_>,
     headers: &[TransactionHeader],
 ) -> Result<HashMap<String, TransactionHeader>> {
-    let (map, dupes) = dedupe_headers(headers);
-    if dupes.duplicates > 0 {
-        eprintln!(
-            "warning: {} transaction headers repeat an earlier qb_id and were not exported \
-             ({} qb_ids appear under more than one transaction type; the first in page order \
-             was kept)",
-            dupes.duplicates, dupes.conflicting_types
-        );
-    }
+    let map: HashMap<String, TransactionHeader> = headers
+        .iter()
+        .map(|h| (h.qb_id.clone(), h.clone()))
+        .collect();
     let mut stmt = tx.prepare(
         "INSERT INTO transactions \
          (qb_id, type, source_table, txn_date_raw, counter, date_source, \
@@ -1321,7 +1320,10 @@ struct Records {
     items: Vec<LineItem>,
     /// Records and pages the line-item and header scans skipped.
     rejected: Vec<QbwError>,
+    /// One header per `qb_id`, in page order.
     headers: Vec<TransactionHeader>,
+    /// Headers left out because their `qb_id` was seen earlier.
+    header_dupes: HeaderDupes,
 }
 
 /// Scan line items and headers. Strict mode stops at the first undecodable
@@ -1346,10 +1348,20 @@ fn collect_records(reader: &Reader) -> Result<Records> {
     items.sort_by_key(|li| (li.page_number, li.page_offset));
     let mut headers = heads.items;
     headers.sort_by_key(|h| (h.page_number, h.page_offset));
+    let (headers, header_dupes) = dedupe_headers(headers);
+    if header_dupes.duplicates > 0 {
+        eprintln!(
+            "warning: {} transaction headers repeat an earlier qb_id and were not exported \
+             ({} qb_ids appear under more than one transaction type; the first in page order \
+             was kept)",
+            header_dupes.duplicates, header_dupes.conflicting_types
+        );
+    }
     Ok(Records {
         items,
         rejected,
         headers,
+        header_dupes,
     })
 }
 
@@ -1409,6 +1421,7 @@ fn run_migrate_csv(input: PathBuf, out: PathBuf, lenient: bool) -> Result<()> {
         items,
         rejected,
         headers,
+        header_dupes,
     } = collect_records(&reader)?;
 
     // catalog.csv
@@ -1500,13 +1513,14 @@ fn run_migrate_csv(input: PathBuf, out: PathBuf, lenient: bool) -> Result<()> {
     )?;
 
     println!(
-        "openqbw migrate csv: out={:?} tables={} transactions={} lineitems={} undecoded_amounts={} skipped_records={}",
+        "openqbw migrate csv: out={:?} tables={} transactions={} lineitems={} undecoded_amounts={} skipped_records={} duplicate_headers={}",
         out,
         tables.len(),
         headers.len(),
         items.len(),
         items.iter().filter(|li| li.amount_cents.is_none()).count(),
         rejected.len(),
+        header_dupes.duplicates,
     );
     Ok(())
 }
@@ -1547,18 +1561,20 @@ fn run_migrate_iif(
         items,
         rejected,
         headers,
+        header_dupes,
     } = collect_records(&reader)?;
     let (text, stats) = render_iif(&items, &headers);
     std::fs::write(&out, text).with_context(|| format!("writing {:?}", out))?;
     println!(
         "openqbw migrate iif: out={:?} transactions={} lineitems={} skipped_transactions={} \
-         skipped_lineitems={} (undecoded amounts) skipped_records={}",
+         skipped_lineitems={} (undecoded amounts) skipped_records={} duplicate_headers={}",
         out,
         stats.written_txns,
         stats.written_lines,
         stats.skipped_txns,
         stats.skipped_lines,
         rejected.len(),
+        header_dupes.duplicates,
     );
     Ok(())
 }
@@ -1597,8 +1613,11 @@ fn render_iif(items: &[LineItem], headers: &[TransactionHeader]) -> (String, Iif
             .or_default()
             .push(li);
     }
-    let header_by_id: HashMap<&str, &TransactionHeader> =
-        headers.iter().map(|h| (h.qb_id.as_str(), h)).collect();
+    // The first header in page order wins, as in every other format.
+    let mut header_by_id: HashMap<&str, &TransactionHeader> = HashMap::new();
+    for h in headers {
+        header_by_id.entry(h.qb_id.as_str()).or_insert(h);
+    }
     let mut parent_ids: Vec<&str> = by_parent.keys().copied().collect();
     parent_ids.sort_unstable();
 
@@ -1685,6 +1704,7 @@ fn run_forensics(input: PathBuf, lenient: bool) -> Result<()> {
         items,
         rejected,
         headers,
+        ..
     } = collect_records(&reader)?;
 
     println!();
@@ -1784,8 +1804,8 @@ mod tests {
             TransactionHeader::synthetic("0000000000001QBm", "abmc_bill_header"),
             TransactionHeader::synthetic("0000000000002QBm", "abmc_bill_header"),
         ];
-        let (map, dupes) = dedupe_headers(&headers);
-        assert_eq!(map.len(), 2);
+        let (unique, dupes) = dedupe_headers(headers.to_vec());
+        assert_eq!(unique.len(), 2);
         assert_eq!(
             dupes,
             HeaderDupes {
