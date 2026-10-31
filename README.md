@@ -6,7 +6,7 @@
 [![PyPI](https://img.shields.io/pypi/v/openqbw.svg)](https://pypi.org/project/openqbw/)
 [![docs.rs](https://img.shields.io/docsrs/openqbw)](https://docs.rs/openqbw)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![Rust MSRV](https://img.shields.io/badge/rust-1.87%2B-orange.svg)](https://www.rust-lang.org)
+[![Rust MSRV](https://img.shields.io/badge/rust-1.95%2B-orange.svg)](https://www.rust-lang.org)
 [![Docs](https://img.shields.io/badge/docs-sigilweaver.app-blue.svg)](https://sigilweaver.app/openqbw/docs/)
 
 > Open specification and open-source parser for the **QuickBooks Desktop company file** (`.qbw`) format.
@@ -64,19 +64,24 @@ and the empirical notebook in [re/NOTES.md](re/NOTES.md).
 
 ## Install
 
-OpenQBW depends on the [OpenSQLAnywhere](https://github.com/Sigilweaver/OpenSQLAnywhere)
-crate, which lives in a sibling directory via a relative path. Clone
-both side by side:
+OpenQBW reads the page store through the
+[OpenSQLAnywhere](https://github.com/Sigilweaver/OpenSQLAnywhere) crate,
+which Cargo fetches. Build from a clone:
 
 ```console
-$ git clone https://github.com/Sigilweaver/OpenSQLAnywhere.git
 $ git clone https://github.com/Sigilweaver/OpenQBW.git
 $ cd OpenQBW
-$ cargo build --release
+$ cargo build --release --locked
 $ ./target/release/openqbw --help
 ```
 
-Rust 1.85+ is required (workspace uses edition 2024).
+`Cargo.lock` is committed, so `--locked` builds the CLI and the Python
+wheel from the dependency versions CI tested.
+
+Supported toolchains: Rust 1.95 or later (the `rust-version` in
+`Cargo.toml`, checked in CI) and Python 3.10 or later (abi3 wheels built
+against the 3.10 stable ABI). A release that raises either floor says so in
+the CHANGELOG.
 
 ### Python bindings
 
@@ -100,41 +105,71 @@ full Python API.
 # Inventory the user tables in a company file
 $ openqbw catalog mybooks.qbw
 
-# Cross-validate page-to-table attribution against SYSINDEX
-$ openqbw verify mybooks.qbw
+# Columns recovered for one table
+$ openqbw schema mybooks.qbw abmc_invoice_header
 
-# List indexes (FK indexes only, summary mode)
-$ openqbw indexes mybooks.qbw --fk-only --summary-only
-
-# Export the catalog and lineitems to SQLite for inspection in any
+# Export transactions and line items to SQLite for inspection in any
 # SQL tool (DB Browser, Datasette, pandas, ...)
-$ openqbw export mybooks.qbw --out books.sqlite
+$ openqbw export mybooks.qbw books.sqlite
 
-# Other introspection subcommands
-$ openqbw schema mybooks.qbw
-$ openqbw nulls mybooks.qbw
-$ openqbw validate-attribution mybooks.qbw
+# CSV directory, or IIF with placeholder accounts
+$ openqbw migrate mybooks.qbw --format csv --out books/
+
+# Skip undecodable records instead of stopping; each is listed
+$ openqbw --lenient export mybooks.qbw books.sqlite
+
+# Reverse-engineering diagnostics (output may change in any release)
+$ openqbw debug indexes mybooks.qbw --fk-only --summary-only
+$ openqbw debug nulls mybooks.qbw
+$ openqbw debug validate-attribution mybooks.qbw
 ```
 
 See [docs/cli.md](docs/cli.md) for the full subcommand reference.
 
+Exit status: 0 on success, 1 on an error (including a file that is not a
+supported company file, or an undecodable record without `--lenient`), 2
+on a usage error, and 3 when `verify` finds a check that differs. The
+`verify` regression baseline is specific to the Rock Castle Construction
+sample; pass `--no-regression-baseline` for other files.
+
+### Output formats
+
+Every file set openqbw writes records the version of its layout:
+
+- SQLite (`export`, `migrate --format sqlite`): `PRAGMA user_version` and
+  `meta.format_version`, plus `meta.openqbw_version`.
+- CSV (`migrate --format csv`): `manifest.json` with `format_version`,
+  `openqbw_version` and each file's row count. `rejected.csv` is always
+  written.
+
+The layout version is 1. Adding a table, a column, a CSV file or a manifest
+key leaves it unchanged; renaming or removing one, or changing what a value
+means, increments it. Readers should ignore tables, columns and keys they do
+not know. Codes stored in the exports (`kind` in `scan_rejections` and
+`rejected.csv`, `flags`, `amount_encoding`, `date_source`) are stable
+snake_case strings; the `message` text is for people and may change.
+NULL (an empty CSV field) means a value was not decoded, never zero.
+
 ## Library usage
 
 ```rust,no_run
-use openqbw::{iter_lineitems_with_attribution, PageAttribution};
-use opensqlany::{ApModel, PageStore};
+use openqbw::{ReadOptions, Reader};
 
-let store = PageStore::open("mybooks.qbw")?;
-let model = ApModel::learn(&store);
-let attrib = PageAttribution::build(&store, &model)?;
-
-let mut total_cents: i128 = 0;
-for li in iter_lineitems_with_attribution(&store, &model, &attrib) {
-    total_cents += li.amount_cents as i128;
+let reader = Reader::open("mybooks.qbw", &ReadOptions::default())?;
+let lines = reader.line_items()?;
+for w in &lines.warnings {
+    eprintln!("warning: {w}");
 }
-println!("invoice grand total: ${:.2}", total_cents as f64 / 100.0);
-# Ok::<(), anyhow::Error>(())
+// `None` means the amount was not decoded, not zero.
+let decoded: i64 = lines.items.iter().filter_map(|li| li.amount_cents).sum();
+let undecoded = lines.items.iter().filter(|li| li.amount_cents.is_none()).count();
+println!("decoded total: {decoded} cents; {undecoded} lines not decoded");
+# Ok::<(), openqbw::Error>(())
 ```
+
+Reads are strict: a record the decoder cannot read with confidence is an
+error. `ReadOptions::lenient()` skips such records and lists them in
+`rejected`; records that were kept but deserve less trust carry `flags`.
 
 ## Documentation
 

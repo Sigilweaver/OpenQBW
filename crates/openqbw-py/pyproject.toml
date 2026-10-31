@@ -4,14 +4,14 @@ build-backend = "maturin"
 
 [project]
 name = "openqbw"
-version = "0.1.6"
+version = "0.2.0"
 description = "Python bindings for OpenQBW (QuickBooks .qbw file reader)"
 keywords = ["quickbooks", "qbw", "accounting", "parser"]
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE"]
 authors = [{ name = "Nathan Riley" }]
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 classifiers = [
     "Development Status :: 3 - Alpha",
     "License :: OSI Approved :: Apache Software License",
@@ -25,6 +25,7 @@ Repository = "https://github.com/Sigilweaver/OpenQBW"
 
 [tool.maturin]
 manifest-path = "Cargo.toml"
-module-name = "openqbw"
+module-name = "openqbw._openqbw"
+python-source = "python"
 include = [{ path = "LICENSE", format = "sdist" }, { path = "NOTICE", format = "sdist" }]
 strip = true

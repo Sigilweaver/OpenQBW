@@ -18,7 +18,6 @@ path = "src/main.rs"
 
 [dependencies]
 openqbw = { workspace = true }
-opensqlany = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
 rusqlite = { workspace = true }

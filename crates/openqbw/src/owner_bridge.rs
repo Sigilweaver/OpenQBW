@@ -49,7 +49,9 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use opensqlany::{ApModel, PageStore};
 
-use crate::bv_recovery::{deobfuscate_with_bv, recover_bv_any};
+use crate::decode::decode_page;
+use crate::error::Result;
+use crate::scan::{ReadOptions, Scan};
 use crate::syscolumn::SysColumn;
 use crate::systable::SysTableEntry;
 
@@ -73,10 +75,11 @@ const MIN_CALIBRATION_PAIRS: usize = 4;
 
 /// Where a given owner -> table-name mapping came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum BridgeSource {
     /// The `SYSTABLE` row's own back-reference (this module).
     SysTableBackref,
-    /// The `SYSOBJECT` name scan ([`crate::sysobject`]).
+    /// The `SYSOBJECT` name scan (`sysobject`).
     SysObjectScan,
 }
 
@@ -92,6 +95,7 @@ impl BridgeSource {
 
 /// Owner -> table-name map, plus how it was obtained.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct OwnerBridge {
     entries: BTreeMap<u32, (String, BridgeSource)>,
     /// Back-reference distance calibrated for this file, if one was
@@ -104,6 +108,8 @@ pub struct OwnerBridge {
     /// Owners for which the back-reference saw more than one candidate
     /// table name and had to take a majority vote.
     pub ambiguous_owners: usize,
+    /// Pages a lenient read skipped because they failed to decode.
+    pub pages_rejected: usize,
 }
 
 impl OwnerBridge {
@@ -171,6 +177,7 @@ fn backref_at(plain: &[u8], row_offset: usize, distance: usize) -> Option<u32> {
 /// Per-distance tally of `(table name, owner)` sightings, used to pick
 /// this file's back-reference distance and then to build the map.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct BackrefVotes {
     /// distance -> owner -> name -> sightings
     votes: BTreeMap<usize, HashMap<u32, HashMap<String, u32>>>,
@@ -272,19 +279,23 @@ impl BackrefVotes {
 /// Decodes just the pages that carry `SYSTABLE` rows - a few dozen on a
 /// typical file - so this is far cheaper than the whole-file
 /// [`crate::sysobject::bridge_owners_to_tables`] scan.
-pub fn bridge_owners_via_backref(
+///
+/// Pages that fail to decode are rejected per `options` and counted in
+/// [`OwnerBridge::pages_rejected`].
+pub(crate) fn bridge_owners_via_backref(
     store: &PageStore,
     model: &ApModel,
     columns: &[SysColumn],
     tables: &[SysTableEntry],
-) -> OwnerBridge {
+    options: &ReadOptions,
+) -> Result<OwnerBridge> {
     let owners: HashSet<u32> = columns
         .iter()
         .map(|c| c.owner_object_id)
         .filter(|o| *o != 0)
         .collect();
     if owners.is_empty() || tables.is_empty() {
-        return OwnerBridge::default();
+        return Ok(OwnerBridge::default());
     }
 
     let mut by_page: BTreeMap<u64, Vec<(usize, &str)>> = BTreeMap::new();
@@ -296,37 +307,40 @@ pub fn bridge_owners_via_backref(
     }
 
     let mut votes = BackrefVotes::new();
+    let mut pages: Scan<()> = Scan::default();
     for (pn, rows) in &by_page {
-        let Ok(page) = store.page(*pn) else { continue };
-        let raw = page.bytes();
-        let plain = if let Some(bv) = recover_bv_any(*pn, raw) {
-            deobfuscate_with_bv(raw, *pn, bv)
-        } else {
-            model.deobfuscate_with_store(raw, *pn, store)
-        };
-        votes.observe_page(&plain, rows, &owners);
+        match decode_page(store, model, *pn) {
+            Ok(decoded) => votes.observe_page(decoded.bytes(), rows, &owners),
+            Err(e) => pages.reject(e, options)?,
+        }
     }
 
-    match votes.best_distance() {
+    let mut bridge = match votes.best_distance() {
         Some(distance) => votes.bridge_at(distance),
         None => OwnerBridge::default(),
-    }
+    };
+    bridge.pages_rejected = pages.rejected.len();
+    Ok(bridge)
 }
 
 /// Merge the `SYSOBJECT` name scan into `bridge`, filling in owners the
 /// back-reference did not resolve. Existing entries win: the
 /// back-reference is calibrated against this file, the name scan is not.
-pub fn extend_with_sysobject(
+pub(crate) fn extend_with_sysobject(
     bridge: &mut OwnerBridge,
     store: &PageStore,
     model: &ApModel,
     columns: &[SysColumn],
     tables: &[SysTableEntry],
-) {
-    let scanned = crate::sysobject::bridge_owners_to_tables(store, model, columns, tables);
+    options: &ReadOptions,
+) -> Result<()> {
+    let (scanned, rejected) =
+        crate::sysobject::bridge_owners_to_tables(store, model, columns, tables, options)?;
+    bridge.pages_rejected += rejected;
     for (owner, name) in scanned {
         bridge.insert(owner, name, BridgeSource::SysObjectScan);
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -440,6 +454,7 @@ mod tests {
                 width: 4,
                 page_number: 0,
                 tag_offset: 0,
+                flags: Vec::new(),
             });
             tables.push(SysTableEntry {
                 table_id: 100 + i as u32,
@@ -448,8 +463,9 @@ mod tests {
                 col_count: None,
                 data_root_page: None,
                 last_page: None,
-                page_number: 0,
+                page_number: 1,
                 row_offset: *tag,
+                flags: Vec::new(),
             });
             // Independent SYSOBJECT-shaped records establish the correct
             // mapping, without depending on either prefix layout.
@@ -465,19 +481,23 @@ mod tests {
         assert_eq!(votes.score(44), 4);
         assert_eq!(votes.best_distance(), None);
 
-        // Encode a zero-step, bv=0 synthetic AP page, using page zero so
-        // each sector's base is its sector index. The trailer is plaintext.
+        // Encode a zero-step, bv=0 synthetic AP page as page 1 (after a
+        // blank superblock), so each sector's base is 1 + its sector index.
+        // The trailer is plaintext.
         plain[0xFF2] = b'E';
-        let mut raw = plain.clone();
-        for (offset, byte) in raw[..0xFF0].iter_mut().enumerate() {
-            *byte = byte.wrapping_add((offset / 512) as u8);
+        let mut raw = vec![0u8; 0x1000];
+        raw.extend(plain.iter().copied());
+        for (offset, byte) in raw[0x1000..0x1FF0].iter_mut().enumerate() {
+            *byte = byte.wrapping_add(1 + (offset / 512) as u8);
         }
-        let store = PageStore::from_bytes(raw).unwrap();
-        let model = ApModel::default();
-        let mut bridge = bridge_owners_via_backref(&store, &model, &columns, &tables);
+        let store = crate::testutil::sealed_store(raw);
+        let model = crate::testutil::lenient_model(&store);
+        let opts = ReadOptions::strict();
+        let mut bridge =
+            bridge_owners_via_backref(&store, &model, &columns, &tables, &opts).unwrap();
         assert!(bridge.is_empty());
         assert_eq!(bridge.backref_distance, None);
-        extend_with_sysobject(&mut bridge, &store, &model, &columns, &tables);
+        extend_with_sysobject(&mut bridge, &store, &model, &columns, &tables, &opts).unwrap();
         assert_eq!(bridge.from_backref, 0);
         assert_eq!(bridge.from_sysobject, 4);
         for (i, (_, name)) in rows.iter().enumerate() {
