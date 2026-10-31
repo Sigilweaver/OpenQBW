@@ -143,6 +143,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Page 0 (the superblock) is checked by its CRC only, so real company files
+  open again.
 - The opaque-page count measures entropy on the decoded page body. It
   measured the stored AP ciphertext, which is always near 8 bits/byte, so every
   data page of a readable file counted as opaque and the scan failed with
