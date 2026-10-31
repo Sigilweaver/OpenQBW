@@ -906,16 +906,21 @@ fn run_verify(
 const UNATTRIBUTED: &str = "(unattributed)";
 
 /// Refuse an SQLite file this build cannot read: one that is not an
-/// openqbw export, or one written in a later format version.
+/// openqbw export, or one written in a later format version. `verify` runs it
+/// on the file it has just written, as a check on the writer.
 fn check_export_format(conn: &Connection) -> Result<()> {
     let user_version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-    let meta: Option<String> = conn
-        .query_row(
-            "SELECT value FROM meta WHERE key = 'format_version'",
-            [],
-            |r| r.get(0),
-        )
-        .ok();
+    let meta: Option<String> = match conn.query_row(
+        "SELECT value FROM meta WHERE key = 'format_version'",
+        [],
+        |r| r.get(0),
+    ) {
+        Ok(v) => Some(v),
+        Err(rusqlite::Error::QueryReturnedNoRows) => None,
+        // A file without a meta table is not an openqbw export.
+        Err(rusqlite::Error::SqliteFailure(_, Some(m))) if m.starts_with("no such table") => None,
+        Err(e) => return Err(e).context("reading meta.format_version"),
+    };
     let Some(meta) = meta else {
         anyhow::bail!("not an openqbw export: no meta.format_version");
     };
@@ -1712,6 +1717,16 @@ mod tests {
             e.to_string().contains("newer than this openqbw reads"),
             "{e}"
         );
+    }
+
+    #[test]
+    fn meta_read_error_is_reported_not_treated_as_missing() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE meta (key TEXT)").unwrap();
+        let e = check_export_format(&conn).unwrap_err();
+        let msg = format!("{e:#}");
+        assert!(msg.contains("reading meta.format_version"), "{msg}");
+        assert!(!msg.contains("not an openqbw export"), "{msg}");
     }
 
     #[test]
