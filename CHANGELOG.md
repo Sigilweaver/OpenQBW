@@ -61,8 +61,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   version, or has a damaged page now fails to open with a specific error
   instead of exporting zero or spurious records. The CLI and Python
   `openqbw.open()` use `openqbw::open_store`; Python raises `FormatError`.
-- Line-item scans count pages whose body is indistinguishable from random
-  bytes. When more than half of the data pages are opaque (as in a
+- Line-item scans count pages whose decoded body is indistinguishable from
+  random bytes. When more than half of the data pages are opaque (as in a
   password-protected file) the scan fails with `ContentOpaque`; otherwise
   the count is reported as a `ScanWarning::OpaquePages` (CLI stderr, Python
   `UserWarning`). The 50% threshold has not been measured on a corpus.
@@ -140,6 +140,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `openqbw migrate --format iif` exits with an error. `--placeholder-accounts`
   writes the file with placeholder accounts and leaves out, and counts,
   transactions that have an undecoded amount.
+
+### Fixed
+
+- The opaque-page count measures entropy on the decoded page body. It
+  measured the stored AP ciphertext, which is always near 8 bits/byte, so every
+  data page of a readable file counted as opaque and the scan failed with
+  `ContentOpaque`. `count_opaque_pages` takes the `ApModel` used to decode
+  the pages.
+- Two line-item anchors less than 29 bytes apart no longer panic while the
+  later record's item ID is searched.
+- SQLite export and `openqbw verify` with `--lenient` no longer fail with
+  "Wrong number of parameters" when records were skipped: the `scan_rejections`
+  insert now supplies the `kind` column.
 
 ## [0.1.6] - 2026-10-04
 
