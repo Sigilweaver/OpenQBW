@@ -23,15 +23,14 @@
 
 use std::collections::BTreeMap;
 
-use opensqlany::{ApModel, PageStore};
-
-use crate::systable::{SysTableEntry, collect_unique};
+use crate::systable::SysTableEntry;
 
 /// Why [`PageAttribution`] has no usable entries, when it doesn't.
 ///
 /// Distinguishing these matters: they call for different next steps, and
 /// look identical from `is_empty()` alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum AttributionGap {
     /// No `SYSTABLE` rows were found in the store at all - the catalog scan
     /// itself came up empty.
@@ -46,8 +45,19 @@ pub enum AttributionGap {
     AllRootsZeroed,
 }
 
+impl AttributionGap {
+    /// Stable snake_case name, used in exports.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NoCatalogRows => "no_catalog_rows",
+            Self::AllRootsZeroed => "all_roots_zeroed",
+        }
+    }
+}
+
 /// Resolves page numbers to the `SYSTABLE` entry that most likely owns them.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct PageAttribution {
     /// Entries sorted by `data_root_page` ascending. Only entries with a
     /// non-zero `data_root_page` are retained.
@@ -79,11 +89,6 @@ impl PageAttribution {
     #[inline]
     pub fn gap(&self) -> Option<AttributionGap> {
         self.gap
-    }
-
-    /// Convenience: read SYSTABLE from `store`/`model` and build the map.
-    pub fn build(store: &PageStore, model: &ApModel) -> Self {
-        Self::from_catalog(collect_unique(store, model))
     }
 
     /// Look up the table that most likely owns `page_number`.
@@ -161,6 +166,7 @@ mod tests {
             last_page: last,
             page_number: 0,
             row_offset: 0,
+            flags: Vec::new(),
         }
     }
 
