@@ -265,7 +265,7 @@ pub fn scan_lineitems(
     options: &ScanOptions,
 ) -> Result<ScanResult<LineItem>, Error> {
     let mut scan = ScanResult::default();
-    let opaque = count_opaque_pages(store)?;
+    let opaque = count_opaque_pages(store, model)?;
     if opaque.mostly_opaque() {
         return Err(Error::ContentOpaque {
             opaque: opaque.opaque,
@@ -457,7 +457,7 @@ fn parse_anchor(
 
     // Backward search for the nearest item QB-ID prefixed by `04 00 10`,
     // not reaching into the previous record.
-    let back_start = anchor_start.saturating_sub(96).max(floor);
+    let back_start = anchor_start.saturating_sub(96).max(floor).min(anchor_start);
     let item_qb_id = find_item_id_nearest(&body[back_start..anchor_start]);
 
     let mut li = LineItem {
@@ -573,6 +573,22 @@ mod tests {
         scan_page(body, 7, &mut out);
         assert_eq!(out.len(), 1);
         out.pop().unwrap()
+    }
+
+    #[test]
+    fn anchors_less_than_an_anchor_apart_do_not_panic() {
+        // The second anchor starts less than 29 + 4 bytes after the
+        // first, so its item-ID search floor lies past the anchor itself.
+        let mut body = anchor_body(PAGE_DATA_END, 32, &[0x02, 0x40, 0x0F, 0x04]);
+        let second = 32 + ANCHOR_LEN;
+        body[second..second + 5].copy_from_slice(&PARENT_PREFIX);
+        body[second + 5..second + 5 + QB_ID_LEN].copy_from_slice(b"0000000000002QBm");
+        body[second + 5 + QB_ID_LEN..second + ANCHOR_LEN].copy_from_slice(&F32_ONE);
+        body[second + ANCHOR_LEN..second + ANCHOR_LEN + 4]
+            .copy_from_slice(&[0x02, 0x40, 0x0F, 0x04]);
+        let mut out = Vec::new();
+        scan_page(&body, 7, &mut out);
+        assert_eq!(out.len(), 2);
     }
 
     #[test]

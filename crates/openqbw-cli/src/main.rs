@@ -1054,6 +1054,7 @@ fn insert_scan_rejections(tx: &Transaction<'_>, rejected: &[ScanWarning]) -> Res
         stmt.execute(params![
             page.map(|p| p as i64),
             offset.map(|o| o as i64),
+            e.kind_str(),
             e.to_string()
         ])?;
     }
@@ -1580,6 +1581,32 @@ fn run_forensics(input: PathBuf, lenient: bool) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use openqbw::Error;
+
+    #[test]
+    fn scan_rejections_are_stored_with_their_kind() {
+        let conn = Connection::open_in_memory().unwrap();
+        create_schema(&conn).unwrap();
+        let rejected = [ScanWarning::RecordSkipped(Error::UnknownAmountType {
+            page_number: 7,
+            page_offset: 0x5e7,
+            type_byte: 0x30,
+        })];
+        let tx = conn.unchecked_transaction().unwrap();
+        insert_scan_rejections(&tx, &rejected).unwrap();
+        tx.commit().unwrap();
+        let (page, offset, kind, message): (i64, i64, String, String) = conn
+            .query_row(
+                "SELECT page_number, page_offset, kind, message FROM scan_rejections",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!((page, offset), (7, 0x5e7));
+        assert_eq!(kind, "unknown_amount_type");
+        assert!(message.contains("0x30"), "{message}");
+    }
+
     use super::*;
     use openqbw::AmountEncoding;
 
