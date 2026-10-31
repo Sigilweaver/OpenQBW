@@ -140,4 +140,54 @@ mod tests {
         };
         check_store(&s, &off).unwrap();
     }
+
+    /// Page-0 shaped like a real superblock: offsets 0x400..0x1000 hold the
+    /// rolled engine fingerprint text (SPECIFICATION.md section 2.3), so the
+    /// bytes at 0xFF0..0xFFB are ASCII, not a page trailer.
+    fn superblock_with_text_tail(pages: usize) -> Vec<u8> {
+        let mut b = vec![0u8; PAGE_SIZE * pages];
+        b[0x06] = opensqlany::FLAGS_06_BASE;
+        b[0x10..0x14].copy_from_slice(&SUPPORTED_VERSION.0.to_le_bytes());
+        b[0x14..0x18].copy_from_slice(&SA_MAGIC.to_le_bytes());
+        b[0x18..0x1A].copy_from_slice(&SUPPORTED_VERSION.1.to_le_bytes());
+        b[0x1A..0x1C].copy_from_slice(&SUPPORTED_VERSION.2.to_le_bytes());
+        let text = b"2182 SAP SE, Copyright (c)2015 17.0.4.";
+        for (i, byte) in b[0x400..0xFFC].iter_mut().enumerate() {
+            *byte = text[i % text.len()];
+        }
+        for p in b.chunks_mut(PAGE_SIZE) {
+            seal(p);
+        }
+        b
+    }
+
+    #[test]
+    fn superblock_text_tail_is_not_held_to_the_data_page_trailer() {
+        let b = superblock_with_text_tail(3);
+        assert_ne!(b[0xFF3], 0, "fixture must have a non-zero 0xFF3");
+        let s = PageStore::from_bytes_unchecked(b).unwrap();
+        check_store(&s, &OpenOptions::default()).unwrap();
+    }
+
+    #[test]
+    fn superblock_crc_is_still_checked() {
+        let mut b = superblock_with_text_tail(3);
+        b[0x500] ^= 0xFF;
+        let s = PageStore::from_bytes_unchecked(b).unwrap();
+        let e = check_store(&s, &OpenOptions::default()).unwrap_err();
+        assert!(matches!(e, Error::BadCrc { page_number: 0, .. }));
+    }
+
+    #[test]
+    fn data_page_with_non_zero_reserved_trailer_bytes_is_still_an_error() {
+        let mut b = superblock_with_text_tail(3);
+        b[PAGE_SIZE * 2 + 0xFF3] = 1;
+        seal(&mut b[PAGE_SIZE * 2..PAGE_SIZE * 3]);
+        let s = PageStore::from_bytes_unchecked(b).unwrap();
+        let e = check_store(&s, &OpenOptions::default()).unwrap_err();
+        assert!(
+            matches!(e, Error::BadTrailer { page_number: 2 }),
+            "expected a trailer error on page 2, got {e:?}"
+        );
+    }
 }
