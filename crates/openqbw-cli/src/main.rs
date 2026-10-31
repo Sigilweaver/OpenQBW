@@ -18,8 +18,8 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use openqbw::{
     AmountType, AttributionGap, ContentAttribution, CrossValidation, LineItem, PageAttribution,
-    ScanOptions, ScanWarning, SysIndexEntry, SysTableEntry, TransactionHeader, scan_lineitems,
-    scan_transaction_headers,
+    ScanOptions, ScanWarning, SysIndexEntry, SysTableEntry, TransactionHeader, learn_model,
+    scan_lineitems, scan_transaction_headers,
 };
 use opensqlany::{ApModel, PageStore};
 use rusqlite::{Connection, Transaction, params};
@@ -229,7 +229,7 @@ fn run_export(input: PathBuf, output: PathBuf, lenient: bool) -> Result<ExportSt
     }
 
     let store = open_checked(&input)?;
-    let model = ApModel::learn(&store);
+    let model = learn_model(&store)?;
     let attribution = PageAttribution::build(&store, &model);
     warn_on_attribution_gap(&attribution);
 
@@ -259,7 +259,7 @@ fn run_export(input: PathBuf, output: PathBuf, lenient: bool) -> Result<ExportSt
 
 fn run_catalog(input: PathBuf, user_only: bool) -> Result<()> {
     let store = open_checked(&input)?;
-    let model = ApModel::learn(&store);
+    let model = learn_model(&store)?;
 
     let mut entries: Vec<SysTableEntry> = openqbw::collect_unique(&store, &model);
     entries.sort_by_key(|e| e.table_id);
@@ -310,7 +310,7 @@ fn run_catalog(input: PathBuf, user_only: bool) -> Result<()> {
 
 fn run_schema(input: PathBuf, table: String) -> Result<()> {
     let store = open_checked(&input)?;
-    let model = ApModel::learn(&store);
+    let model = learn_model(&store)?;
     let found = openqbw::recover_schema(&store, &model, &table);
     let cols = &found.columns;
     if cols.is_empty() {
@@ -357,17 +357,18 @@ fn run_schema(input: PathBuf, table: String) -> Result<()> {
     }
     let st = &found.scan_stats;
     let unread = st.rows_no_name + st.rows_ambiguous_name + st.rows_bad_layout;
-    if unread > 0 || st.pages_without_directory > 0 {
+    if unread > 0 || st.pages_without_directory > 0 || st.pages_unconfirmed_directory > 0 {
         eprintln!(
             "warning: SYSCOLUMN scan: {} of {} rows not read ({} without a name, {} with an \
              ambiguous name, {} with an unexpected layout); {} pages skipped for lack of a \
-             slot directory",
+             slot directory, {} because their slot directory is not confirmed",
             unread,
             st.tags_seen,
             st.rows_no_name,
             st.rows_ambiguous_name,
             st.rows_bad_layout,
-            st.pages_without_directory
+            st.pages_without_directory,
+            st.pages_unconfirmed_directory
         );
     }
     if found.implausible_column_ids() > 0 {
@@ -428,7 +429,7 @@ fn schema_miss_report(found: &openqbw::SchemaRecovery) -> String {
 
 fn run_fkgraph(input: PathBuf, resolved_only: bool) -> Result<()> {
     let store = open_checked(&input)?;
-    let model = ApModel::learn(&store);
+    let model = learn_model(&store)?;
     let graph = openqbw::build_fk_graph(&store, &model);
     let s = openqbw::fk_graph_stats(&graph);
     let edges = &graph.edges;
@@ -468,7 +469,7 @@ fn run_fkgraph(input: PathBuf, resolved_only: bool) -> Result<()> {
 
 fn run_indexes(input: PathBuf, fk_only: bool, summary_only: bool) -> Result<()> {
     let store = open_checked(&input)?;
-    let model = ApModel::learn(&store);
+    let model = learn_model(&store)?;
     let entries: Vec<SysIndexEntry> = openqbw::collect_unique_sysindex(&store, &model);
     let tables: Vec<SysTableEntry> = openqbw::collect_unique(&store, &model);
     let position = PageAttribution::build(&store, &model);
@@ -533,7 +534,7 @@ fn print_audit_summary(audit: &CrossValidation) {
 
 fn run_validate_attribution(input: PathBuf) -> Result<()> {
     let store = open_checked(&input)?;
-    let model = ApModel::learn(&store);
+    let model = learn_model(&store)?;
     let position = openqbw::PageAttribution::build(&store, &model);
     let schema = openqbw::SchemaAttribution::build(&store, &model);
     println!(
@@ -567,7 +568,7 @@ fn run_validate_attribution(input: PathBuf) -> Result<()> {
 
 fn run_nulls(input: PathBuf) -> Result<()> {
     let store = open_checked(&input)?;
-    let model = ApModel::learn(&store);
+    let model = learn_model(&store)?;
     let buckets = openqbw::nulls_flag_histogram(&store, &model);
     let total: usize = buckets.iter().map(|b| b.count).sum();
     println!(
@@ -751,7 +752,7 @@ fn run_verify(
     println!("=== SYSINDEX cross-validation (WP-6Z.3) ===");
     {
         let store = open_checked(&input)?;
-        let model = ApModel::learn(&store);
+        let model = learn_model(&store)?;
         let entries = openqbw::collect_unique_sysindex(&store, &model);
         let tables: Vec<SysTableEntry> = openqbw::collect_unique(&store, &model);
         let position = PageAttribution::build(&store, &model);
@@ -770,7 +771,7 @@ fn run_verify(
         println!();
         println!("=== content-signature attribution (--strict-attribution) ===");
         let store = open_checked(&input)?;
-        let model = ApModel::learn(&store);
+        let model = learn_model(&store)?;
         let content = ContentAttribution::build(&store, &model);
         let position = PageAttribution::build(&store, &model);
         println!(
@@ -1206,7 +1207,7 @@ struct Records {
 
 fn collect_records(input: &std::path::Path, lenient: bool) -> Result<Records> {
     let store = open_checked(input)?;
-    let model = ApModel::learn(&store);
+    let model = learn_model(&store)?;
     let attribution = PageAttribution::build(&store, &model);
     warn_on_attribution_gap(&attribution);
     let (mut items, mut rejected) = collect_lineitems(&store, &model, &attribution, lenient)?;
@@ -1510,7 +1511,7 @@ fn render_iif(items: &[LineItem], headers: &[TransactionHeader]) -> (String, Iif
 
 fn run_forensics(input: PathBuf, lenient: bool) -> Result<()> {
     let store = open_checked(&input)?;
-    let model = ApModel::learn(&store);
+    let model = learn_model(&store)?;
     let attribution = PageAttribution::build(&store, &model);
 
     let file_size = store.size_bytes();

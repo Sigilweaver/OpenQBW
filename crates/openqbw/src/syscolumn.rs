@@ -33,9 +33,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::iter::FusedIterator;
 
-use opensqlany::{ApModel, Page, PageStore, PageType, Result as SaResult, SlottedPage};
+use opensqlany::{ApModel, Page, PageStore, PageType, ReadOptions, SlottedPage};
 
-use crate::bv_recovery::{deobfuscate_with_bv, recover_bv_any};
+use crate::decode::decode_page;
+use crate::error::Result;
 use crate::owner_bridge::BridgeSource;
 
 /// Fixed 8-byte anchor that precedes the numeric portion of every
@@ -66,6 +67,9 @@ pub struct SyscolumnStats {
     pub rows_bad_layout: usize,
     /// `E` pages skipped because no slot directory could be read.
     pub pages_without_directory: usize,
+    /// `E` pages skipped because the page prelude did not confirm the slot
+    /// directory found on them, so row boundaries are unknown.
+    pub pages_unconfirmed_directory: usize,
 }
 
 /// One parsed `SYSCOLUMN` row.
@@ -203,14 +207,23 @@ fn parse_rows_in_body(body: &[u8], pn: u64, out: &mut Vec<SysColumn>, stats: &mu
 /// Scan every slotted-page row body on a single decoded page for
 /// `SYSCOLUMN` rows.
 pub fn scan_page(plain: &[u8], pn: u64, out: &mut Vec<SysColumn>, stats: &mut SyscolumnStats) {
-    let page = Page::from_bytes(pn, plain);
-    let sp = SlottedPage::parse(page);
-    if sp.directory.is_none() {
-        stats.pages_without_directory += 1;
-        return;
-    }
-    for (_off, body) in sp.row_bytes() {
-        parse_rows_in_body(body, pn, out, stats);
+    // A page whose directory the parser cannot confirm is counted; its rows
+    // are not read.
+    let sp = match Page::from_bytes(pn, plain)
+        .and_then(|page| SlottedPage::parse(page, &ReadOptions::strict()))
+    {
+        Ok(sp) if sp.directory().is_some() => sp,
+        Ok(_) => {
+            stats.pages_without_directory += 1;
+            return;
+        }
+        Err(_) => {
+            stats.pages_unconfirmed_directory += 1;
+            return;
+        }
+    };
+    for row in sp.rows() {
+        parse_rows_in_body(row.bytes(), pn, out, stats);
     }
 }
 
@@ -446,22 +459,21 @@ impl<'a> SysColumnIter<'a> {
         }
     }
 
-    fn fill_buffer(&mut self) -> SaResult<bool> {
+    fn fill_buffer(&mut self) -> Result<bool> {
         while self.buffer.is_empty() && self.pn < self.n_pages {
             let pn = self.pn;
             self.pn += 1;
-            let page = self.store.page(pn)?;
+            let page = self
+                .store
+                .page(pn)
+                .map_err(|e| crate::Error::from_store(e, Some(pn)))?;
             if page.trailer().page_type() != PageType::Extent {
                 continue;
             }
-            let raw = page.bytes();
-            let plain = if let Some(bv) = recover_bv_any(pn, raw) {
-                deobfuscate_with_bv(raw, pn, bv)
-            } else {
-                self.model.deobfuscate_with_store(raw, pn, self.store)
-            };
+            let decoded = decode_page(self.store, self.model, pn)?;
+            let plain = decoded.bytes();
             let mut found = Vec::new();
-            scan_page(&plain, pn, &mut found, &mut self.stats);
+            scan_page(plain, pn, &mut found, &mut self.stats);
             for c in found.into_iter().rev() {
                 self.buffer.push(c);
             }

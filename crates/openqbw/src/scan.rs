@@ -64,6 +64,12 @@ pub enum RecordFlag {
     /// The row held more than one 16-character ID in the header ID shape, or
     /// row boundaries were unknown, so the ID taken may be a foreign key.
     HeaderIdAmbiguous,
+    /// No check confirmed the AP keystream of the record's page; the page
+    /// was decoded with the best-scoring key, which may be wrong.
+    KeystreamUnverified,
+    /// Some bytes the record was read from lie in a 512-byte sector whose
+    /// keystream step could not be told apart from its runner-up.
+    LowConfidenceSector,
 }
 
 impl RecordFlag {
@@ -74,6 +80,8 @@ impl RecordFlag {
             Self::AmountTypeUnestablished => "amount_type_unestablished",
             Self::DateAmbiguous => "date_ambiguous",
             Self::HeaderIdAmbiguous => "header_id_ambiguous",
+            Self::KeystreamUnverified => "keystream_unverified",
+            Self::LowConfidenceSector => "low_confidence_sector",
         }
     }
 }

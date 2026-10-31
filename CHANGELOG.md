@@ -8,6 +8,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Behavior changes
 
+- Built on opensqlany 0.3. Opening a file also rejects a superblock whose
+  `flags_06` byte lacks the base bits (`UnsupportedFlags`) and a page whose
+  reserved trailer bytes are not zero (`BadTrailer`). A file whose AP
+  keystream cannot be calibrated at all is an error (`Store`, from
+  `learn_model`) instead of decoding with `bv = 0`.
+- Every page is decoded through one path. A page whose keystream opensqlany
+  confirms is read as before. A page where exactly one `bv` decodes the
+  QuickBooks C.36 anchor is read with that key (earlier versions took the
+  first of several). Any other `E` page is decoded with opensqlany's
+  best-scoring key, and every line item and header read from it carries
+  `RecordFlag::KeystreamUnverified`; a record whose bytes touch a sector whose
+  step opensqlany could not determine carries
+  `RecordFlag::LowConfidenceSector`. The OpenQBW byte-zero oracle and brute
+  search are no longer used to decode pages.
+- Slot directories must be confirmed by the page prelude. Header pages
+  without a confirmed directory use the linear scan, whose records carry
+  `HeaderIdAmbiguous`. `SYSCOLUMN` pages without one are skipped and counted
+  in `SyscolumnStats::pages_unconfirmed_directory`, and `openqbw schema`
+  prints the count. Not measured on a corpus: opensqlany reports that about a
+  fifth of `E` pages with a directory are not confirmed.
 - Line items take the nearest `04 00 10 <id>` item ID instead of the farthest
   in the 96 bytes before the anchor, and their search windows stop at the
   neighbouring records' anchors, so a record no longer reports the previous
@@ -123,6 +143,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Page 0 (the superblock) is checked by its CRC only, so real company files
+  open again.
 - The opaque-page count measures entropy on the decoded page body. It
   measured the stored AP ciphertext, which is always near 8 bits/byte, so every
   data page of a readable file counted as opaque and the scan failed with

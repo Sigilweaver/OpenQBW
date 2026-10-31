@@ -27,9 +27,9 @@
 
 use std::collections::BTreeMap;
 
-use opensqlany::{ApModel, Page, PageStore, PageType, SlottedPage};
+use opensqlany::{ApModel, PageStore, PageType};
 
-use crate::bv_recovery::{deobfuscate_with_bv, recover_bv_qb_data};
+use crate::decode::decode_page;
 use crate::page_attribution::PageAttribution;
 use crate::systable::{SysTableEntry, iter_systable_entries};
 
@@ -209,18 +209,11 @@ fn extract_signature(store: &PageStore, model: &ApModel, page_number: u64) -> Op
     if page.trailer().page_type() != PageType::Extent {
         return None;
     }
-    let raw = page.bytes();
-    let plain = if let Some(bv) = recover_bv_qb_data(page_number, raw) {
-        deobfuscate_with_bv(raw, page_number, bv)
-    } else {
-        model.deobfuscate_with_store(raw, page_number, store)
-    };
-    let p = Page::from_bytes(page_number, &plain);
-    let sp = SlottedPage::parse(p);
-    sp.directory.as_ref()?;
-    let rows = sp.row_bytes();
-    let (_slot, first_row) = rows.first()?;
-    Some(RowSignature::from_row(first_row))
+    let decoded = decode_page(store, model, page_number).ok()?;
+    let sp = decoded.slotted().ok()??;
+    let rows = sp.rows();
+    let first_row = rows.first()?;
+    Some(RowSignature::from_row(first_row.bytes()))
 }
 
 #[cfg(test)]
