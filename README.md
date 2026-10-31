@@ -142,6 +142,20 @@ Every file set openqbw writes records the version of its layout:
   `openqbw_version` and each file's row count. `rejected.csv` is always
   written.
 
+Both also record the counts behind the warnings printed on stderr, as
+`count.<scan>.<name>` rows in `meta` and a `counts` object in `manifest.json`
+(`<scan>.<name>` keys). `<scan>` is `catalog`, `line_items` or `headers`;
+the names are the warning codes (`records_outside_live_rows`,
+`line_items_not_read`, `unattributed_records`, `header_rows_without_id`,
+`invalid_root_pages`, `keystream_unverified_pages`,
+`low_confidence_sector_pages`, `unconfirmed_directory_pages`, `opaque_pages`,
+`attribution_gap`) plus `headers.duplicate_header_ids` and
+`headers.duplicate_header_ids_conflicting_types`. Each scan's usual counts
+are written even when zero. The totals a count is out of (`..._decoded`,
+`..._extent`, `..._total`) appear only when the count is nonzero. IIF files
+have no place for metadata; `migrate --format iif` prints
+`duplicate_headers` and the warnings on stderr only.
+
 The layout version is 1. Adding a table, a column, a CSV file or a manifest
 key leaves it unchanged; renaming or removing one, or changing what a value
 means, increments it. Readers should ignore tables, columns and keys they do

@@ -161,6 +161,14 @@ Built on opensqlany 0.3 (pinned to a git revision until it is published).
   the number of IDs seen under more than one transaction type; the first in
   page order is kept. CSV `transactions.csv` used to list every sighting, and
   IIF used the last.
+- SQLite exports record the counts behind the stderr warnings
+  (`records_outside_live_rows`, `line_items_not_read`, `unattributed_records`,
+  `header_rows_without_id`, `invalid_root_pages`, `keystream_unverified_pages`,
+  `unconfirmed_directory_pages` and the others) and the duplicate header ID
+  counts as `count.<scan>.<name>` rows in `meta`; CSV exports record the same
+  keys in a `counts` object in `manifest.json`. Adding keys leaves the
+  format version at 1. IIF output has no metadata and still reports them on
+  stderr only.
 - `openqbw forensics` reports the size of the opened store instead of 0 when
   file metadata cannot be read.
 

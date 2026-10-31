@@ -187,3 +187,80 @@ fn duplicate_header_ids_are_resolved_the_same_way_in_every_format() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("repeat an earlier qb_id"), "{stderr}");
 }
+
+fn meta(conn: &rusqlite::Connection, key: &str) -> Option<String> {
+    conn.query_row("SELECT value FROM meta WHERE key = ?", [key], |r| r.get(0))
+        .ok()
+}
+
+#[test]
+fn run_counts_are_recorded_in_the_sqlite_meta_table() {
+    let dir = tmp("counts-sqlite");
+    let db = dir.join("out.sqlite");
+    let out = openqbw(&[
+        "export".as_ref(),
+        os(&fixture("synthetic-counts.qbw")),
+        os(&db),
+    ]);
+    assert!(out.status.success(), "{out:?}");
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    for (key, want) in [
+        ("count.catalog.invalid_root_pages", "1"),
+        ("count.line_items.line_items_not_read", "1"),
+        ("count.headers.duplicate_header_ids", "1"),
+        ("count.headers.duplicate_header_ids_conflicting_types", "1"),
+        // Counts that are zero are written too, so absence is never "zero".
+        ("count.line_items.records_outside_live_rows", "0"),
+        ("count.line_items.unattributed_records", "0"),
+        ("count.line_items.keystream_unverified_pages", "0"),
+        ("count.headers.header_rows_without_id", "0"),
+        ("count.headers.unconfirmed_directory_pages", "0"),
+    ] {
+        assert_eq!(meta(&conn, key).as_deref(), Some(want), "{key}");
+    }
+    // The format version does not change when keys are added.
+    assert_eq!(meta(&conn, "format_version").as_deref(), Some("1"));
+}
+
+#[test]
+fn clean_file_records_zero_counts() {
+    let dir = tmp("counts-clean");
+    let db = dir.join("out.sqlite");
+    let out = openqbw(&["export".as_ref(), os(&fixture("synthetic.qbw")), os(&db)]);
+    assert!(out.status.success(), "{out:?}");
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let nonzero: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM meta WHERE key LIKE 'count.%' AND value != '0'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(nonzero, 0);
+    assert!(meta(&conn, "count.line_items.line_items_not_read").is_some());
+}
+
+#[test]
+fn run_counts_are_recorded_in_the_csv_manifest() {
+    let dir = tmp("counts-csv");
+    let out = openqbw(&[
+        "migrate".as_ref(),
+        os(&fixture("synthetic-counts.qbw")),
+        "--format".as_ref(),
+        "csv".as_ref(),
+        "--out".as_ref(),
+        os(&dir),
+    ]);
+    assert!(out.status.success(), "{out:?}");
+    let manifest = std::fs::read_to_string(dir.join("manifest.json")).unwrap();
+    for line in [
+        "\"catalog.invalid_root_pages\": 1",
+        "\"line_items.line_items_not_read\": 1",
+        "\"headers.duplicate_header_ids\": 1",
+        "\"headers.duplicate_header_ids_conflicting_types\": 1",
+        "\"line_items.records_outside_live_rows\": 0",
+    ] {
+        assert!(manifest.contains(line), "{line} missing from {manifest}");
+    }
+    assert!(manifest.contains("\"format_version\": 1"), "{manifest}");
+}

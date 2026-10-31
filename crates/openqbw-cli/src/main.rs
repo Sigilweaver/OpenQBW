@@ -23,7 +23,7 @@ use clap::{Parser, Subcommand};
 use openqbw::diagnostics::{self, CrossValidation};
 use openqbw::{
     AmountType, Error as QbwError, LineItem, ReadOptions, Reader, SysTableEntry, TransactionHeader,
-    Warning,
+    Warning, WarningKind,
 };
 use rusqlite::{Connection, Transaction, params};
 
@@ -300,6 +300,7 @@ fn run_export(input: PathBuf, output: PathBuf, lenient: bool) -> Result<ExportSt
         items,
         rejected,
         headers,
+        counts,
         ..
     } = collect_records(&reader)?;
 
@@ -312,6 +313,7 @@ fn run_export(input: PathBuf, output: PathBuf, lenient: bool) -> Result<ExportSt
         insert_synthesized_transactions(&tx, &items, &header_map)?;
         insert_transaction_line_items(&tx, &items)?;
         insert_scan_rejections(&tx, &rejected)?;
+        insert_counts(&tx, &counts)?;
         tx.commit()?;
     }
 
@@ -1058,6 +1060,15 @@ fn dedupe_headers(headers: Vec<TransactionHeader>) -> (Vec<TransactionHeader>, H
 
 /// Insert one row per header. `headers` holds one header per `qb_id`
 /// (see [`dedupe_headers`]).
+/// Record the run counts in `meta` as `count.<scan>.<name>`.
+fn insert_counts(tx: &Transaction<'_>, counts: &RunCounts) -> Result<()> {
+    let mut stmt = tx.prepare("INSERT INTO meta (key, value) VALUES (?, ?)")?;
+    for (key, value) in counts.iter() {
+        stmt.execute(params![format!("count.{key}"), value.to_string()])?;
+    }
+    Ok(())
+}
+
 fn insert_transaction_headers(
     tx: &Transaction<'_>,
     headers: &[TransactionHeader],
@@ -1324,6 +1335,69 @@ struct Records {
     headers: Vec<TransactionHeader>,
     /// Headers left out because their `qb_id` was seen earlier.
     header_dupes: HeaderDupes,
+    /// Warning and duplicate counts to record in the export.
+    counts: RunCounts,
+}
+
+/// Counts recorded in every export that has somewhere to put them, under
+/// the keys `<scan>.<name>` (`catalog`, `line_items` or `headers`). A scan's
+/// usual counts are present even when zero, so a missing key never means
+/// "zero"; a warning outside the usual list is added when it occurs. The
+/// totals a count is out of (`..._decoded`, `..._extent`, `..._total`) appear
+/// only with a nonzero count.
+#[derive(Debug, Default)]
+struct RunCounts(BTreeMap<String, u64>);
+
+/// Counts every scan reports.
+const PAGE_CONFIDENCE_COUNTS: [&str; 2] =
+    ["keystream_unverified_pages", "low_confidence_sector_pages"];
+
+impl RunCounts {
+    /// Add the counts of one scan's `warnings`, after its usual `keys`.
+    fn add_scan(&mut self, scan: &str, keys: &[&str], warnings: &[Warning]) {
+        for key in PAGE_CONFIDENCE_COUNTS.iter().chain(keys) {
+            self.0.entry(format!("{scan}.{key}")).or_insert(0);
+        }
+        for w in warnings {
+            for (name, n) in warning_values(&w.kind) {
+                *self.0.entry(format!("{scan}.{name}")).or_insert(0) += n;
+            }
+        }
+    }
+
+    fn set(&mut self, key: &str, value: u64) {
+        self.0.insert(key.to_owned(), value);
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (&str, u64)> {
+        self.0.iter().map(|(k, v)| (k.as_str(), *v))
+    }
+}
+
+/// The numbers a warning carries, named by the warning's code. The first is
+/// the count of affected items; a second, `<code>_<denominator>`, is the
+/// total it is out of.
+fn warning_values(kind: &WarningKind) -> Vec<(String, u64)> {
+    let code = kind.as_str();
+    match kind {
+        WarningKind::OpaquePages { opaque, extent, .. } => {
+            vec![(code.into(), *opaque), (format!("{code}_extent"), *extent)]
+        }
+        WarningKind::KeystreamUnverifiedPages { pages, decoded, .. }
+        | WarningKind::LowConfidenceSectorPages { pages, decoded, .. } => {
+            vec![(code.into(), *pages), (format!("{code}_decoded"), *decoded)]
+        }
+        WarningKind::UnconfirmedDirectoryPages { pages, .. } => vec![(code.into(), *pages)],
+        WarningKind::RecordsOutsideLiveRows { records, .. } => vec![(code.into(), *records)],
+        WarningKind::HeaderRowsWithoutId { rows, .. } => vec![(code.into(), *rows)],
+        WarningKind::UnattributedRecords { records, total, .. } => {
+            vec![(code.into(), *records), (format!("{code}_total"), *total)]
+        }
+        WarningKind::LineItemsNotRead { anchors, .. } => vec![(code.into(), *anchors)],
+        WarningKind::InvalidRootPages { tables, .. } => vec![(code.into(), *tables)],
+        // A condition without a count: 1 when present.
+        _ => vec![(code.into(), 1)],
+    }
 }
 
 /// Scan line items and headers. Strict mode stops at the first undecodable
@@ -1335,6 +1409,32 @@ fn collect_records(reader: &Reader) -> Result<Records> {
     let heads = reader.transactions().context(
         "scanning transaction headers (use --lenient to skip failing pages and list them)",
     )?;
+    let mut counts = RunCounts::default();
+    counts.add_scan(
+        "catalog",
+        &["invalid_root_pages"],
+        &reader.catalog().warnings,
+    );
+    counts.add_scan(
+        "line_items",
+        &[
+            "opaque_pages",
+            "records_outside_live_rows",
+            "line_items_not_read",
+            "unattributed_records",
+            "attribution_gap",
+        ],
+        &lines.warnings,
+    );
+    counts.add_scan(
+        "headers",
+        &[
+            "unconfirmed_directory_pages",
+            "header_rows_without_id",
+            "attribution_gap",
+        ],
+        &heads.warnings,
+    );
     let mut warnings = lines.warnings;
     for w in heads.warnings {
         if !warnings.contains(&w) {
@@ -1357,11 +1457,20 @@ fn collect_records(reader: &Reader) -> Result<Records> {
             header_dupes.duplicates, header_dupes.conflicting_types
         );
     }
+    counts.set(
+        "headers.duplicate_header_ids",
+        header_dupes.duplicates as u64,
+    );
+    counts.set(
+        "headers.duplicate_header_ids_conflicting_types",
+        header_dupes.conflicting_types as u64,
+    );
     Ok(Records {
         items,
         rejected,
         headers,
         header_dupes,
+        counts,
     })
 }
 
@@ -1422,6 +1531,7 @@ fn run_migrate_csv(input: PathBuf, out: PathBuf, lenient: bool) -> Result<()> {
         rejected,
         headers,
         header_dupes,
+        counts,
     } = collect_records(&reader)?;
 
     // catalog.csv
@@ -1504,12 +1614,15 @@ fn run_migrate_csv(input: PathBuf, out: PathBuf, lenient: bool) -> Result<()> {
     }
     std::fs::write(
         out.join("manifest.json"),
-        csv_manifest(&[
-            ("catalog.csv", tables.len()),
-            ("transactions.csv", headers.len()),
-            ("lineitems.csv", items.len()),
-            ("rejected.csv", rejected.len()),
-        ]),
+        csv_manifest(
+            &[
+                ("catalog.csv", tables.len()),
+                ("transactions.csv", headers.len()),
+                ("lineitems.csv", items.len()),
+                ("rejected.csv", rejected.len()),
+            ],
+            &counts,
+        ),
     )?;
 
     println!(
@@ -1528,14 +1641,19 @@ fn run_migrate_csv(input: PathBuf, out: PathBuf, lenient: bool) -> Result<()> {
 /// `manifest.json` for a CSV export: the format version, the writer's
 /// version, and every file written with its data-row count. File names are
 /// fixed ASCII, so no JSON escaping is needed.
-fn csv_manifest(files: &[(&str, usize)]) -> String {
+fn csv_manifest(files: &[(&str, usize)], counts: &RunCounts) -> String {
+    let counts = counts
+        .iter()
+        .map(|(name, n)| format!("    \"{name}\": {n}"))
+        .collect::<Vec<_>>()
+        .join(",\n");
     let files = files
         .iter()
         .map(|(name, rows)| format!("    \"{name}\": {{\"rows\": {rows}}}"))
         .collect::<Vec<_>>()
         .join(",\n");
     format!(
-        "{{\n  \"format_version\": {CSV_FORMAT_VERSION},\n  \"openqbw_version\": \"{}\",\n  \"files\": {{\n{files}\n  }}\n}}\n",
+        "{{\n  \"format_version\": {CSV_FORMAT_VERSION},\n  \"openqbw_version\": \"{}\",\n  \"files\": {{\n{files}\n  }},\n  \"counts\": {{\n{counts}\n  }}\n}}\n",
         env!("CARGO_PKG_VERSION")
     )
 }
@@ -1562,6 +1680,7 @@ fn run_migrate_iif(
         rejected,
         headers,
         header_dupes,
+        ..
     } = collect_records(&reader)?;
     let (text, stats) = render_iif(&items, &headers);
     std::fs::write(&out, text).with_context(|| format!("writing {:?}", out))?;
