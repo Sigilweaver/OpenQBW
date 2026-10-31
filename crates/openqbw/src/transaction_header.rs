@@ -19,15 +19,13 @@
 //! Header pages are selected via [`PageAttribution`] by suffix-matching
 //! the owning table name against `_header`.
 
-use std::iter::FusedIterator;
+use opensqlany::{ApModel, PageStore};
 
-use opensqlany::{ApModel, Page, PageStore, PageType, SlottedPage};
-
-use crate::bv_recovery::{deobfuscate_with_bv, recover_bv_any};
 use crate::date::{DateScan, DateSource, scan_date_counter};
+use crate::decode::{DecodedPage, Directory};
 use crate::error::Error;
 use crate::page_attribution::PageAttribution;
-use crate::scan::{RecordFlag, ScanOptions, ScanResult, ScanWarning};
+use crate::scan::{ReadOptions, RecordFlag, Scan, Warning, WarningKind, for_each_extent_page};
 
 const PAGE_DATA_END: usize = 0xFF0;
 const QB_ID_LEN: usize = 16;
@@ -59,6 +57,32 @@ pub struct TransactionHeader {
 }
 
 impl TransactionHeader {
+    /// Build a header with the given ID and source table, all other fields
+    /// empty. For tests and tools that need to synthesize records; scans
+    /// never call it.
+    #[doc(hidden)]
+    pub fn synthetic(qb_id: &str, source_table: &str) -> Self {
+        Self {
+            qb_id: qb_id.to_owned(),
+            source_table: source_table.to_owned(),
+            txn_date_raw: None,
+            counter: None,
+            date_source: DateSource::NotFound,
+            flags: Vec::new(),
+            page_number: 0,
+            page_offset: 0,
+        }
+    }
+
+    /// The transaction date as days since the Unix epoch (1970-01-01), with
+    /// the crate's SA-day offset (see `txn_date_raw` for the stored value).
+    /// The offset is fitted to one sample file and not confirmed against a
+    /// date known from another source; a correction ships as a bug fix.
+    /// `None` when the date is missing or outside the plausible range.
+    pub fn txn_date_days_since_unix(&self) -> Option<i64> {
+        self.txn_date_raw.and_then(crate::date::sa_day_to_unix_day)
+    }
+
     /// QB transaction type derived from the source table name by
     /// stripping the `abmc_` prefix and `_header` suffix.
     /// E.g. `abmc_invoice_header` -> `invoice`,
@@ -70,33 +94,88 @@ impl TransactionHeader {
     }
 }
 
-/// Iterate transaction headers across every E-page that
-/// [`PageAttribution`] attributes to a `*_header` table.
-pub fn iter_transaction_headers<'a>(
-    store: &'a PageStore,
-    model: &'a ApModel,
-    attribution: &'a PageAttribution,
-) -> impl Iterator<Item = Result<TransactionHeader, Error>> + 'a {
-    TransactionHeaderIter::new(store, model, attribution)
-}
-
-/// Collect every transaction header. Strict mode returns the first error;
-/// lenient mode turns each into a [`ScanWarning::RecordSkipped`].
-pub fn scan_transaction_headers(
+/// Collect transaction headers from every `E` page that [`PageAttribution`]
+/// attributes to a `*_header` table.
+///
+/// In strict mode the first page that fails to decode is returned as an
+/// error; under [`Leniency::RECORDS`](crate::Leniency::RECORDS) it is listed
+/// in [`Scan::rejected`]. Pages whose slot directory is not confirmed are
+/// read with the linear scan and counted in a
+/// [`WarningKind::UnconfirmedDirectoryPages`] warning.
+pub(crate) fn scan_transaction_headers(
     store: &PageStore,
     model: &ApModel,
     attribution: &PageAttribution,
-    options: &ScanOptions,
-) -> Result<ScanResult<TransactionHeader>, Error> {
-    let mut scan = ScanResult::default();
-    for r in TransactionHeaderIter::new(store, model, attribution) {
-        match r {
-            Ok(h) => scan.items.push(h),
-            Err(e) if options.is_lenient() => scan.warnings.push(ScanWarning::RecordSkipped(e)),
-            Err(e) => return Err(e),
-        }
+    options: &ReadOptions,
+) -> Result<Scan<TransactionHeader>, Error> {
+    let mut scan = Scan::default();
+    let (mut unconfirmed, mut rows_without_id) = (0u64, 0u64);
+    for_each_extent_page(
+        store,
+        model,
+        options,
+        &mut scan,
+        |pn| {
+            attribution
+                .attribute(pn)
+                .is_some_and(|e| is_header_table(&e.name))
+        },
+        |decoded, scan| {
+            let pn = decoded.pn();
+            let source_table = attribution
+                .attribute(pn)
+                .map(|e| e.name.clone())
+                .unwrap_or_default();
+            // Prefer the slotted-page row scan when a confirmed directory
+            // exists; it emits at most one record per row and keeps the
+            // date search inside the row. Otherwise use the linear scan.
+            let before = scan.items.len();
+            match scan_page_slotted(decoded, &source_table, &mut scan.items)? {
+                SlottedOutcome::Read { rows_without_id: n } => rows_without_id += n,
+                outcome => {
+                    unconfirmed += (outcome == SlottedOutcome::Unconfirmed) as u64;
+                    scan_page(
+                        &decoded.bytes()[..PAGE_DATA_END],
+                        pn,
+                        &source_table,
+                        &mut scan.items,
+                    );
+                    for h in &mut scan.items[before..] {
+                        let start = h.page_offset;
+                        let end = (start + HEADER_PREFIX.len() + QB_ID_LEN + 96).min(PAGE_DATA_END);
+                        h.flags.extend(decoded.flags_for(start..end));
+                    }
+                }
+            }
+            Ok(())
+        },
+    )?;
+    if unconfirmed > 0 {
+        scan.warnings
+            .push(Warning::new(WarningKind::UnconfirmedDirectoryPages {
+                pages: unconfirmed,
+            }));
+    }
+    if rows_without_id > 0 {
+        scan.warnings
+            .push(Warning::new(WarningKind::HeaderRowsWithoutId {
+                rows: rows_without_id,
+            }));
     }
     Ok(scan)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum SlottedOutcome {
+    /// Rows were read through a confirmed directory.
+    Read {
+        /// Live rows that held no header ID and gave no record.
+        rows_without_id: u64,
+    },
+    /// The page has no directory.
+    Absent,
+    /// The page has a directory its prelude does not confirm.
+    Unconfirmed,
 }
 
 fn is_header_table(name: &str) -> bool {
@@ -176,22 +255,24 @@ fn find_date_counter(body: &[u8], start: usize) -> DateScan {
 /// owning row, eliminating cross-row contamination that the linear
 /// scanner can suffer.
 ///
-/// Returns `Some(n)` with the number of records appended when a slot
-/// directory was found; returns `None` when no slot directory could be
-/// parsed (callers should fall back to [`scan_page`]).
+/// Callers fall back to [`scan_page`] unless the outcome is
+/// [`SlottedOutcome::Read`].
 fn scan_page_slotted(
-    plain: &[u8],
-    pn: u64,
+    decoded: &DecodedPage,
     source_table: &str,
     out: &mut Vec<TransactionHeader>,
-) -> Option<usize> {
-    let page = Page::from_bytes(pn, plain);
-    let sp = SlottedPage::parse(page);
-    sp.directory.as_ref()?;
-    let rows = sp.row_bytes();
-    let mut added = 0usize;
-    for (slot_off, row) in rows {
+) -> Result<SlottedOutcome, Error> {
+    let pn = decoded.pn();
+    let sp = match decoded.slotted()? {
+        Directory::Confirmed(sp) => sp,
+        Directory::Absent => return Ok(SlottedOutcome::Absent),
+        Directory::Unconfirmed => return Ok(SlottedOutcome::Unconfirmed),
+    };
+    let mut rows_without_id = 0u64;
+    for r in sp.rows() {
+        let (slot_off, row) = (r.offset(), r.bytes());
         if row.len() < HEADER_PREFIX.len() + QB_ID_LEN {
+            rows_without_id += 1;
             continue;
         }
         let limit = row.len() - (HEADER_PREFIX.len() + QB_ID_LEN);
@@ -209,6 +290,7 @@ fn scan_page_slotted(
             }
         }
         let Some(&first) = candidates.first() else {
+            rows_without_id += 1;
             continue;
         };
         let qb_id = String::from_utf8_lossy(&row[first + 3..first + 3 + QB_ID_LEN]).into_owned();
@@ -217,6 +299,8 @@ fn scan_page_slotted(
         if candidates.len() > 1 {
             flags.push(RecordFlag::HeaderIdAmbiguous);
         }
+        let start = slot_off as usize;
+        flags.extend(decoded.flags_for(start..start + row.len()));
         out.push(TransactionHeader {
             qb_id,
             source_table: source_table.to_owned(),
@@ -227,104 +311,14 @@ fn scan_page_slotted(
             page_number: pn,
             page_offset: slot_off as usize + first,
         });
-        added += 1;
     }
-    Some(added)
+    Ok(SlottedOutcome::Read { rows_without_id })
 }
 
 fn is_base62(s: &[u8]) -> bool {
     s.iter()
         .all(|&b| matches!(b, b'0'..=b'9' | b'A'..=b'Z' | b'a'..=b'z'))
 }
-
-struct TransactionHeaderIter<'a> {
-    store: &'a PageStore,
-    model: &'a ApModel,
-    attribution: &'a PageAttribution,
-    pn: u64,
-    n_pages: u64,
-    buffer: Vec<TransactionHeader>,
-}
-
-impl<'a> TransactionHeaderIter<'a> {
-    fn new(store: &'a PageStore, model: &'a ApModel, attribution: &'a PageAttribution) -> Self {
-        Self {
-            store,
-            model,
-            attribution,
-            pn: 1,
-            n_pages: store.page_count(),
-            buffer: Vec::new(),
-        }
-    }
-
-    fn fill_buffer(&mut self) -> Result<bool, Error> {
-        while self.buffer.is_empty() && self.pn < self.n_pages {
-            let pn = self.pn;
-            self.pn += 1;
-
-            // Skip pages that the attribution map does not assign to a
-            // header table.
-            let source_table = match self.attribution.attribute(pn) {
-                Some(entry) if is_header_table(&entry.name) => entry.name.clone(),
-                _ => continue,
-            };
-
-            let page = self
-                .store
-                .page(pn)
-                .map_err(|e| Error::from_store(e, Some(pn)))?;
-            if page.trailer().page_type() != PageType::Extent {
-                continue;
-            }
-            let raw = page.bytes();
-            // Header pages may or may not carry the QB-data anchor.
-            // Try the QB-specific recovery first, fall back to the
-            // validated E-page oracle cascade, and finally to the
-            // generic AP model.
-            let plain = if let Some(bv) = recover_bv_any(pn, raw) {
-                deobfuscate_with_bv(raw, pn, bv)
-            } else {
-                self.model.deobfuscate_with_store(raw, pn, self.store)
-            };
-            let before = self.buffer.len();
-            // Prefer slotted-page row scan when a slot directory is
-            // parseable; fall back to the linear `0E 00 10` scan
-            // otherwise. The slotted path emits one record per slot at
-            // most and constrains date/counter discovery to the owning
-            // row, so it produces strictly more reliable headers when
-            // available.
-            let slotted_added = scan_page_slotted(&plain, pn, &source_table, &mut self.buffer);
-            if slotted_added.is_none() {
-                scan_page(&plain[..PAGE_DATA_END], pn, &source_table, &mut self.buffer);
-            }
-            // Reverse for LIFO consumption to preserve source order.
-            self.buffer[before..].reverse();
-        }
-        Ok(!self.buffer.is_empty())
-    }
-}
-
-impl Iterator for TransactionHeaderIter<'_> {
-    type Item = Result<TransactionHeader, Error>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            if let Some(h) = self.buffer.pop() {
-                return Some(Ok(h));
-            }
-            match self.fill_buffer() {
-                Ok(true) => continue,
-                Ok(false) => return None,
-                // The page counter already moved past the failing page, so
-                // the next call continues with the next page.
-                Err(e) => return Some(Err(e)),
-            }
-        }
-    }
-}
-
-impl FusedIterator for TransactionHeaderIter<'_> {}
 
 #[cfg(test)]
 mod tests {
@@ -427,6 +421,10 @@ mod tests {
     /// rows of varying offsets and put the anchor in the first row.
     fn build_slotted_page(rows: &[(u16, &[u8])]) -> Vec<u8> {
         let mut page = vec![0u8; 4096];
+        // Prelude: the slot count as a u16 four bytes before the array,
+        // confirmed by the trailer's count byte at 0xFF0.
+        page[0xFC..0xFE].copy_from_slice(&(rows.len() as u16).to_le_bytes());
+        page[PAGE_DATA_END] = rows.len() as u8;
         // Write each row body at its offset.
         for &(off, body) in rows {
             let start = off as usize;
@@ -443,6 +441,27 @@ mod tests {
             dir += 2;
         }
         page
+    }
+
+    fn slotted(page: Vec<u8>, pn: u64, out: &mut Vec<TransactionHeader>) -> SlottedOutcome {
+        let decoded = DecodedPage::from_plain(pn, page);
+        scan_page_slotted(&decoded, "abmc_invoice_header", out).unwrap()
+    }
+
+    #[test]
+    fn unconfirmed_directory_falls_back_to_the_linear_scan() {
+        // Same layout without the prelude count: opensqlany cannot confirm
+        // the directory, so the slotted path declines.
+        let bodies: Vec<Vec<u8>> = (0..8).map(|i| vec![i as u8; 64]).collect();
+        let rows: Vec<(u16, &[u8])> = bodies
+            .iter()
+            .enumerate()
+            .map(|(i, b)| (0x800 + (i as u16) * 64, b.as_slice()))
+            .collect();
+        let mut page = build_slotted_page(&rows);
+        page[0xFC] = 0;
+        let mut out = Vec::new();
+        assert_eq!(slotted(page, 3, &mut out), SlottedOutcome::Unconfirmed);
     }
 
     #[test]
@@ -471,8 +490,10 @@ mod tests {
             .collect();
         let page = build_slotted_page(&rows);
         let mut out = Vec::new();
-        let n = scan_page_slotted(&page, 4242, "abmc_invoice_header", &mut out);
-        assert_eq!(n, Some(8));
+        assert_eq!(
+            slotted(page, 4242, &mut out),
+            SlottedOutcome::Read { rows_without_id: 0 }
+        );
         assert_eq!(out.len(), 8);
         // Every emitted record should reference the correct page.
         for h in &out {
@@ -510,7 +531,10 @@ mod tests {
             .collect();
         let page = build_slotted_page(&rows);
         let mut out = Vec::new();
-        scan_page_slotted(&page, 1, "abmc_invoice_header", &mut out).unwrap();
+        assert_eq!(
+            slotted(page, 1, &mut out),
+            SlottedOutcome::Read { rows_without_id: 0 }
+        );
         assert_eq!(out.len(), 8);
         let flagged: Vec<_> = out
             .iter()
@@ -525,8 +549,7 @@ mod tests {
         // All-zero page has no slot directory.
         let page = vec![0u8; 4096];
         let mut out = Vec::new();
-        let n = scan_page_slotted(&page, 1, "abmc_invoice_header", &mut out);
-        assert!(n.is_none());
+        assert_eq!(slotted(page, 1, &mut out), SlottedOutcome::Absent);
         assert!(out.is_empty());
     }
 
@@ -550,8 +573,11 @@ mod tests {
             .collect();
         let page = build_slotted_page(&rows);
         let mut out = Vec::new();
-        let n = scan_page_slotted(&page, 7, "abmc_invoice_header", &mut out);
-        assert_eq!(n, Some(1));
+        // S2-21: the seven rows without an ID are counted, not just skipped.
+        assert_eq!(
+            slotted(page, 7, &mut out),
+            SlottedOutcome::Read { rows_without_id: 7 }
+        );
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].qb_id, "0000000000001QBm");
     }
@@ -576,7 +602,10 @@ mod tests {
             .collect();
         let page = build_slotted_page(&rows);
         let mut out = Vec::new();
-        let _ = scan_page_slotted(&page, 9, "abmc_invoice_header", &mut out);
+        assert_eq!(
+            slotted(page, 9, &mut out),
+            SlottedOutcome::Read { rows_without_id: 7 }
+        );
         // The only "1QBm"/"1QBn" record we expect is the FIRST one.
         let qbm = out.iter().filter(|h| h.qb_id == "0000000000001QBm").count();
         let qbn = out.iter().filter(|h| h.qb_id == "0000000000001QBn").count();

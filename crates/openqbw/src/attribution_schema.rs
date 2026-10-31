@@ -33,12 +33,14 @@
 
 use std::collections::BTreeMap;
 
-use opensqlany::{ApModel, Page, PageStore, PageType, SlottedPage};
+use opensqlany::{ApModel, PageStore, PageType};
 
-use crate::bv_recovery::{deobfuscate_with_bv, recover_bv_qb_data};
-use crate::syscolumn::{SysColumn, iter_syscolumns};
+use crate::decode::decode_page;
+use crate::error::Result;
+use crate::reader::Reader;
+use crate::scan::ReadOptions;
+use crate::syscolumn::SysColumn;
 use crate::sysobject::bridge_owners_to_tables;
-use crate::systable::iter_systable_entries;
 
 /// Per-column variable-width allowance (bytes) added to the upper bound
 /// when the column's domain is variable-length (`Y`, `V`, `C`, `A`).
@@ -51,9 +53,10 @@ pub const MIN_ROW_BODY_BYTES: u32 = 4;
 
 /// A row-width band derived from a table's SYSCOLUMN schema.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct WidthBand {
     /// SYSCOLUMN owner identifier (bridged to the table via the
-    /// `SYSOBJECT` catalog; see [`crate::sysobject`]).
+    /// `SYSOBJECT` catalog; see `sysobject`).
     pub owner_object_id: u32,
     /// Lower bound on plausible row body length.
     pub low: u32,
@@ -65,6 +68,7 @@ pub struct WidthBand {
 
 /// Schema-aware width-validator built from SYSCOLUMN + SYSTABLE.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct SchemaAttribution {
     /// Map from table name to width band.
     bands: BTreeMap<String, WidthBand>,
@@ -72,6 +76,7 @@ pub struct SchemaAttribution {
 
 /// Summary of [`SchemaAttribution::validate_corpus`] over a page set.
 #[derive(Debug, Default, Clone, Copy)]
+#[non_exhaustive]
 pub struct ValidationStats {
     /// Pages with a position attribution that have a width band and pass it.
     pub pass: u64,
@@ -98,15 +103,19 @@ fn is_fixed_width_domain(d: u8) -> bool {
 
 impl SchemaAttribution {
     /// Build the width-band index by scanning SYSTABLE + SYSCOLUMN.
-    pub fn build(store: &PageStore, model: &ApModel) -> Self {
-        let entries = iter_systable_entries(store, model).collect::<Vec<_>>();
-        let columns: Vec<SysColumn> = iter_syscolumns(store, model).collect();
+    ///
+    /// A catalog page that fails to decode is an error in strict mode.
+    pub(crate) fn build(store: &PageStore, model: &ApModel, options: &ReadOptions) -> Result<Self> {
+        let entries = crate::systable::scan_systable(store, model, options)?.items;
+        let (columns, _) = crate::syscolumn::scan_syscolumns(store, model, options)?;
+        let columns: Vec<SysColumn> = columns.items;
 
         // Bridge SYSCOLUMN.owner_object_id -> SYSTABLE.name via the
         // SYSOBJECT catalog (Phase 6, WP-6Z.2). The prior
         // assumption that owner_object_id == data_root_page was wrong;
         // it matched coincidentally on a small subset.
-        let owner_to_table = bridge_owners_to_tables(store, model, &columns, &entries);
+        let (owner_to_table, _) =
+            bridge_owners_to_tables(store, model, &columns, &entries, options)?;
 
         // Group columns by owner.
         let mut cols_by_owner: BTreeMap<u32, Vec<SysColumn>> = BTreeMap::new();
@@ -161,7 +170,7 @@ impl SchemaAttribution {
                 },
             );
         }
-        Self { bands }
+        Ok(Self { bands })
     }
 
     /// Look up the width band for `table_name`.
@@ -191,36 +200,20 @@ impl SchemaAttribution {
     /// Compute the median live row body length for `page_number`. Returns
     /// `None` when the page cannot be decoded, has no slot directory, or
     /// has no live rows.
-    pub fn measure_page(
-        &self,
-        store: &PageStore,
-        model: &ApModel,
-        page_number: u64,
-    ) -> Option<u32> {
-        median_row_body(store, model, page_number)
+    pub fn measure_page(&self, reader: &Reader, page_number: u64) -> Option<u32> {
+        median_row_body(reader.store(), reader.model(), page_number)
     }
 
     /// Validate that a page already attributed to `table_name` plausibly
     /// belongs to that table.
-    pub fn validate(
-        &self,
-        store: &PageStore,
-        model: &ApModel,
-        page_number: u64,
-        table_name: &str,
-    ) -> Option<bool> {
-        let observed = median_row_body(store, model, page_number)?;
+    pub fn validate(&self, reader: &Reader, page_number: u64, table_name: &str) -> Option<bool> {
+        let observed = median_row_body(reader.store(), reader.model(), page_number)?;
         Some(self.validate_observed(table_name, observed))
     }
 
     /// Validate every entry in `(page_number, table_name)` and return
     /// aggregate statistics.
-    pub fn validate_corpus<I, S>(
-        &self,
-        store: &PageStore,
-        model: &ApModel,
-        pages: I,
-    ) -> ValidationStats
+    pub fn validate_corpus<I, S>(&self, reader: &Reader, pages: I) -> ValidationStats
     where
         I: IntoIterator<Item = (u64, S)>,
         S: AsRef<str>,
@@ -232,7 +225,7 @@ impl SchemaAttribution {
                 s.no_band += 1;
                 continue;
             }
-            match median_row_body(store, model, pn) {
+            match median_row_body(reader.store(), reader.model(), pn) {
                 None => s.unmeasured += 1,
                 Some(m) => {
                     if self.validate_observed(name, m) {
@@ -255,20 +248,13 @@ fn median_row_body(store: &PageStore, model: &ApModel, page_number: u64) -> Opti
     if page.trailer().page_type() != PageType::Extent {
         return None;
     }
-    let raw = page.bytes();
-    let plain = if let Some(bv) = recover_bv_qb_data(page_number, raw) {
-        deobfuscate_with_bv(raw, page_number, bv)
-    } else {
-        model.deobfuscate_with_store(raw, page_number, store)
-    };
-    let p = Page::from_bytes(page_number, &plain);
-    let sp = SlottedPage::parse(p);
-    sp.directory.as_ref()?;
-    let rows = sp.row_bytes();
+    let decoded = decode_page(store, model, page_number).ok()?;
+    let sp = decoded.slotted().ok()?.confirmed()?;
+    let rows = sp.rows();
     if rows.is_empty() {
         return None;
     }
-    let mut lens: Vec<u32> = rows.iter().map(|(_, b)| b.len() as u32).collect();
+    let mut lens: Vec<u32> = rows.iter().map(|r| r.bytes().len() as u32).collect();
     lens.sort_unstable();
     Some(lens[lens.len() / 2])
 }
