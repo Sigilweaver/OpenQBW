@@ -128,6 +128,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   data page of a readable file counted as opaque and the scan failed with
   `ContentOpaque`. `count_opaque_pages` takes the `ApModel` used to decode
   the pages.
+- Two line-item anchors less than 29 bytes apart no longer panic while the
+  later record's item ID is searched.
 
 ## [0.1.6] - 2026-10-04
 
