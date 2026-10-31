@@ -265,7 +265,7 @@ pub fn scan_lineitems(
     options: &ScanOptions,
 ) -> Result<ScanResult<LineItem>, Error> {
     let mut scan = ScanResult::default();
-    let opaque = count_opaque_pages(store)?;
+    let opaque = count_opaque_pages(store, model)?;
     if opaque.mostly_opaque() {
         return Err(Error::ContentOpaque {
             opaque: opaque.opaque,
