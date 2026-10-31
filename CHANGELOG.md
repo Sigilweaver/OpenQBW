@@ -67,7 +67,7 @@ Built on opensqlany 0.3 (pinned to a git revision until it is published).
   instead of dropped, and `openqbw fkgraph` prints the count. Earlier
   versions joined on `data_root_page`, which names unrelated tables for most
   owners.
-- Line-item scans count pages whose body is indistinguishable from random
+- Line-item scans count pages whose decoded body is indistinguishable from random
   bytes. When more than half of the data pages are opaque (as in a
   password-protected file) the scan fails with `ContentOpaque`; otherwise
   the count is reported as an `opaque_pages` warning. The 50% threshold has
@@ -214,6 +214,20 @@ Built on opensqlany 0.3 (pinned to a git revision until it is published).
   `ContentError` (now a `FormatError`) carry `kind`, `page_number` and
   `page_offset`. The package ships `.pyi` stubs and `py.typed`; the native
   module is `openqbw._openqbw`.
+
+### Fixed
+
+- Page 0 (the superblock) is checked by its CRC only, so real company files
+  open again.
+- The opaque-page count measures entropy on the decoded page body. It
+  measured the stored AP ciphertext, which is always near 8 bits/byte, so every
+  data page of a readable file counted as opaque and the scan failed with
+  `ContentOpaque`.
+- Two line-item anchors less than 29 bytes apart no longer panic while the
+  later record's item ID is searched.
+- SQLite export and `openqbw verify` with `--lenient` no longer fail with
+  "Wrong number of parameters" when records were skipped: the `scan_rejections`
+  insert now supplies the `kind` column.
 
 ## [0.1.6] - 2026-10-04
 
