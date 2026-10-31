@@ -18,7 +18,8 @@
 //! See `OpenQBW/re/NOTES.md` (entry C.51, WP-5C) for the empirical
 //! characterisation across the four-file corpus.
 
-use opensqlany::{PageStore, PageType};
+use crate::decode::decode_page;
+use opensqlany::{ApModel, PageStore, PageType};
 
 const TRAILER_START: usize = 0xFF0;
 
@@ -50,16 +51,18 @@ fn shannon_entropy(bytes: &[u8]) -> f64 {
 /// removed.
 pub const OPAQUE_ENTROPY_THRESHOLD: f64 = 7.5;
 
-/// Returns `true` if the raw page bytes are indistinguishable from random
-/// data and therefore unlikely to be standard AP ciphertext.
+/// Returns `true` if the decoded page body is indistinguishable from random
+/// data, meaning no decoder produced readable content for it.
 ///
-/// Tests only the body region `0..0xFF0`; the trailer is plaintext and
+/// `plain_page` is the page after the AP cipher has been removed (the stored
+/// bytes are ciphertext and always measure near 8 bits/byte, whatever they
+/// hold). Tests only the body region `0..0xFF0`; the trailer is plaintext and
 /// would skew the entropy slightly.
-pub fn is_opaque_high_entropy(raw_page: &[u8]) -> bool {
-    if raw_page.len() < TRAILER_START {
+pub fn is_opaque_high_entropy(plain_page: &[u8]) -> bool {
+    if plain_page.len() < TRAILER_START {
         return false;
     }
-    shannon_entropy(&raw_page[..TRAILER_START]) >= OPAQUE_ENTROPY_THRESHOLD
+    shannon_entropy(&plain_page[..TRAILER_START]) >= OPAQUE_ENTROPY_THRESHOLD
 }
 
 /// Share of `E` pages above which a file is treated as unreadable content
@@ -86,7 +89,10 @@ impl OpaqueCount {
 }
 
 /// Count opaque and total `E` pages in `store`.
-pub(crate) fn count_opaque_pages(store: &PageStore) -> crate::Result<OpaqueCount> {
+///
+/// Each page is decoded the way the line-item scan decodes it (`decode_page`: confirmed
+/// keystream, QB anchor bv, then the lenient `model` fallback) before its entropy is measured.
+pub(crate) fn count_opaque_pages(store: &PageStore, model: &ApModel) -> crate::Result<OpaqueCount> {
     let mut c = OpaqueCount {
         opaque: 0,
         extent: 0,
@@ -99,7 +105,13 @@ pub(crate) fn count_opaque_pages(store: &PageStore) -> crate::Result<OpaqueCount
             continue;
         }
         c.extent += 1;
-        if is_opaque_high_entropy(page.bytes()) {
+        // A page no decoder can read is opaque. The line-item scan decodes
+        // the same page and reports the decode error itself.
+        let readable = match decode_page(store, model, pn) {
+            Ok(d) => !is_opaque_high_entropy(d.bytes()),
+            Err(_) => false,
+        };
+        if !readable {
             c.opaque += 1;
         }
     }
@@ -152,6 +164,47 @@ mod tests {
     fn short_slice_does_not_panic() {
         let raw = [0u8; 100];
         assert!(!is_opaque_high_entropy(&raw));
+    }
+
+    /// Encode `plain[..0xFF0]` as an AP-ciphered `E` page: per sector,
+    /// `stored = plain + base + i * step` with `base = bv + pn + si - bias`.
+    fn encode_e_page(pn: u64, bv: u8, step: u8, plain: &[u8]) -> Vec<u8> {
+        let bias = (pn % 16) as u8 / 2 * 4;
+        let mut out = vec![0u8; 4096];
+        for si in 0..8usize {
+            let off = si * 512;
+            let end = if si == 7 { TRAILER_START } else { off + 512 };
+            let base = bv
+                .wrapping_add(pn as u8)
+                .wrapping_add(si as u8)
+                .wrapping_sub(bias);
+            for i in off..end {
+                out[i] = plain[i]
+                    .wrapping_add(base)
+                    .wrapping_add(((i - off) as u8).wrapping_mul(step));
+            }
+        }
+        out[0xFF2] = b'E';
+        out
+    }
+
+    #[test]
+    fn encoded_readable_pages_are_not_opaque() {
+        // Sparse plaintext, as a real data page is, stored under the AP
+        // cipher. The cipher ramp makes the stored bytes look uniform, so
+        // entropy must be judged on the decoded body.
+        let mut plain = vec![0u8; 4096];
+        for i in (0..TRAILER_START).step_by(64) {
+            plain[i] = 0x07;
+        }
+        let mut bytes = vec![0u8; 4096];
+        for pn in 1..=4u64 {
+            bytes.extend(encode_e_page(pn, 0x5a, 7, &plain));
+        }
+        let store = crate::testutil::sealed_store(bytes);
+        let model = crate::testutil::lenient_model(&store);
+        let c = count_opaque_pages(&store, &model).unwrap();
+        assert_eq!((c.opaque, c.extent), (0, 4));
     }
 
     #[test]
