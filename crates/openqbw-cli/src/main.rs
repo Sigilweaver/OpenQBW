@@ -1686,6 +1686,28 @@ fn run_forensics(input: PathBuf, lenient: bool) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use openqbw::Error;
+
+    #[test]
+    fn scan_rejections_are_stored_with_their_kind() {
+        let conn = Connection::open_in_memory().unwrap();
+        create_schema(&conn).unwrap();
+        let rejected = [Error::Io(std::io::Error::other("disk gone"))];
+        let tx = conn.unchecked_transaction().unwrap();
+        insert_scan_rejections(&tx, &rejected).unwrap();
+        tx.commit().unwrap();
+        let (page, offset, kind, message): (Option<i64>, Option<i64>, String, String) = conn
+            .query_row(
+                "SELECT page_number, page_offset, kind, message FROM scan_rejections",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!((page, offset), (None, None));
+        assert_eq!(kind, "io");
+        assert!(message.contains("disk gone"), "{message}");
+    }
+
     use super::*;
     use openqbw::AmountEncoding;
 
