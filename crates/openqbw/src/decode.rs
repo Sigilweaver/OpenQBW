@@ -154,13 +154,13 @@ fn is_unconfirmed_keystream(e: &opensqlany::Error) -> bool {
 }
 
 fn finish(pn: u64, d: opensqlany::DeobfuscatedPage, bv_confirmed: bool) -> DecodedPage {
-    let mut keystream_unverified = false;
+    // The lenient fallback path decoded without a confirmed keystream; that
+    // holds whether or not opensqlany attached a warning to the page.
+    let mut keystream_unverified = !bv_confirmed;
     let mut weak_sectors = 0u8;
     for w in d.warnings() {
         match &w.kind {
-            WarningKind::UnverifiedKeystream { .. } | WarningKind::AmbiguousCalibration { .. } => {
-                keystream_unverified |= !bv_confirmed;
-            }
+            WarningKind::UnverifiedKeystream { .. } | WarningKind::AmbiguousCalibration { .. } => {}
             WarningKind::LowConfidenceSector { .. } => match w.sector {
                 Some(s) if s < SECTORS_PER_PAGE => weak_sectors |= 1 << s,
                 _ => weak_sectors = u8::MAX,
@@ -222,6 +222,22 @@ mod tests {
         let d = decode_page(&store, &model, 1).unwrap();
         assert!(d.keystream_unverified);
         assert_eq!(d.flags_for(0..10), vec![RecordFlag::KeystreamUnverified]);
+    }
+
+    #[test]
+    fn unverified_path_is_flagged_without_an_opensqlany_warning() {
+        // All-zero sectors are exact AP progressions, so opensqlany accepts
+        // the supplied bv without a warning.
+        let mut plain = vec![0u8; 4096];
+        plain[0xFF2] = b'E';
+        let store = store_with(encode(&plain, 1, 0x5A));
+        let lenient = ReadOptions::strict().with_leniency(Leniency::KEYSTREAM);
+        let page = store.page(1).unwrap();
+        let d = ApModel::deobfuscate_with_bv(page, 0x5A, &lenient).unwrap();
+        assert!(d.warnings().is_empty(), "test needs a warning-free decode");
+        assert!(finish(1, d, false).keystream_unverified);
+        let d = ApModel::deobfuscate_with_bv(page, 0x5A, &lenient).unwrap();
+        assert!(!finish(1, d, true).keystream_unverified);
     }
 
     #[test]
