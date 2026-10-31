@@ -2,7 +2,8 @@
 //!
 //! `PageStore::open` checks the superblock magic, the version triple and the
 //! `flags_06` base bits. [`open_store`] also checks the CRC-32 footer and the
-//! reserved trailer bytes of every page, so a file that is not a QuickBooks
+//! reserved trailer bytes of every data page (page 0, the superblock, has no
+//! trailer and gets the CRC check only), so a file that is not a QuickBooks
 //! company file, or a page damaged on disk, is an error before any record
 //! is decoded.
 
@@ -16,6 +17,9 @@ use crate::error::{Error, Result};
 /// file (SPECIFICATION.md section 2: identical from QuickBooks 2018 to
 /// Enterprise 2024).
 pub const SUPPORTED_VERSION: (u32, u16, u16) = (3, 201, 12);
+
+/// Index of the superblock page.
+const SUPERBLOCK_PAGE: u64 = 0;
 
 /// What [`open_store`] verifies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,7 +52,8 @@ pub fn learn_model(store: &PageStore) -> Result<ApModel> {
 }
 
 /// Check the superblock magic and version and, unless disabled, every
-/// page's CRC and trailer. Returns the first failure.
+/// page's CRC and, for every page except the superblock (page 0), its
+/// trailer. Returns the first failure.
 ///
 /// An all-zero page was never written and passes the page checks.
 pub fn check_store(store: &PageStore, options: &OpenOptions) -> Result<()> {
@@ -66,6 +71,18 @@ pub fn check_store(store: &PageStore, options: &OpenOptions) -> Result<()> {
     }
     if options.verify_crc {
         for pn in 0..store.page_count() {
+            if pn == SUPERBLOCK_PAGE {
+                // Page 0 is the superblock, not a data page: from 0x400 it
+                // holds the rolled engine fingerprint text, so 0xFF0..0xFFB
+                // is ASCII (SPECIFICATION.md sections 2.1 and 2.3). It has
+                // the CRC footer but not the page trailer, so only the CRC
+                // is checked.
+                store
+                    .page(pn)
+                    .and_then(|page| page.verify_crc())
+                    .map_err(|e| Error::from_store(e, Some(pn)))?;
+                continue;
+            }
             store
                 .page_verified(pn)
                 .map_err(|e| Error::from_store(e, Some(pn)))?;
