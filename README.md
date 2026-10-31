@@ -140,8 +140,7 @@ Every file set openqbw writes records the version of its layout:
 The layout version is 1. Adding a table, a column, a CSV file or a manifest
 key leaves it unchanged; renaming or removing one, or changing what a value
 means, increments it. Readers should ignore tables, columns and keys they do
-not know. `openqbw verify` refuses an SQLite file whose version is newer
-than it reads. Codes stored in the exports (`kind` in `scan_rejections` and
+not know. Codes stored in the exports (`kind` in `scan_rejections` and
 `rejected.csv`, `flags`, `amount_encoding`, `date_source`) are stable
 snake_case strings; the `message` text is for people and may change.
 NULL (an empty CSV field) means a value was not decoded, never zero.

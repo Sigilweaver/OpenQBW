@@ -119,9 +119,10 @@ Built on opensqlany 0.3 (pinned to a git revision until it is published).
   `lineitems` and `rejected` counts are replaced by it.
 - `openqbw verify` exits with status 3 when a check reports DIFF (it exited
   0). `--no-regression-baseline` skips the Rock Castle line-item baseline.
-  It refuses an SQLite export that has no `meta.format_version` or a newer
-  version than it reads, and a row read error while comparing attribution is
-  an error instead of shrinking the compared page set.
+  After writing its SQLite export it checks that file for a
+  `meta.format_version` equal to `PRAGMA user_version` and no newer than the
+  build writes, and fails on any database error while reading it. A row
+  read error while comparing attribution is an error instead of shrinking the compared page set.
 - `openqbw migrate --format iif` exits with an error. `--placeholder-accounts`
   writes the file with placeholder accounts and leaves out, and counts,
   transactions that have an undecoded amount.
