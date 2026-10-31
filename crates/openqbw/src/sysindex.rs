@@ -35,12 +35,12 @@
 //! per-table agreement counts that can be reported by `openqbw verify`.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::iter::FusedIterator;
 
-use opensqlany::{ApModel, PageStore, PageType, Result as SaResult};
+use opensqlany::{ApModel, PageStore};
 
-use crate::bv_recovery::{deobfuscate_with_bv, recover_bv_any};
+use crate::error::Result;
 use crate::page_attribution::PageAttribution;
+use crate::scan::{ReadOptions, RecordFlag, Scan, for_each_extent_page};
 use crate::systable::SysTableEntry;
 
 /// Two-byte creator id appearing at row offset +2 of every SYSINDEX row.
@@ -54,6 +54,7 @@ const PAGE_DATA_END: usize = 0xFF0;
 
 /// One parsed `SYSINDEX` row.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SysIndexEntry {
     /// Owning table id (joins to [`SysTableEntry::table_id`]).
     pub table_id: u32,
@@ -65,6 +66,8 @@ pub struct SysIndexEntry {
     pub page_number: u64,
     /// Byte offset of the row preamble within the decoded page body.
     pub row_offset: usize,
+    /// Reasons this record deserves less trust. Empty when no check flagged it.
+    pub flags: Vec<RecordFlag>,
 }
 
 impl SysIndexEntry {
@@ -146,97 +149,60 @@ pub fn scan_page(body: &[u8], pn: u64, out: &mut Vec<SysIndexEntry>) {
             name,
             page_number: pn,
             row_offset: pos,
+            flags: Vec::new(),
         });
         pos = name_end;
     }
 }
 
-/// Iterate every `SYSINDEX` row recovered from `store`.
-///
-/// Mirrors the bv-recovery strategy used by [`crate::iter_systable_entries`]
-/// and [`crate::iter_syscolumns`].
-pub fn iter_sysindex<'a>(
-    store: &'a PageStore,
-    model: &'a ApModel,
-) -> impl Iterator<Item = SysIndexEntry> + 'a {
-    SysIndexIter::new(store, model)
+/// Every `SYSINDEX` row recovered from `store`, in page order. Pages that
+/// fail to decode are rejected per `options`.
+pub(crate) fn scan_sysindex(
+    store: &PageStore,
+    model: &ApModel,
+    options: &ReadOptions,
+) -> Result<Scan<SysIndexEntry>> {
+    let mut scan = Scan::default();
+    for_each_extent_page(
+        store,
+        model,
+        options,
+        &mut scan,
+        |_| true,
+        |decoded, scan| {
+            let before = scan.items.len();
+            scan_page(decoded.bytes(), decoded.pn(), &mut scan.items);
+            for e in &mut scan.items[before..] {
+                let end = (e.row_offset + PREAMBLE_LEN + NAME_LEN_MAX).min(PAGE_DATA_END);
+                e.flags.extend(decoded.flags_for(e.row_offset..end));
+            }
+            Ok(())
+        },
+    )?;
+    Ok(scan)
 }
 
-/// Collect a deduplicated set of SYSINDEX entries keyed by
-/// `(table_id, root_page, name)`, preferring the first sighting.
-pub fn collect_unique(store: &PageStore, model: &ApModel) -> Vec<SysIndexEntry> {
-    let mut uniq: BTreeMap<(u32, u32, String), SysIndexEntry> = BTreeMap::new();
-    for e in iter_sysindex(store, model) {
-        uniq.entry((e.table_id, e.root_page, e.name.clone()))
-            .or_insert(e);
-    }
-    uniq.into_values().collect()
-}
-
-struct SysIndexIter<'a> {
-    store: &'a PageStore,
-    model: &'a ApModel,
-    pn: u64,
-    n_pages: u64,
-    buffer: Vec<SysIndexEntry>,
-}
-
-impl<'a> SysIndexIter<'a> {
-    fn new(store: &'a PageStore, model: &'a ApModel) -> Self {
-        Self {
-            store,
-            model,
-            pn: 1,
-            n_pages: store.page_count(),
-            buffer: Vec::new(),
+/// A deduplicated set of SYSINDEX entries keyed by
+/// `(table_id, root_page, name)`, keeping the first sighting.
+pub(crate) fn collect_unique(
+    store: &PageStore,
+    model: &ApModel,
+    options: &ReadOptions,
+) -> Result<Scan<SysIndexEntry>> {
+    Ok(scan_sysindex(store, model, options)?.map_items(|items| {
+        let mut uniq: BTreeMap<(u32, u32, String), SysIndexEntry> = BTreeMap::new();
+        for e in items {
+            uniq.entry((e.table_id, e.root_page, e.name.clone()))
+                .or_insert(e);
         }
-    }
-
-    fn fill_buffer(&mut self) -> SaResult<bool> {
-        while self.buffer.is_empty() && self.pn < self.n_pages {
-            let pn = self.pn;
-            self.pn += 1;
-            let page = self.store.page(pn)?;
-            if page.trailer().page_type() != PageType::Extent {
-                continue;
-            }
-            let raw = page.bytes();
-            let plain = if let Some(bv) = recover_bv_any(pn, raw) {
-                deobfuscate_with_bv(raw, pn, bv)
-            } else {
-                self.model.deobfuscate_with_store(raw, pn, self.store)
-            };
-            let mut found = Vec::new();
-            scan_page(&plain, pn, &mut found);
-            for e in found.into_iter().rev() {
-                self.buffer.push(e);
-            }
-        }
-        Ok(!self.buffer.is_empty())
-    }
+        uniq.into_values().collect()
+    }))
 }
-
-impl Iterator for SysIndexIter<'_> {
-    type Item = SysIndexEntry;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            if let Some(e) = self.buffer.pop() {
-                return Some(e);
-            }
-            match self.fill_buffer() {
-                Ok(true) => continue,
-                _ => return None,
-            }
-        }
-    }
-}
-
-impl FusedIterator for SysIndexIter<'_> {}
 
 /// Outcome of auditing one SYSINDEX `(root_page, table_id)` pair against
 /// a position-heuristic [`PageAttribution`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum AuditOutcome {
     /// Position heuristic attributes `root_page` to the same table.
     Agree,
@@ -253,6 +219,7 @@ pub enum AuditOutcome {
 
 /// Per-table-id agreement counts.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct CrossValidation {
     /// Total SYSINDEX rows audited.
     pub total: usize,
@@ -375,6 +342,7 @@ mod tests {
             last_page: Some(last),
             page_number: 0,
             row_offset: 0,
+            flags: Vec::new(),
         }
     }
 
@@ -453,6 +421,7 @@ mod tests {
                 name: "pk".into(),
                 page_number: 0,
                 row_offset: 0,
+                flags: Vec::new(),
             },
             // Disagree: tid=10 root=350 (in beta's window).
             SysIndexEntry {
@@ -461,6 +430,7 @@ mod tests {
                 name: "fkey_x".into(),
                 page_number: 0,
                 row_offset: 0,
+                flags: Vec::new(),
             },
             // Missing: tid=20 root=500 (beyond beta's last_page).
             SysIndexEntry {
@@ -469,6 +439,7 @@ mod tests {
                 name: "pk".into(),
                 page_number: 0,
                 row_offset: 0,
+                flags: Vec::new(),
             },
             // Orphan: tid=99 (unknown table).
             SysIndexEntry {
@@ -477,6 +448,7 @@ mod tests {
                 name: "pk".into(),
                 page_number: 0,
                 row_offset: 0,
+                flags: Vec::new(),
             },
             // Duplicate of the first agree row (should be dedup-counted).
             SysIndexEntry {
@@ -485,6 +457,7 @@ mod tests {
                 name: "pk".into(),
                 page_number: 0,
                 row_offset: 0,
+                flags: Vec::new(),
             },
         ];
         let v = CrossValidation::run(&entries, &position, &tables);

@@ -30,10 +30,12 @@ use std::collections::BTreeMap;
 
 use opensqlany::{ApModel, PageStore};
 
-use crate::iter_syscolumns;
+use crate::error::Result;
+use crate::scan::{ReadOptions, Scan};
 
 /// One bucket in the [`histogram`] output.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct NullsFlagBucket {
     /// The raw `nulls_flag` byte.
     pub flag: u8,
@@ -45,9 +47,21 @@ pub struct NullsFlagBucket {
 
 /// Build a histogram of the `nulls_flag` byte across every
 /// `SYSCOLUMN` row in `store`, sorted ascending by byte value.
-pub fn histogram(store: &PageStore, model: &ApModel) -> Vec<NullsFlagBucket> {
+///
+/// Pages that fail to decode are rejected per `options`; the result lists
+/// them in `rejected`.
+pub(crate) fn histogram(
+    store: &PageStore,
+    model: &ApModel,
+    options: &ReadOptions,
+) -> Result<Scan<NullsFlagBucket>> {
+    let (columns, _) = crate::syscolumn::scan_syscolumns(store, model, options)?;
+    Ok(columns.map_items(buckets))
+}
+
+fn buckets(columns: Vec<crate::SysColumn>) -> Vec<NullsFlagBucket> {
     let mut counts: BTreeMap<u8, (usize, Vec<String>)> = BTreeMap::new();
-    for c in iter_syscolumns(store, model) {
+    for c in columns {
         let entry = counts.entry(c.nulls_flag).or_insert((0, Vec::new()));
         entry.0 += 1;
         if entry.1.len() < 4 && !entry.1.contains(&c.name) {

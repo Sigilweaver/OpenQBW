@@ -30,9 +30,10 @@
 
 use std::collections::{HashMap, HashSet};
 
-use opensqlany::{ApModel, PageStore, PageType};
+use opensqlany::{ApModel, PageStore};
 
-use crate::bv_recovery::{deobfuscate_with_bv, recover_bv_any};
+use crate::error::Result;
+use crate::scan::{ReadOptions, Scan, for_each_extent_page};
 use crate::syscolumn::SysColumn;
 use crate::systable::SysTableEntry;
 
@@ -56,70 +57,68 @@ fn looks_like_identifier(s: &[u8]) -> bool {
 /// Scan all `Extent` pages for `SYSOBJECT`-style rows and return a map
 /// from [`SysColumn::owner_object_id`] to [`SysTableEntry::name`].
 ///
-/// `columns` and `tables` should come from
-/// [`crate::iter_syscolumns`] and [`crate::iter_systable_entries`]
-/// respectively (or their deduplicated forms). The scan is conservative
-/// (see module docs); when an owner has multiple candidate names the
-/// one with the highest sighting count is chosen.
-pub fn bridge_owners_to_tables(
+/// The scan is conservative (see module docs); when an owner has several
+/// candidate names the one with strictly the most sightings is chosen, and
+/// a tie bridges nothing. Pages that fail to decode are rejected per
+/// `options`; the second value counts those a lenient read skipped.
+pub(crate) fn bridge_owners_to_tables(
     store: &PageStore,
     model: &ApModel,
     columns: &[SysColumn],
     tables: &[SysTableEntry],
-) -> HashMap<u32, String> {
+    options: &ReadOptions,
+) -> Result<(HashMap<u32, String>, usize)> {
     let owner_set: HashSet<u32> = columns.iter().map(|c| c.owner_object_id).collect();
     let mut name_set: HashSet<&str> = HashSet::new();
     for t in tables {
         name_set.insert(t.name.as_str());
     }
     if owner_set.is_empty() || name_set.is_empty() {
-        return HashMap::new();
+        return Ok((HashMap::new(), 0));
     }
 
     // owner -> name -> votes
     let mut votes: HashMap<u32, HashMap<String, u32>> = HashMap::new();
 
-    let n_pages = store.page_count();
-    for pn in 0..n_pages {
-        let Ok(page) = store.page(pn) else { continue };
-        if page.trailer().page_type() != PageType::Extent {
-            continue;
-        }
-        let raw = page.bytes();
-        let plain = if let Some(bv) = recover_bv_any(pn, raw) {
-            deobfuscate_with_bv(raw, pn, bv)
-        } else {
-            model.deobfuscate_with_store(raw, pn, store)
-        };
-
-        let mut i = SYSOBJECT_NAME_OFFSET;
-        while i + 1 < plain.len() {
-            let nlen = plain[i] as usize;
-            if (NAME_LEN_MIN..=NAME_LEN_MAX).contains(&nlen) && i + 1 + nlen <= plain.len() {
-                let s = &plain[i + 1..i + 1 + nlen];
-                if looks_like_identifier(s)
-                    && let Ok(name) = std::str::from_utf8(s)
-                    && name_set.contains(name)
-                {
-                    let oid_pos = i - SYSOBJECT_NAME_OFFSET;
-                    let oid = u32::from_le_bytes([
-                        plain[oid_pos],
-                        plain[oid_pos + 1],
-                        plain[oid_pos + 2],
-                        plain[oid_pos + 3],
-                    ]);
-                    if owner_set.contains(&oid) {
-                        *votes
-                            .entry(oid)
-                            .or_default()
-                            .entry(name.to_string())
-                            .or_insert(0) += 1;
+    let mut pages: Scan<()> = Scan::default();
+    for_each_extent_page(
+        store,
+        model,
+        options,
+        &mut pages,
+        |_| true,
+        |decoded, _| {
+            let plain = decoded.bytes();
+            let mut i = SYSOBJECT_NAME_OFFSET;
+            while i + 1 < plain.len() {
+                let nlen = plain[i] as usize;
+                if (NAME_LEN_MIN..=NAME_LEN_MAX).contains(&nlen) && i + 1 + nlen <= plain.len() {
+                    let s = &plain[i + 1..i + 1 + nlen];
+                    if looks_like_identifier(s)
+                        && let Ok(name) = std::str::from_utf8(s)
+                        && name_set.contains(name)
+                    {
+                        let oid_pos = i - SYSOBJECT_NAME_OFFSET;
+                        let oid = u32::from_le_bytes([
+                            plain[oid_pos],
+                            plain[oid_pos + 1],
+                            plain[oid_pos + 2],
+                            plain[oid_pos + 3],
+                        ]);
+                        if owner_set.contains(&oid) {
+                            *votes
+                                .entry(oid)
+                                .or_default()
+                                .entry(name.to_string())
+                                .or_insert(0) += 1;
+                        }
                     }
                 }
+                i += 1;
             }
-            i += 1;
-        }
-    }
+            Ok(())
+        },
+    )?;
 
     let mut bridge: HashMap<u32, String> = HashMap::new();
     for (oid, cands) in votes {
@@ -127,7 +126,7 @@ pub fn bridge_owners_to_tables(
             bridge.insert(oid, name);
         }
     }
-    bridge
+    Ok((bridge, pages.rejected.len()))
 }
 
 /// The name with strictly the most votes. A tie bridges nothing: picking one
