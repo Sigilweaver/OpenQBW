@@ -130,6 +130,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the pages.
 - Two line-item anchors less than 29 bytes apart no longer panic while the
   later record's item ID is searched.
+- SQLite export and `openqbw verify` with `--lenient` no longer fail with
+  "Wrong number of parameters" when records were skipped: the `scan_rejections`
+  insert now supplies the `kind` column.
 
 ## [0.1.6] - 2026-10-04
 
