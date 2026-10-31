@@ -51,8 +51,6 @@ Built on opensqlany 0.3 (pinned to a git revision until it is published).
   span is still read. Pages without a confirmed directory keep every anchor,
   and freed pages are still read, because the allocation map is not decoded.
   Not measured on a corpus.
-- Two line-item anchors less than 29 bytes apart no longer panic while the
-  earlier record's item ID is searched.
 - Line items take the nearest `04 00 10 <id>` item ID instead of the farthest
   in the 96 bytes before the anchor, and their search windows stop at the
   neighbouring records' anchors, so a record no longer reports the previous
