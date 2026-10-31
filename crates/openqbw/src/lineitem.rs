@@ -15,6 +15,8 @@
 //!   - `0x00`         -- non-amount marker (record carries date/counter only)
 //!   - any other byte -- reported as [`Error::UnknownAmountType`]
 
+use std::ops::Range;
+
 use opensqlany::{ApModel, PageStore};
 
 use crate::decode::{DecodedPage, Directory};
@@ -306,7 +308,7 @@ pub(crate) fn scan_lineitems(
 struct PageLineItems {
     /// Records and record errors, in page order.
     records: Vec<Result<LineItem, Error>>,
-    /// Anchors left out because they lie in the page's free space.
+    /// Anchors left out because they lie outside every live row.
     outside_live_rows: u64,
     /// Anchor-shaped records with a quantity other than 1.0, not parsed.
     other_quantity: u64,
@@ -315,26 +317,44 @@ struct PageLineItems {
 /// Parse the line items on `decoded`, flag them for the page's decode
 /// confidence, and attribute them to `source`.
 ///
-/// When the page has a confirmed slot directory, the bytes between the
-/// directory and the lowest live row are free space: an anchor there is the
-/// residue of a deleted or moved record, so it is counted and left out.
-/// Pages without a confirmed directory keep every anchor, because their row
-/// extents are unknown.
+/// When the page has a confirmed slot directory, a live row runs from its
+/// slot offset to the next live offset (or the page trailer). An anchor
+/// outside every such span lies in the page prelude, the directory or the
+/// free space below the lowest live row: it is the residue of a deleted or
+/// moved record, so it is counted and left out. Pages without a confirmed
+/// directory keep every anchor, because their row extents are unknown.
+///
+/// opensqlany does not decode row lengths, so a deleted row that sits inside
+/// a live row's span cannot be told from live data.
 fn page_lineitems(decoded: &DecodedPage, source: Option<String>) -> Result<PageLineItems, Error> {
-    let free = match decoded.slotted()? {
-        Directory::Confirmed(sp) => sp.directory().and_then(|dir| {
-            let low = dir.min_offset()? as usize;
-            (low > dir.end()).then_some(dir.end()..low)
-        }),
+    let live_spans: Option<Vec<Range<usize>>> = match decoded.slotted()? {
+        Directory::Confirmed(sp) => Some(
+            sp.rows()
+                .iter()
+                .map(|r| r.offset() as usize..r.offset() as usize + r.bytes().len())
+                .collect(),
+        ),
         _ => None,
+    };
+    let is_live = |offset: usize| {
+        live_spans
+            .as_ref()
+            .is_none_or(|spans| spans.iter().any(|s| s.contains(&offset)))
     };
     let mut found = Vec::new();
     let other_quantity = scan_page(&decoded.bytes()[..PAGE_DATA_END], decoded.pn(), &mut found);
     let mut out = PageLineItems {
         records: Vec::with_capacity(found.len()),
         outside_live_rows: 0,
-        other_quantity,
+        other_quantity: 0,
     };
+    for offset in other_quantity {
+        if is_live(offset) {
+            out.other_quantity += 1;
+        } else {
+            out.outside_live_rows += 1;
+        }
+    }
     for r in found {
         let mut li = match r {
             Ok(li) => li,
@@ -343,7 +363,7 @@ fn page_lineitems(decoded: &DecodedPage, source: Option<String>) -> Result<PageL
                 continue;
             }
         };
-        if free.as_ref().is_some_and(|f| f.contains(&li.page_offset)) {
+        if !is_live(li.page_offset) {
             out.outside_live_rows += 1;
             continue;
         }
@@ -364,10 +384,12 @@ fn page_lineitems(decoded: &DecodedPage, source: Option<String>) -> Result<PageL
 /// Scan a decoded page body for line-item anchors and append parsed records
 /// to `out` in page order.
 ///
-/// Returns how many anchors had a plausible quantity other than 1.0 in the
-/// quantity position; they are not parsed.
-fn scan_page(body: &[u8], pn: u64, out: &mut Vec<Result<LineItem, Error>>) -> u64 {
-    let mut other_quantity = 0u64;
+/// Returns the offsets of anchors whose quantity position holds a plausible
+/// quantity other than 1.0 (see [`plausible_quantity`]); they are not
+/// parsed. A candidate whose bytes overlap a parsed anchor is part of that
+/// record and is not returned.
+fn scan_page(body: &[u8], pn: u64, out: &mut Vec<Result<LineItem, Error>>) -> Vec<usize> {
+    let mut other_quantity = Vec::new();
     if body.len() < ANCHOR_LEN {
         return other_quantity;
     }
@@ -391,8 +413,12 @@ fn scan_page(body: &[u8], pn: u64, out: &mut Vec<Result<LineItem, Error>>) -> u6
         let qty = &body[pos + 5 + QB_ID_LEN..pos + ANCHOR_LEN];
         if qty != F32_ONE {
             let q = f32::from_le_bytes([qty[0], qty[1], qty[2], qty[3]]);
-            if q.is_finite() && q > 0.0 && q < 1.0e9 {
-                other_quantity += 1;
+            if plausible_quantity(q)
+                && other_quantity
+                    .last()
+                    .is_none_or(|&last| pos - last >= ANCHOR_LEN)
+            {
+                other_quantity.push(pos);
             }
             pos += 1;
             continue;
@@ -400,6 +426,8 @@ fn scan_page(body: &[u8], pn: u64, out: &mut Vec<Result<LineItem, Error>>) -> u6
         start.push(pos);
         pos += ANCHOR_LEN;
     }
+
+    other_quantity.retain(|&c| start.iter().all(|&a| c.abs_diff(a) >= ANCHOR_LEN));
 
     // Each record's search windows stop at its neighbours' anchors, so a
     // field of the previous or next record is never read as this one's.
@@ -418,6 +446,15 @@ fn scan_page(body: &[u8], pn: u64, out: &mut Vec<Result<LineItem, Error>>) -> u6
         out.push(parse_anchor(body, pn, anchor, floor, ceil));
     }
     other_quantity
+}
+
+/// Whether `q`, read from the quantity position of an anchor-shaped record,
+/// is a quantity a line could carry: zero, or a magnitude from 0.001 to
+/// 1,000,000, either sign (returns and credits are negative). The bounds
+/// are a plausibility choice of this crate, not a format rule; anything else
+/// (NaN, infinities, denormals, huge values) is taken as other bytes.
+fn plausible_quantity(q: f32) -> bool {
+    q == 0.0 || (q.is_finite() && (1.0e-3..=1.0e6).contains(&q.abs()))
 }
 
 fn parse_anchor(
@@ -459,7 +496,7 @@ fn parse_anchor(
 
     // Backward search for the nearest item QB-ID prefixed by `04 00 10`,
     // not reaching into the previous record.
-    let back_start = anchor_start.saturating_sub(96).max(floor);
+    let back_start = anchor_start.saturating_sub(96).max(floor).min(anchor_start);
     let item_qb_id = find_item_id_nearest(&body[back_start..anchor_start]);
 
     let mut li = LineItem {
@@ -797,6 +834,87 @@ mod tests {
         let found = page_lineitems(&decoded, None).unwrap();
         assert!(found.records.is_empty());
         assert_eq!(found.other_quantity, 1);
+    }
+
+    fn offsets(found: &PageLineItems) -> Vec<usize> {
+        found
+            .records
+            .iter()
+            .map(|r| r.as_ref().unwrap().page_offset)
+            .collect()
+    }
+
+    fn put_quantity(page: &mut [u8], anchor: usize, q: f32) {
+        page[anchor + 21..anchor + 25].copy_from_slice(&q.to_le_bytes());
+    }
+
+    #[test]
+    fn anchor_before_the_directory_is_not_a_live_record() {
+        // Bytes below the lowest live row are outside every row, including
+        // the page prelude that precedes the slot directory.
+        let mut page = slotted_page();
+        put_anchor(&mut page, 0x20);
+        put_anchor(&mut page, 0xC10);
+        let found = page_lineitems(&DecodedPage::from_plain(9, page), None).unwrap();
+        assert_eq!(offsets(&found), [0xC10]);
+        assert_eq!(found.outside_live_rows, 1);
+    }
+
+    #[test]
+    fn zero_and_negative_quantities_are_counted() {
+        let mut page = vec![0u8; 4096];
+        put_anchor(&mut page, 0x800);
+        put_quantity(&mut page, 0x800, 0.0);
+        put_anchor(&mut page, 0x900);
+        put_quantity(&mut page, 0x900, -2.0);
+        let found = page_lineitems(&DecodedPage::from_plain(9, page), None).unwrap();
+        assert!(found.records.is_empty());
+        assert_eq!(found.other_quantity, 2);
+    }
+
+    #[test]
+    fn implausible_quantity_bytes_are_not_counted() {
+        let mut page = vec![0u8; 4096];
+        put_anchor(&mut page, 0x800);
+        put_quantity(&mut page, 0x800, 5.0e8);
+        put_anchor(&mut page, 0x900);
+        put_quantity(&mut page, 0x900, 1.0e-30);
+        let found = page_lineitems(&DecodedPage::from_plain(9, page), None).unwrap();
+        assert_eq!(found.other_quantity, 0);
+    }
+
+    #[test]
+    fn other_quantity_anchor_outside_live_rows_is_not_counted_as_unread() {
+        let mut page = slotted_page();
+        put_anchor(&mut page, 0x800);
+        put_quantity(&mut page, 0x800, 3.0);
+        put_anchor(&mut page, 0xC10);
+        put_quantity(&mut page, 0xC10, 3.0);
+        let found = page_lineitems(&DecodedPage::from_plain(9, page), None).unwrap();
+        assert_eq!(found.other_quantity, 1);
+        assert_eq!(found.outside_live_rows, 1);
+    }
+
+    #[test]
+    fn candidate_overlapping_a_record_is_not_counted() {
+        // The candidate's zero quantity is the start of the real anchor that
+        // follows it.
+        let mut page = vec![0u8; 4096];
+        put_anchor(&mut page, 0x800);
+        put_quantity(&mut page, 0x800, 0.0);
+        put_anchor(&mut page, 0x800 + 21);
+        let found = page_lineitems(&DecodedPage::from_plain(9, page), None).unwrap();
+        assert_eq!(offsets(&found), [0x800 + 21]);
+        assert_eq!(found.other_quantity, 0);
+    }
+
+    #[test]
+    fn anchors_a_few_bytes_apart_are_both_read() {
+        let mut page = vec![0u8; 4096];
+        put_anchor(&mut page, 0x800);
+        put_anchor(&mut page, 0x800 + ANCHOR_LEN);
+        let found = page_lineitems(&DecodedPage::from_plain(9, page), None).unwrap();
+        assert_eq!(offsets(&found), [0x800, 0x800 + ANCHOR_LEN]);
     }
 
     #[test]

@@ -42,12 +42,17 @@ Built on opensqlany 0.3 (pinned to a git revision until it is published).
   `SyscolumnStats::pages_unconfirmed_directory`, and `openqbw schema` prints
   the count. Not measured on a corpus: opensqlany reports that about a fifth
   of `E` pages with a directory are not confirmed.
-- A line-item anchor in a page's free space (between a confirmed slot
-  directory and the lowest live row) is left out and counted in a
-  `records_outside_live_rows` warning; earlier versions exported such
-  residue of deleted or moved records as live line items. Pages without a
-  confirmed directory keep every anchor, and freed pages are still read,
-  because the allocation map is not decoded. Not measured on a corpus.
+- A line-item anchor outside every live row of a page with a confirmed slot
+  directory (in the page prelude, the directory, or the free space below the
+  lowest live row) is left out and counted in a `records_outside_live_rows`
+  warning; earlier versions exported such residue of deleted or moved records
+  as live line items. A live row runs from its slot offset to the next live
+  offset, because row lengths are not decoded, so a deleted row inside that
+  span is still read. Pages without a confirmed directory keep every anchor,
+  and freed pages are still read, because the allocation map is not decoded.
+  Not measured on a corpus.
+- Two line-item anchors less than 29 bytes apart no longer panic while the
+  earlier record's item ID is searched.
 - Line items take the nearest `04 00 10 <id>` item ID instead of the farthest
   in the 96 bytes before the anchor, and their search windows stop at the
   neighbouring records' anchors, so a record no longer reports the previous
@@ -113,10 +118,12 @@ Built on opensqlany 0.3 (pinned to a git revision until it is published).
   `TruncatedAmount`) instead of a line item with a zero or unknown amount.
 - Line items are read only when the field after the parent ID is
   `float32(1.0)`, which the module documentation calls the quantity. An
-  anchor with any other plausible value there is now counted in a
-  `line_items_not_read` warning, because such a line is missing from the
-  results and from every total; earlier versions left it out silently.
-  Whether the field is the quantity is not confirmed.
+  anchor with any other plausible value there (zero, negative, or a magnitude
+  from 0.001 to 1,000,000) is now counted in a `line_items_not_read` warning,
+  because such a line is missing from the results and from every total;
+  earlier versions left it out silently. The count leaves out anchors outside
+  every live row and anchors that overlap a parsed record. Whether the field
+  is the quantity is not confirmed.
 - Line items are scanned to the end of the page data area (0xFF0, was 0xFE0).
 - SQLite export: `transactions.total_cents` is NULL when any line of the
   transaction has no decoded amount; `unresolved_lines` counts them.

@@ -190,9 +190,9 @@ pub enum WarningKind {
         /// Pages affected.
         pages: u64,
     },
-    /// Record anchors found in a page's free space, between the slot
-    /// directory and the lowest live row, were left out: they are residue of
-    /// deleted or moved records.
+    /// Record anchors found outside every live row of a page (in the page
+    /// prelude, the slot directory or the free space below the lowest live
+    /// row) were left out: they are residue of deleted or moved records.
     #[non_exhaustive]
     RecordsOutsideLiveRows {
         /// Anchors left out.
@@ -294,7 +294,7 @@ impl fmt::Display for Warning {
             ),
             WarningKind::RecordsOutsideLiveRows { records } => write!(
                 f,
-                "{records} record anchors in page free space (deleted or moved records) were \
+                "{records} record anchors outside every live row (deleted or moved records) were \
                  left out"
             ),
             WarningKind::HeaderRowsWithoutId { rows } => write!(
