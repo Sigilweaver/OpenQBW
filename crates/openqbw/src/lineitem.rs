@@ -22,7 +22,6 @@ use crate::opaque::count_opaque_pages;
 use crate::page_attribution::PageAttribution;
 use crate::scan::{ReadOptions, RecordFlag, Scan, Warning, WarningKind, for_each_extent_page};
 
-pub use crate::date::DATE_EPOCH_DAYS_BEFORE_UNIX;
 use crate::date::{DateSource, sa_day_to_unix_day, scan_date_counter};
 
 const PAGE_DATA_END: usize = 0xFF0;
@@ -214,10 +213,11 @@ impl LineItem {
         }
     }
 
-    /// Convert the SA17 transaction date to days since the Unix epoch
-    /// (1970-01-01) with the crate's epoch offset (see [`crate::date`]).
-    /// Returns `None` if the raw date is missing or outside the plausible
-    /// SA-day range.
+    /// The transaction date as days since the Unix epoch (1970-01-01), with
+    /// the crate's SA-day offset (see `txn_date_raw` for the stored value).
+    /// The offset is fitted to one sample file and not confirmed against a
+    /// date known from another source; a correction ships as a bug fix.
+    /// `None` when the date is missing or outside the plausible range.
     pub fn txn_date_days_since_unix(&self) -> Option<i64> {
         self.txn_date_raw.and_then(sa_day_to_unix_day)
     }

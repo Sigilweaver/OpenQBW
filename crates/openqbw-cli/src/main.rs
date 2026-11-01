@@ -5,11 +5,14 @@
 //! ```text
 //! openqbw export    <input.qbw> <output.db>   # multi-transaction SQLite export
 //! openqbw catalog   <input.qbw>               # SYSTABLE listing
-//! openqbw verify    <input.qbw>               # validation summary
-//! openqbw indexes   <input.qbw>               # SYSINDEX listing + attribution audit
+//! openqbw schema    <input.qbw> <table>       # recovered columns of a table
 //! openqbw migrate   <input.qbw> --format=...  # data-liberation export (csv/sqlite/iif)
-//! openqbw forensics <input.qbw>               # file-level discovery summary
+//! openqbw verify    <input.qbw>               # validation summary
+//! openqbw debug     <command> <input.qbw>     # reverse-engineering diagnostics
 //! ```
+//!
+//! The `debug` commands print heuristic cross-checks for people studying
+//! the format. Their names, flags and output may change in any release.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
@@ -88,6 +91,38 @@ enum Cmd {
         /// Table name to inspect.
         table: String,
     },
+    /// Data-liberation export: emit line items and transaction
+    /// headers in a portable format suitable for handing to a
+    /// different accounting product or for archival.
+    Migrate {
+        /// Input QBW file.
+        input: PathBuf,
+        /// Output destination. For `csv` this is a directory and
+        /// will be created if it does not exist; for `sqlite` and
+        /// `iif` it is a single output file.
+        #[arg(long)]
+        out: PathBuf,
+        /// Output format.
+        #[arg(long, value_enum, default_value_t = MigrateFormat::Csv)]
+        format: MigrateFormat,
+        /// IIF only: write the export even though account names and
+        /// transaction types are not decoded. Every TRNS posts to the
+        /// placeholder account `Accounts Receivable` and every SPL uses the
+        /// internal source-table name as its account. Transactions with an
+        /// undecoded amount are left out and counted.
+        #[arg(long)]
+        placeholder_accounts: bool,
+    },
+    /// Reverse-engineering diagnostics. Names, flags and output of these
+    /// commands may change in any release.
+    Debug {
+        #[command(subcommand)]
+        cmd: DebugCmd,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum DebugCmd {
     /// Print heuristic foreign-key edges inferred from column names
     /// matching `*_id` / `*_id_h` (Phase 6, WP-6B).
     Fkgraph {
@@ -121,28 +156,6 @@ enum Cmd {
         /// Show only the cross-validation summary (no per-index rows).
         #[arg(long)]
         summary_only: bool,
-    },
-    /// Data-liberation export: emit line items and transaction
-    /// headers in a portable format suitable for handing to a
-    /// different accounting product or for archival.
-    Migrate {
-        /// Input QBW file.
-        input: PathBuf,
-        /// Output destination. For `csv` this is a directory and
-        /// will be created if it does not exist; for `sqlite` and
-        /// `iif` it is a single output file.
-        #[arg(long)]
-        out: PathBuf,
-        /// Output format.
-        #[arg(long, value_enum, default_value_t = MigrateFormat::Csv)]
-        format: MigrateFormat,
-        /// IIF only: write the export even though account names and
-        /// transaction types are not decoded. Every TRNS posts to the
-        /// placeholder account `Accounts Receivable` and every SPL uses the
-        /// internal source-table name as its account. Transactions with an
-        /// undecoded amount are left out and counted.
-        #[arg(long)]
-        placeholder_accounts: bool,
     },
     /// File-level forensic discovery summary: size, page-type
     /// histogram, table inventory, and high-level signals useful
@@ -209,24 +222,26 @@ fn main() -> Result<()> {
             strict_attribution,
         } => run_verify(input, output, strict_attribution, lenient),
         Cmd::Schema { input, table } => run_schema(input, table, lenient),
-        Cmd::Fkgraph {
-            input,
-            resolved_only,
-        } => run_fkgraph(input, resolved_only, lenient),
-        Cmd::Nulls { input } => run_nulls(input, lenient),
-        Cmd::ValidateAttribution { input } => run_validate_attribution(input, lenient),
-        Cmd::Indexes {
-            input,
-            fk_only,
-            summary_only,
-        } => run_indexes(input, fk_only, summary_only, lenient),
         Cmd::Migrate {
             input,
             out,
             format,
             placeholder_accounts,
         } => run_migrate(input, out, format, placeholder_accounts, lenient),
-        Cmd::Forensics { input } => run_forensics(input, lenient),
+        Cmd::Debug { cmd } => match cmd {
+            DebugCmd::Fkgraph {
+                input,
+                resolved_only,
+            } => run_fkgraph(input, resolved_only, lenient),
+            DebugCmd::Nulls { input } => run_nulls(input, lenient),
+            DebugCmd::ValidateAttribution { input } => run_validate_attribution(input, lenient),
+            DebugCmd::Indexes {
+                input,
+                fk_only,
+                summary_only,
+            } => run_indexes(input, fk_only, summary_only, lenient),
+            DebugCmd::Forensics { input } => run_forensics(input, lenient),
+        },
     }
 }
 

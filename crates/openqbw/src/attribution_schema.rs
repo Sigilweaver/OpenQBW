@@ -56,7 +56,7 @@ pub const MIN_ROW_BODY_BYTES: u32 = 4;
 #[non_exhaustive]
 pub struct WidthBand {
     /// SYSCOLUMN owner identifier (bridged to the table via the
-    /// `SYSOBJECT` catalog; see [`crate::sysobject`]).
+    /// `SYSOBJECT` catalog; see `sysobject`).
     pub owner_object_id: u32,
     /// Lower bound on plausible row body length.
     pub low: u32,

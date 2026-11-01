@@ -33,7 +33,7 @@ use opensqlany::{ApModel, PageStore};
 use crate::error::Result;
 use crate::scan::{ReadOptions, Scan};
 
-/// One bucket in the [`histogram`] output.
+/// One bucket in the `histogram` output.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct NullsFlagBucket {

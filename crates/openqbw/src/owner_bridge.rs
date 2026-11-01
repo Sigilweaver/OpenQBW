@@ -79,7 +79,7 @@ const MIN_CALIBRATION_PAIRS: usize = 4;
 pub enum BridgeSource {
     /// The `SYSTABLE` row's own back-reference (this module).
     SysTableBackref,
-    /// The `SYSOBJECT` name scan ([`crate::sysobject`]).
+    /// The `SYSOBJECT` name scan (`sysobject`).
     SysObjectScan,
 }
 
