@@ -470,6 +470,51 @@ Evidence, over the six TLR 2021/2022 practice files tested
 The remaining prefix bytes, and the fields between the prefix id and
 the tag, are still unassigned. See openqbw#19.
 
+### 5.2 The line-item value field
+
+A line-item record is anchored by the 25 bytes `00 00 00 00 10 <16 base62
+chars> 00 00 80 3F`: the parent transaction's QB-ID and a `float32(1.0)`
+quantity. The field right after the anchor is a SQL Anywhere NUMERIC value,
+laid out as described in openqbw#22 (pete-green, section 2.1):
+
+```
+[k] [ctrl] [d0] [d1] ... [d(k-1)]       width 2 + k
+```
+
+- `k` is the digit count, 1 to 10.
+- The digits are base 100, least significant first, each 0 to 99:
+  `coef = sum(d[i] * 100^i)`.
+- `ctrl & 0x80` is the sign (set is negative). `(ctrl & 0x7F) - 64` is the
+  base-100 exponent `e`.
+- The value is `+/- coef * 100^e`, an exact decimal.
+
+Examples: `02 40 08 02` is 208, `01 41 03` is 300, `02 3F 2F 4B` is 75.47,
+`02 BF 2D 22` is -34.45, `03 3F 39 56 2F` is 4786.57, `02 C0 3C 09` is -960
+and `03 BF 32 31 03` is -349.50. The common control bytes are `3F`, `40`,
+`41` and `BF`, `C0`, `C1` (`e` = -1, 0, 1).
+
+The reader decodes a field when `1 <= k <= 10`, every digit is at most 99,
+the field lies inside the page and `e` is in -3..=5. Any other field keeps
+its raw bytes and is counted by reason: `k = 0` (`00 81` is the usual
+shape), a digit above 99, or an exponent outside -3..=5. A length byte above
+10, or a field cut off by the page end, is a record error.
+
+Evidence for this layout is in the file itself. On the Rock Castle sample, 1586
+of 4260 parent groups of three or more lines sum to exactly zero under this
+reading, against 5 of 4260 when the digit bytes are shuffled, and every group
+that balanced under the earlier readings (unsigned u24; sign-bit u23) still
+balances. Those two readings are contradicted by the data and are not used.
+
+What is not established:
+
+- That the field is the line's amount. No header total, and no
+  quantity-times-rate relation, has been found to link it to an amount.
+- What a `k = 0` field means. Reading it as zero lowers the balance rate, so
+  it stays undecoded.
+- Which table a line belongs to. `source_table` comes from page position
+  alone, and the content-based cross-check agrees with it on 0.3% of pages;
+  line items turn up in 130 tables.
+
 ## 6. Slotted catalog pages
 
 Deobfuscated catalog pages follow the classic SAP SQL Anywhere

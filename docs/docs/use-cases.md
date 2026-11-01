@@ -15,8 +15,8 @@ accounting product or just archive it.
 $ openqbw export mybooks.qbw --out books.sqlite
 
 # Inspect from sqlite3 or DB Browser
-$ sqlite3 books.sqlite "SELECT COUNT(*) FROM lineitem;"
-$ sqlite3 books.sqlite "SELECT SUM(amount_cents)/100.0 FROM lineitem;"
+$ sqlite3 books.sqlite "SELECT COUNT(*) FROM transaction_line_items;"
+$ sqlite3 books.sqlite "SELECT COUNT(*) FROM transaction_line_items WHERE value IS NULL;"
 ```
 
 See [migration-guide.md](migration-guide.md) for the
