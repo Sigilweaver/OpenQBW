@@ -109,6 +109,20 @@ Built on opensqlany 0.3 (pinned to a git revision until it is published).
   version (1); `scan_rejections` stores `kind` and `message`. A lenient
   export that skipped a record no longer fails while writing
   `scan_rejections`.
+- SQLite export: `source_table` is NULL instead of an empty string when a
+  line's page (or every line of a synthesized transaction) is not
+  attributed to a table. `transaction_line_items` has an `id` primary key and
+  a unique `(page_number, page_offset)` in place of the primary key
+  `(qb_id_parent, line_number, source_table)`.
+- CSV export: `manifest.json` lists every file written with its row count
+  (`files`), next to `format_version` and `openqbw_version`; the top-level
+  `lineitems` and `rejected` counts are replaced by it.
+- `openqbw verify` exits with status 3 when a check reports DIFF (it exited
+  0). The Rock Castle line-item baseline runs only with `--regression-baseline`.
+  After writing its SQLite export it checks that file for a
+  `meta.format_version` equal to `PRAGMA user_version` and no newer than the
+  build writes, and fails on any database error while reading it. A row
+  read error while comparing attribution is an error instead of shrinking the compared page set.
 - `openqbw migrate --format iif` exits with an error. `--placeholder-accounts`
   writes the file with placeholder accounts and leaves out, and counts,
   transactions that have an undecoded amount.
@@ -197,6 +211,10 @@ Built on opensqlany 0.3 (pinned to a git revision until it is published).
   `ContentError` (now a `FormatError`) carry `kind`, `page_number` and
   `page_offset`. The package ships `.pyi` stubs and `py.typed`; the native
   module is `openqbw._openqbw`.
+
+### Changed
+
+- `verify` runs the Rock Castle regression baseline only with `--regression-baseline`. `--no-regression-baseline` is removed. Before, every file other than the Rock Castle sample failed `verify`.
 
 ### Fixed
 
