@@ -255,10 +255,6 @@ Built on opensqlany 0.3 (pinned to a git revision until it is published).
   `page_offset`. The package ships `.pyi` stubs and `py.typed`; the native
   module is `openqbw._openqbw`.
 
-### Changed
-
-- `verify` runs the Rock Castle regression baseline only with `--regression-baseline`. `--no-regression-baseline` is removed. Before, every file other than the Rock Castle sample failed `verify`.
-
 ### Fixed
 
 - Page 0 (the superblock) is checked by its CRC only, so real company files
