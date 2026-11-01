@@ -13,9 +13,12 @@ pub enum Error {
     /// The file could not be read.
     #[error("i/o error: {0}")]
     Io(#[from] std::io::Error),
-    /// The superblock magic is not the SQL Anywhere 17 magic.
+    /// The superblock magic is not the SQL Anywhere 17 magic. The file is not
+    /// a QuickBooks SQL Anywhere company file.
     #[error(
-        "not a QuickBooks company file: bad superblock magic 0x{found:08X} (want 0x{expected:08X})"
+        "not a QuickBooks SQL Anywhere company file: bad superblock magic \
+         0x{found:08X} (want 0x{expected:08X}); older QuickBooks versions, such as \
+         2001-era files, use a different format and are not supported"
     )]
     #[non_exhaustive]
     BadMagic {

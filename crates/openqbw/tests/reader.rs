@@ -119,6 +119,19 @@ fn not_a_company_file_is_a_format_error() {
 }
 
 #[test]
+fn foreign_file_that_is_not_page_aligned_reports_the_magic() {
+    // 668672 bytes is the size of the 2001-era file in issue 38; its length is
+    // not a multiple of the page size and its header is not SQL Anywhere's.
+    let mut bytes = vec![0x41u8; 668_672];
+    bytes[0x14..0x18].copy_from_slice(&0x1234_5678u32.to_le_bytes());
+    let e = Reader::from_bytes(bytes, &ReadOptions::default()).unwrap_err();
+    assert_eq!(e.kind(), ErrorKind::BadMagic, "{e}");
+    let msg = e.to_string();
+    assert!(msg.contains("bad superblock magic 0x12345678"), "{msg}");
+    assert!(msg.contains("not supported"), "{msg}");
+}
+
+#[test]
 fn damaged_page_is_an_error() {
     let mut bytes = common::synthetic_qbw(false);
     bytes[5 * common::PAGE + 0x700] ^= 0x01;

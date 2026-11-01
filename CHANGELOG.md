@@ -257,6 +257,12 @@ Built on opensqlany 0.3 (pinned to a git revision until it is published).
 
 ### Fixed
 
+- Opening a file that is not a SQL Anywhere page store, such as the 2001-era
+  QuickBooks file in issue #38 (reported by flywire), fails with `BadMagic`
+  ("not a QuickBooks SQL Anywhere company file ... older QuickBooks versions,
+  such as 2001-era files, use a different format and are not supported").
+  The superblock magic is checked before the file size, so the error no
+  longer reads "file size ... is not a multiple of page size".
 - Page 0 (the superblock) is checked by its CRC only, so real company files
   open again.
 - The opaque-page count measures entropy on the decoded page body. It

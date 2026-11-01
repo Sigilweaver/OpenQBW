@@ -159,6 +159,18 @@ fn not_a_company_file_fails_with_exit_1() {
 }
 
 #[test]
+fn foreign_file_that_is_not_page_aligned_reports_the_magic() {
+    let dir = tmp("foreign");
+    let p = dir.join("old.qbw");
+    std::fs::write(&p, vec![0x41u8; 668_672]).unwrap();
+    let out = openqbw(&["catalog".as_ref(), os(&p)]);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("bad superblock magic"), "{err}");
+    assert!(!err.contains("page size"), "{err}");
+}
+
+#[test]
 fn duplicate_header_ids_are_resolved_the_same_way_in_every_format() {
     // The fixture repeats one header ID on an invoice header page (first in
     // page order) and a bill header page. Every format keeps the first.
