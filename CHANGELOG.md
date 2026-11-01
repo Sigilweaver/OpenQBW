@@ -255,6 +255,18 @@ Built on opensqlany 0.3 (pinned to a git revision until it is published).
   `page_offset`. The package ships `.pyi` stubs and `py.typed`; the native
   module is `openqbw._openqbw`.
 
+### Added
+
+- Timestamps (issue #45, reported by SmithJesko). The 4 bytes between the
+  table id and the name in a `SYSTABLE` row, and the `u32` at superblock
+  offset 0x2A, are counts of minutes since 1600-02-29. `SysTableEntry` has
+  `stamp_raw()` and `stamp_unix_seconds()`, `Reader` has `created_raw()` and
+  `created_unix_seconds()`, and Python `Table.stamp_unix_seconds` and
+  `Reader.created_unix_seconds` carry the same values. A stamp outside
+  1990-01-01..2100-01-01 is `None`. `SPECIFICATION.md` documents both fields
+  as timestamps; superblock `0x2D` was the high byte of the creation stamp,
+  not a separate constant.
+
 ### Fixed
 
 - Opening a file that is not a SQL Anywhere page store, such as the 2001-era

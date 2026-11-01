@@ -41,6 +41,8 @@ def test_reads_the_synthetic_file():
         tables = r.tables()
     assert r.page_count == 8
     assert r.file_size == 8 * 4096
+    assert r.created_unix_seconds == 1_513_744_440
+    assert [t.stamp_unix_seconds for t in tables] == [1_513_744_380] * 3
     assert r.attribution_gap is None
     assert not r.lenient
     assert [t.name for t in tables] == [

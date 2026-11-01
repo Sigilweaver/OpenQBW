@@ -232,9 +232,35 @@ identical across all 112 files, `f` = 2-4 distinct values (flag),
 | 0x24   | 4    | u32_LE   | `unknown_24`          | Varies per file. |
 | 0x28   | 1    | u8       | `unknown_28`          | Varies per file. |
 | 0x29   | 1    | u8 flag  | `flags_29`            | `0x00` (72/112) or `0x01` (40/112). |
-| 0x2A   | 3    | var      | `unknown_2A`          | Varies. |
-| 0x2D   | 3    | const    | `const_2D`            | Always `0D 04 00`. |
+| 0x2A   | 4    | u32_LE   | `created_stamp`       | Database creation time: minutes since 1600-02-29 (§3.1a). |
+| 0x2E   | 2    | const    | `const_2E`            | Always `04 00`. |
 | 0x30   | 16   | zeros    | `reserved_30`         | Always 16 zero bytes. |
+
+### 3.1a Timestamps (minutes since 1600-02-29)
+
+The `u32_LE` at `0x2A..0x2D` is a count of minutes since 1600-02-29,
+the epoch of DATE and TIMESTAMP column values (reported in issue #22).
+It is the database creation time. On all
+112 corpus files it decodes to a time between 2017-08-10 and
+2020-08-18, in six distinct values that match the template files the
+corpus was built from (55 files 2017-08-10 23:31, 24 files 2017-10-06
+09:29, 20 files 2017-12-20 10:03, 2 files 2018-07-14 13:15, 3 files
+2020-05-07 11:47, 8 files 2020-08-18 07:05). Its high byte is `0D` on
+every file, which is why earlier revisions of this document listed
+`0x2D` as a constant; the bytes at `0x2E..0x2F` are the constant
+`04 00`.
+
+The SYSTABLE row stamp (§5) uses the same unit. Minutes convert to Unix
+seconds as `minutes * 60 - 11670998400`. A value that decodes outside
+1990-01-01..2100-01-01 is not treated as a time. The row stamps of a
+file differ from its creation stamp: on the Rock Castle sample (created
+2020-08-18 07:05) 178 of 683 rows carry 2020-08-18 14:04 and 467 carry
+2020-10-13 14:31, later than creation.
+
+This reading was reported by SmithJesko in issue #45, who found it on
+QuickBooks 2012 files (SQL Anywhere 11), where the SYSTABLE stamp varies
+per row and the superblock value is within one minute of the most common
+row value.
 
 ### 3.2 Page-count hint
 
@@ -362,10 +388,16 @@ tag immediately before the `table_name` column:
 ```
 05 00 00 00                    row marker (constant on all SYSTABLE rows)
 <table_id u32_LE> 00 00 00 00  32-bit id, zero-padded to 8 bytes
-b1 0d 19 0d 00 00 00 00        fixed record tag
+<stamp u32_LE> 00 00 00 00     row stamp (minutes since 1600-02-29)
 <name_len u8> <name ASCII>
 ...                              trailer (see below)
 ```
+
+The row stamp is a `u32_LE` count of minutes since 1600-02-29 (same
+unit as §3.1a), reported in issue #45. In the examples, `b1 0d 19 0d` is
+2017-12-20 04:33 and `59 2a 16 0d` is 2017-08-10 18:01. It varies by
+file, and on QuickBooks 2012 files by row. The reader accepts any 4
+bytes there and reports a value outside 1990..2100 as absent.
 
 The trailer immediately after the name contains monotone sequences
 of table-local fields. On consecutive rows of the SA system schema

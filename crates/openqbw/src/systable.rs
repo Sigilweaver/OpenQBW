@@ -8,10 +8,13 @@
 //! 05 00 00 00 <tid u32 LE> 00 00 00 00 <magic 4B> 00 00 00 00 <name_len u8> <name>
 //! ```
 //!
-//! The 4-byte `<magic>` field is FILE-SPECIFIC (it appears to be a per-database
-//! salt). See `re/NOTES.md` §C.18 and §C.20. We therefore accept any 4 bytes
-//! there and rely on the surrounding zero markers, the name-length sanity
-//! check, and the ASCII validity of the table name to disambiguate.
+//! The 4-byte `<magic>` field is a timestamp: a `u32` count of minutes since
+//! 1600-02-29, the epoch of DATE and TIMESTAMP values (reported in issue
+//! #45; see `SPECIFICATION.md` section 5). It varies by file, and on some
+//! files by row, so we accept any 4 bytes there and rely on the surrounding
+//! zero markers, the name-length sanity check, and the ASCII validity of the
+//! table name to disambiguate. [`SysTableEntry::stamp_unix_seconds`] decodes
+//! it. See also `re/NOTES.md` §C.18 and §C.20.
 //!
 //! Beyond the row tag, the trailer that follows the name encodes per-table
 //! metadata; see §C.33. We extract three fields:
@@ -52,8 +55,8 @@ pub struct SysTableEntry {
     pub table_id: u32,
     /// Table name (ASCII).
     pub name: String,
-    /// File-specific 4-byte magic tag observed between the table id and the
-    /// name. Captured for diagnostics.
+    /// The 4 bytes between the table id and the name: a `u32_LE` timestamp,
+    /// see [`SysTableEntry::stamp_raw`].
     pub magic: [u8; 4],
     /// Number of columns in the table, from trailer offset +6.
     pub col_count: Option<u8>,
@@ -67,6 +70,19 @@ pub struct SysTableEntry {
     pub row_offset: usize,
     /// Reasons this record deserves less trust. Empty when no check flagged it.
     pub flags: Vec<RecordFlag>,
+}
+
+impl SysTableEntry {
+    /// The stamp as stored: a `u32` count of minutes since 1600-02-29.
+    pub fn stamp_raw(&self) -> u32 {
+        u32::from_le_bytes(self.magic)
+    }
+
+    /// The stamp as Unix seconds (the stored count taken as UTC), or `None` when it falls outside
+    /// 1990-01-01..2100-01-01.
+    pub fn stamp_unix_seconds(&self) -> Option<i64> {
+        crate::date::stamp_to_unix_seconds(self.stamp_raw())
+    }
 }
 
 /// Scan a decoded page body for `SYSTABLE` row tags and append parsed
@@ -250,6 +266,29 @@ mod tests {
         assert_eq!(e.magic, [0xb1, 0x0d, 0x19, 0x0d]);
         assert_eq!(e.page_number, 42);
         assert_eq!(e.row_offset, 0x20);
+    }
+
+    #[test]
+    fn stamp_is_the_magic_as_minutes_since_1600_02_29() {
+        let mut body = vec![0u8; 0x200];
+        for (at, tid, stamp, name) in [
+            (0x20, 1, [0xb1, 0x0d, 0x19, 0x0d], "alpha_table"),
+            (0x80, 2, [0x2c, 0x68, 0xd6, 0x0c], "beta_table"),
+            (0xe0, 3, [0, 0, 0, 0], "gamma_table"),
+            (0x140, 4, [0xff, 0xff, 0xff, 0xff], "delta_table"),
+        ] {
+            let row = synth_row(tid, stamp, name);
+            body[at..at + row.len()].copy_from_slice(&row);
+        }
+        let mut out = Vec::new();
+        scan_page(&body, 1, &mut out);
+        assert_eq!(out.len(), 4);
+        assert_eq!(out[0].stamp_raw(), 219_745_713);
+        assert_eq!(out[0].stamp_unix_seconds(), Some(1_513_744_380));
+        assert_eq!(out[1].stamp_unix_seconds(), Some(1_251_679_440));
+        // Wildcard acceptance is unchanged; a value out of range is None.
+        assert_eq!(out[2].stamp_unix_seconds(), None);
+        assert_eq!(out[3].stamp_unix_seconds(), None);
     }
 
     #[test]

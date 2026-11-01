@@ -4,7 +4,7 @@ use std::path::Path;
 
 use opensqlany::{ApModel, PageStore, PageType};
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::lineitem::{LineItem, scan_lineitems};
 use crate::open::{learn_model, open_store, store_from_bytes};
 use crate::page_attribution::{AttributionGap, PageAttribution};
@@ -26,6 +26,7 @@ pub struct Reader {
     store: PageStore,
     model: ApModel,
     options: ReadOptions,
+    created: u32,
     catalog: Scan<SysTableEntry>,
     attribution: PageAttribution,
 }
@@ -52,6 +53,7 @@ impl Reader {
 
     fn from_store(store: PageStore, options: &ReadOptions) -> Result<Self> {
         let model = learn_model(&store)?;
+        let created = creation_stamp(&store)?;
         let mut catalog = crate::systable::collect_unique(&store, &model, options)?;
         let invalid = flag_invalid_roots(&store, &mut catalog.items);
         if invalid > 0 {
@@ -71,6 +73,7 @@ impl Reader {
             store,
             model,
             options: *options,
+            created,
             catalog,
             attribution,
         })
@@ -79,6 +82,18 @@ impl Reader {
     /// The options this reader was opened with.
     pub fn options(&self) -> &ReadOptions {
         &self.options
+    }
+
+    /// The database creation stamp from superblock offset 0x2A, as stored: a
+    /// `u32` count of minutes since 1600-02-29.
+    pub fn created_raw(&self) -> u32 {
+        self.created
+    }
+
+    /// The database creation time as Unix seconds (the stored count taken as UTC), or `None` when the
+    /// stamp falls outside 1990-01-01..2100-01-01.
+    pub fn created_unix_seconds(&self) -> Option<i64> {
+        crate::date::stamp_to_unix_seconds(self.created)
     }
 
     /// Number of 4096-byte pages.
@@ -159,6 +174,13 @@ impl Reader {
                 .push(Warning::new(WarningKind::AttributionGap(gap)));
         }
     }
+}
+
+/// The `u32` at superblock offset 0x2A.
+fn creation_stamp(store: &PageStore) -> Result<u32> {
+    let page = store.page(0).map_err(|e| Error::from_store(e, Some(0)))?;
+    let b = page.bytes();
+    Ok(u32::from_le_bytes([b[0x2A], b[0x2B], b[0x2C], b[0x2D]]))
 }
 
 /// Flag catalog rows whose `data_root_page` is past the end of the store or

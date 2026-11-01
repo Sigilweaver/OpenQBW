@@ -119,6 +119,17 @@ fn not_a_company_file_is_a_format_error() {
 }
 
 #[test]
+fn reads_the_creation_and_row_stamps() {
+    let r = Reader::from_bytes(common::synthetic_qbw(false), &ReadOptions::default()).unwrap();
+    // Superblock 0x2A holds one minute more than the rows' stamp.
+    assert_eq!(r.created_raw(), 219_745_714);
+    assert_eq!(r.created_unix_seconds(), Some(1_513_744_440));
+    for t in &r.catalog().items {
+        assert_eq!(t.stamp_unix_seconds(), Some(1_513_744_380), "{}", t.name);
+    }
+}
+
+#[test]
 fn foreign_file_that_is_not_page_aligned_reports_the_magic() {
     // 668672 bytes is the size of the 2001-era file in issue 38; its length is
     // not a multiple of the page size and its header is not SQL Anywhere's.

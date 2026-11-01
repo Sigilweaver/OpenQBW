@@ -362,6 +362,7 @@ struct Table {
     data_root_page: Option<u32>,
     last_page: Option<u32>,
     page_number: u64,
+    stamp_unix_seconds: Option<i64>,
     flags: Vec<String>,
 }
 
@@ -374,6 +375,7 @@ impl Table {
             data_root_page: e.data_root_page,
             last_page: e.last_page,
             page_number: e.page_number,
+            stamp_unix_seconds: e.stamp_unix_seconds(),
             flags: flag_names(&e.flags),
         }
     }
@@ -389,6 +391,7 @@ impl Table {
         d.set_item("data_root_page", self.data_root_page)?;
         d.set_item("last_page", self.last_page)?;
         d.set_item("page_number", self.page_number)?;
+        d.set_item("stamp_unix_seconds", self.stamp_unix_seconds)?;
         d.set_item("flags", &self.flags)?;
         Ok(d)
     }
@@ -478,6 +481,13 @@ impl Reader {
     #[getter]
     fn file_size(&self) -> u64 {
         self.inner.file_size()
+    }
+
+    /// Database creation time as Unix seconds (UTC), or `None` when the
+    /// stamp at superblock offset 0x2A is outside 1990..2100.
+    #[getter]
+    fn created_unix_seconds(&self) -> Option<i64> {
+        self.inner.created_unix_seconds()
     }
 
     fn __repr__(&self) -> String {

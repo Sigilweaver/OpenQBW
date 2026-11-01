@@ -159,6 +159,10 @@ fn superblock() -> Vec<u8> {
     p[0x14..0x18].copy_from_slice(&0xDA7A_BA5Eu32.to_le_bytes());
     p[0x18..0x1A].copy_from_slice(&201u16.to_le_bytes());
     p[0x1A..0x1C].copy_from_slice(&12u16.to_le_bytes());
+    // Creation stamp: the SYSTABLE rows' stamp plus one minute, then the
+    // constant `04 00`.
+    p[0x2A..0x2E].copy_from_slice(&219_745_714u32.to_le_bytes());
+    p[0x2E..0x30].copy_from_slice(&[0x04, 0x00]);
     seal(&mut p);
     p
 }
