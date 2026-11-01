@@ -6,7 +6,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Built on opensqlany 0.3 (pinned to a git revision until it is published).
+Built on opensqlany 0.3.0.
 `Cargo.lock` is committed. The minimum Rust version is 1.95.
 
 ### Behavior changes
