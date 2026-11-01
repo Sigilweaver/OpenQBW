@@ -15,10 +15,9 @@ description = "Python bindings for openqbw"
 # which conflicts with workspace `unsafe_code = forbid`.
 
 [lib]
-name = "openqbw"
+name = "_openqbw"
 crate-type = ["cdylib"]
 
 [dependencies]
-openqbw_rs = { package = "openqbw", path = "../openqbw", version = "0.1.6" }
-opensqlany = { workspace = true }
+openqbw_rs = { package = "openqbw", path = "../openqbw", version = "0.2.0" }
 pyo3 = { version = "0.30", features = ["extension-module", "abi3-py39"] }

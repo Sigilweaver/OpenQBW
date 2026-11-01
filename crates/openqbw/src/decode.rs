@@ -48,6 +48,16 @@ impl DecodedPage {
         &self.bytes
     }
 
+    /// `true` when no check confirmed the keystream for this page.
+    pub(crate) fn keystream_unverified(&self) -> bool {
+        self.keystream_unverified
+    }
+
+    /// `true` when any sector's step is low confidence.
+    pub(crate) fn has_weak_sectors(&self) -> bool {
+        self.weak_sectors != 0
+    }
+
     /// Flags for a record that occupies `range` of the decoded page.
     pub(crate) fn flags_for(&self, range: Range<usize>) -> Vec<RecordFlag> {
         let mut flags = Vec::new();
@@ -64,16 +74,16 @@ impl DecodedPage {
         flags
     }
 
-    /// Parse the slot directory in strict mode. `Ok(None)` when the page has
-    /// no directory, or when opensqlany cannot confirm one (a structure
-    /// error); callers that need rows count such pages.
-    pub(crate) fn slotted(&self) -> Result<Option<SlottedPage<'_>>, Error> {
+    /// Parse the slot directory in strict mode. A directory opensqlany
+    /// cannot confirm (a structure error) is [`Directory::Unconfirmed`];
+    /// callers that need rows count such pages.
+    pub(crate) fn slotted(&self) -> Result<Directory<'_>, Error> {
         let page = Page::from_bytes(self.pn, &self.bytes)
             .map_err(|e| Error::from_store(e, Some(self.pn)))?;
         match SlottedPage::parse(page, &ReadOptions::strict()) {
-            Ok(sp) if sp.directory().is_some() => Ok(Some(sp)),
-            Ok(_) => Ok(None),
-            Err(e) if e.kind() == SaErrorKind::Structure => Ok(None),
+            Ok(sp) if sp.directory().is_some() => Ok(Directory::Confirmed(sp)),
+            Ok(_) => Ok(Directory::Absent),
+            Err(e) if e.kind() == SaErrorKind::Structure => Ok(Directory::Unconfirmed),
             Err(e) => Err(Error::from_store(e, Some(self.pn))),
         }
     }
@@ -85,6 +95,26 @@ impl DecodedPage {
             bytes,
             keystream_unverified: false,
             weak_sectors: 0,
+        }
+    }
+}
+
+/// Outcome of looking for a page's slot directory.
+pub(crate) enum Directory<'a> {
+    /// A directory the page prelude confirms.
+    Confirmed(SlottedPage<'a>),
+    /// The page declares no rows and nothing looks like a directory.
+    Absent,
+    /// Something looks like a directory but the prelude does not confirm it.
+    Unconfirmed,
+}
+
+impl<'a> Directory<'a> {
+    /// The parsed page when the directory is confirmed.
+    pub(crate) fn confirmed(self) -> Option<SlottedPage<'a>> {
+        match self {
+            Directory::Confirmed(sp) => Some(sp),
+            _ => None,
         }
     }
 }

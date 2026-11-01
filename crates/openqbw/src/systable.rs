@@ -30,12 +30,11 @@
 //! bytes before the tag (issue #16). See `SPECIFICATION.md` §5.
 
 use std::collections::BTreeMap;
-use std::iter::FusedIterator;
 
-use opensqlany::{ApModel, PageStore, PageType};
+use opensqlany::{ApModel, PageStore};
 
-use crate::decode::decode_page;
 use crate::error::Result;
+use crate::scan::{ReadOptions, RecordFlag, Scan, for_each_extent_page};
 
 const PAGE_DATA_END: usize = 0xFF0;
 const NAME_LEN_MIN: u8 = 4;
@@ -47,6 +46,7 @@ const LAST_PAGE_OFF: usize = 50;
 
 /// A single parsed `SYSTABLE` row.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct SysTableEntry {
     /// Table id (SA internal `table_id`).
     pub table_id: u32,
@@ -65,6 +65,8 @@ pub struct SysTableEntry {
     pub page_number: u64,
     /// Byte offset of the row tag within the decoded page body.
     pub row_offset: usize,
+    /// Reasons this record deserves less trust. Empty when no check flagged it.
+    pub flags: Vec<RecordFlag>,
 }
 
 /// Scan a decoded page body for `SYSTABLE` row tags and append parsed
@@ -153,6 +155,7 @@ pub fn scan_page(body: &[u8], pn: u64, out: &mut Vec<SysTableEntry>) {
             last_page,
             page_number: pn,
             row_offset: pos,
+            flags: Vec::new(),
         });
         pos = name_end;
     }
@@ -170,90 +173,51 @@ fn read_u32_le(buf: &[u8], off: usize) -> Option<u32> {
     ]))
 }
 
-/// Iterate every `SYSTABLE` row recovered from `store`.
-///
-/// Pages whose `bv` cannot be recovered are silently skipped. Rows are
-/// yielded in the order they are encountered; callers wanting a canonical
-/// catalog should call [`collect_unique`] instead.
-pub fn iter_systable_entries<'a>(
-    store: &'a PageStore,
-    model: &'a ApModel,
-) -> impl Iterator<Item = SysTableEntry> + 'a {
-    SysTableIter::new(store, model)
+/// Every `SYSTABLE` row recovered from `store`, in page order, including
+/// repeated sightings of the same row. Pages that fail to decode are
+/// rejected per `options`.
+pub(crate) fn scan_systable(
+    store: &PageStore,
+    model: &ApModel,
+    options: &ReadOptions,
+) -> Result<Scan<SysTableEntry>> {
+    let mut scan = Scan::default();
+    for_each_extent_page(
+        store,
+        model,
+        options,
+        &mut scan,
+        |_| true,
+        |decoded, scan| {
+            let before = scan.items.len();
+            scan_page(decoded.bytes(), decoded.pn(), &mut scan.items);
+            for e in &mut scan.items[before..] {
+                let end = (e.row_offset + 17 + TRAILER_SCAN_LEN + NAME_LEN_MAX as usize)
+                    .min(PAGE_DATA_END);
+                e.flags.extend(decoded.flags_for(e.row_offset..end));
+            }
+            Ok(())
+        },
+    )?;
+    Ok(scan)
 }
 
-/// Collect a deduplicated catalog keyed by `(table_id, name)`, choosing
-/// the first occurrence found.
-pub fn collect_unique(store: &PageStore, model: &ApModel) -> Vec<SysTableEntry> {
-    let mut uniq: BTreeMap<(u32, String), SysTableEntry> = BTreeMap::new();
-    for entry in iter_systable_entries(store, model) {
-        uniq.entry((entry.table_id, entry.name.clone()))
-            .or_insert(entry);
-    }
-    uniq.into_values().collect()
-}
-
-struct SysTableIter<'a> {
-    store: &'a PageStore,
-    model: &'a ApModel,
-    pn: u64,
-    n_pages: u64,
-    buffer: Vec<SysTableEntry>,
-}
-
-impl<'a> SysTableIter<'a> {
-    fn new(store: &'a PageStore, model: &'a ApModel) -> Self {
-        Self {
-            store,
-            model,
-            pn: 1,
-            n_pages: store.page_count(),
-            buffer: Vec::new(),
+/// A deduplicated catalog keyed by `(table_id, name)`, keeping the first
+/// sighting.
+pub(crate) fn collect_unique(
+    store: &PageStore,
+    model: &ApModel,
+    options: &ReadOptions,
+) -> Result<Scan<SysTableEntry>> {
+    Ok(scan_systable(store, model, options)?.map_items(|items| {
+        let mut uniq: BTreeMap<(u32, String), SysTableEntry> = BTreeMap::new();
+        for entry in items {
+            uniq.entry((entry.table_id, entry.name.clone()))
+                .or_insert(entry);
         }
-    }
-
-    fn fill_buffer(&mut self) -> Result<bool> {
-        while self.buffer.is_empty() && self.pn < self.n_pages {
-            let pn = self.pn;
-            self.pn += 1;
-
-            let page = self
-                .store
-                .page(pn)
-                .map_err(|e| crate::Error::from_store(e, Some(pn)))?;
-            if page.trailer().page_type() != PageType::Extent {
-                continue;
-            }
-            let decoded = decode_page(self.store, self.model, pn)?;
-            let plain = decoded.bytes();
-            let mut found = Vec::new();
-            scan_page(plain, pn, &mut found);
-            // Reverse so we pop in source order.
-            for entry in found.into_iter().rev() {
-                self.buffer.push(entry);
-            }
-        }
-        Ok(!self.buffer.is_empty())
-    }
+        uniq.into_values().collect()
+    }))
 }
-
-impl Iterator for SysTableIter<'_> {
-    type Item = SysTableEntry;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            if let Some(entry) = self.buffer.pop() {
-                return Some(entry);
-            }
-            match self.fill_buffer() {
-                Ok(true) => continue,
-                _ => return None,
-            }
-        }
-    }
-}
-
-impl FusedIterator for SysTableIter<'_> {}
 
 #[cfg(test)]
 mod tests {
