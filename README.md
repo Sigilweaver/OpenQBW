@@ -130,7 +130,7 @@ Exit status: 0 on success, 1 on an error (including a file that is not a
 supported company file, or an undecodable record without `--lenient`), 2
 on a usage error, and 3 when `verify` finds a check that differs. The
 `verify` regression baseline is specific to the Rock Castle Construction
-sample; pass `--no-regression-baseline` for other files.
+sample; it runs only with `--regression-baseline`.
 
 ### Output formats
 

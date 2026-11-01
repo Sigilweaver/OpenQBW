@@ -93,10 +93,10 @@ enum Cmd {
         /// attribution.
         #[arg(long)]
         strict_attribution: bool,
-        /// Skip the line-item regression baseline, which is specific to the
-        /// Rock Castle Construction sample file and differs on any other.
+        /// Also compare the export against the Rock Castle Construction sample
+        /// file baseline. Only meaningful on that file.
         #[arg(long)]
-        no_regression_baseline: bool,
+        regression_baseline: bool,
     },
     /// Print the columns of a table. SYSCOLUMN.owner_object_id is
     /// bridged to SYSTABLE.name via the table-id back-reference in the
@@ -245,14 +245,14 @@ fn run(cli: Cli) -> Result<ExitCode> {
         input,
         output,
         strict_attribution,
-        no_regression_baseline,
+        regression_baseline,
     } = cli.cmd
     {
         let ok = run_verify(
             input,
             output,
             strict_attribution,
-            no_regression_baseline,
+            regression_baseline,
             lenient,
         )?;
         return Ok(if ok {
@@ -660,7 +660,7 @@ fn run_verify(
     input: PathBuf,
     output: Option<PathBuf>,
     strict_attribution: bool,
-    no_regression_baseline: bool,
+    regression_baseline: bool,
     lenient: bool,
 ) -> Result<bool> {
     let out = match output {
@@ -730,8 +730,10 @@ fn run_verify(
         [],
         |r| r.get(0),
     )?;
-    if no_regression_baseline {
-        println!("Phase 5 regression: skipped (--no-regression-baseline)");
+    if !regression_baseline {
+        println!(
+            "Phase 5 regression: skipped (pass --regression-baseline on the Rock Castle sample)"
+        );
     } else {
         let regression_ok =
             grand_total == PHASE5_INVOICE_TOTAL_CENTS && parent_count == PHASE5_INVOICE_COUNT;
