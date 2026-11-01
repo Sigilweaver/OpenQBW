@@ -17,7 +17,7 @@
 //!   - the value is `+/- coef * 100^e`, kept exact as a [`Decimal`]
 //!
 //! `k = 0` (`00 81` in practice) is not decoded. A field whose digits, or
-//! whose exponent outside -3..=5, do not fit the layout is not decoded
+//! whose exponent outside -1..=2, do not fit the layout is not decoded
 //! either; the item keeps its raw bytes and the reason in
 //! [`LineItem::value_undecoded`]. A length byte above 10, or a field cut off
 //! by the page end, is an [`Error`].
@@ -46,9 +46,9 @@ const PARENT_PREFIX: [u8; 5] = [0x00, 0x00, 0x00, 0x00, 0x10];
 /// Most digit bytes a value field holds.
 const MAX_DIGITS: usize = 10;
 /// Smallest base-100 exponent read as a value.
-const MIN_EXPONENT: i32 = -3;
+const MIN_EXPONENT: i32 = -1;
 /// Largest base-100 exponent read as a value.
-const MAX_EXPONENT: i32 = 5;
+const MAX_EXPONENT: i32 = 2;
 /// Bytes a record's date search skips after the anchor, whatever the width
 /// of the value field.
 const MIN_VALUE_SPAN: usize = 4;
@@ -62,7 +62,7 @@ pub enum UndecodedReason {
     ZeroLength,
     /// A digit byte is above 99, so the bytes are not base-100 digits.
     DigitOver99,
-    /// The exponent is outside -3..=5.
+    /// The exponent is outside -1..=2.
     ExponentOutOfRange,
 }
 
@@ -578,15 +578,12 @@ mod tests {
     #[test]
     fn extreme_valid_fields_are_exact() {
         // Ten 99 digits at the largest exponent.
-        let mut p = vec![0x0A, 0x40 + 5];
+        let mut p = vec![0x0A, 0x40 + 2];
         p.extend([99u8; 10]);
-        assert_eq!(
-            decoded(&p),
-            "99999999999999999999".to_owned() + "0000000000"
-        );
-        // Smallest exponent: two decimal places per step, three steps.
-        assert_eq!(decoded(&[0x01, 0x40 - 3, 0x01]), "0.000001");
-        assert_eq!(decoded(&[0x01, 0xC0 - 3, 0x01]), "-0.000001");
+        assert_eq!(decoded(&p), "99999999999999999999".to_owned() + "0000");
+        // Smallest exponent: two decimal places.
+        assert_eq!(decoded(&[0x01, 0x40 - 1, 0x01]), "0.01");
+        assert_eq!(decoded(&[0x01, 0xC0 - 1, 0x01]), "-0.01");
     }
 
     #[test]
@@ -611,8 +608,9 @@ mod tests {
 
     #[test]
     fn exponent_outside_range_is_undecoded() {
-        // 0x40 - 4 is e = -4; 0x40 + 6 is e = 6; 0x80 and 0x00 are -64.
-        for ctrl in [0x3Cu8, 0x46, 0x80, 0x00, 0x7F, 0xC6] {
+        // 0x40 - 2 is e = -2; 0x40 + 3 is e = 3; 0x80 and 0x00 are -64.
+        // 0xC5 is the -23 x 100^5 field seen once on the Rock Castle sample.
+        for ctrl in [0x3Eu8, 0x43, 0xBE, 0xC3, 0x3D, 0xC5, 0x80, 0x00, 0x7F] {
             let f = value_of(&[0x01, ctrl, 0x01]).unwrap();
             assert_eq!(
                 f.value,
@@ -620,7 +618,7 @@ mod tests {
                 "{ctrl:#x}"
             );
         }
-        for ctrl in [0x3Du8, 0x45, 0xBD, 0xC5] {
+        for ctrl in [0x3Fu8, 0x42, 0xBF, 0xC2] {
             assert!(
                 value_of(&[0x01, ctrl, 0x01]).unwrap().value.is_ok(),
                 "{ctrl:#x}"

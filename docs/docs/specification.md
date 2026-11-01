@@ -492,9 +492,9 @@ and `03 BF 32 31 03` is -349.50. The common control bytes are `3F`, `40`,
 `41` and `BF`, `C0`, `C1` (`e` = -1, 0, 1).
 
 The reader decodes a field when `1 <= k <= 10`, every digit is at most 99,
-the field lies inside the page and `e` is in -3..=5. Any other field keeps
+the field lies inside the page and `e` is in -1..=2. Any other field keeps
 its raw bytes and is counted by reason: `k = 0` (`00 81` is the usual
-shape), a digit above 99, or an exponent outside -3..=5. A length byte above
+shape), a digit above 99, or an exponent outside -1..=2. A length byte above
 10, or a field cut off by the page end, is a record error.
 
 Evidence for this layout is in the file itself. On the Rock Castle sample, 1586
@@ -502,6 +502,12 @@ of 4260 parent groups of three or more lines sum to exactly zero under this
 reading, against 5 of 4260 when the digit bytes are shuffled, and every group
 that balanced under the earlier readings (unsigned u24; sign-bit u23) still
 balances. Those two readings are contradicted by the data and are not used.
+
+The exponent range is the one the balanced groups use: on the Rock Castle
+sample every line of a group that sums to zero has `e` in -1..=2. Outside it
+the sample has two decoded-looking fields, `01 C5 17` (-23 x 100^5) and one
+with `e` = -3, neither plausible as a stored value, so wider exponents are
+not read.
 
 What is not established:
 

@@ -214,7 +214,7 @@ pub enum WarningKind {
         zero_length: u64,
         /// Fields with a digit byte above 99.
         digit_over_99: u64,
-        /// Fields with an exponent outside -3..=5.
+        /// Fields with an exponent outside -1..=2.
         exponent_out_of_range: u64,
     },
     /// Line-item anchors whose quantity field is a plausible value other than
@@ -318,7 +318,7 @@ impl fmt::Display for Warning {
                 f,
                 "{} line-item values were not decoded and keep their raw bytes ({zero_length} \
                  with a digit count of 0, {digit_over_99} with a digit above 99, \
-                 {exponent_out_of_range} with an exponent outside -3..=5)",
+                 {exponent_out_of_range} with an exponent outside -1..=2)",
                 zero_length + digit_over_99 + exponent_out_of_range
             ),
             WarningKind::LineItemsNotRead { anchors } => write!(

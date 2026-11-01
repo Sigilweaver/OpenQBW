@@ -113,7 +113,7 @@ Built on opensqlany 0.3 (pinned to a git revision until it is published).
   of 4260 parent groups of three or more lines sum to exactly zero under this
   reading, against 5 of 4260 for shuffled digits. A field is decoded when
   `1 <= k <= 10`, every digit is at most 99, the field lies inside the page
-  and the exponent is in -3..=5. Otherwise the line keeps its raw bytes with
+  and the exponent is in -1..=2. Otherwise the line keeps its raw bytes with
   `value` `None` and a reason (`zero_length`, `digit_over_99`,
   `exponent_out_of_range`), and an `undecoded_values` warning counts them by
   reason. A `k` of 0 (`00 81` in practice) stays undecoded, because reading it
