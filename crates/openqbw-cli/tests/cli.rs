@@ -38,7 +38,7 @@ fn sqlite_export_records_its_format_version() {
     let uv: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(uv, 2);
+    assert_eq!(uv, 1);
     let fv: String = conn
         .query_row(
             "SELECT value FROM meta WHERE key = 'format_version'",
@@ -46,7 +46,7 @@ fn sqlite_export_records_its_format_version() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(fv, "2");
+    assert_eq!(fv, "1");
     // source_table is NULL, not an empty string, when a page has no
     // attributed table, so it cannot be NOT NULL or part of the key.
     for table in ["transactions", "transaction_line_items"] {
@@ -74,7 +74,7 @@ fn csv_export_writes_a_manifest() {
     ]);
     assert!(out.status.success(), "{out:?}");
     let manifest = std::fs::read_to_string(dir.join("manifest.json")).unwrap();
-    assert!(manifest.contains("\"format_version\": 2"), "{manifest}");
+    assert!(manifest.contains("\"format_version\": 1"), "{manifest}");
     assert!(
         manifest.contains("\"lineitems.csv\": {\"rows\": 4}"),
         "{manifest}"
@@ -319,7 +319,7 @@ fn run_counts_are_recorded_in_the_sqlite_meta_table() {
         assert_eq!(meta(&conn, key).as_deref(), Some(want), "{key}");
     }
     // The format version does not change when keys are added.
-    assert_eq!(meta(&conn, "format_version").as_deref(), Some("2"));
+    assert_eq!(meta(&conn, "format_version").as_deref(), Some("1"));
 }
 
 #[test]
@@ -362,5 +362,5 @@ fn run_counts_are_recorded_in_the_csv_manifest() {
     ] {
         assert!(manifest.contains(line), "{line} missing from {manifest}");
     }
-    assert!(manifest.contains("\"format_version\": 2"), "{manifest}");
+    assert!(manifest.contains("\"format_version\": 1"), "{manifest}");
 }

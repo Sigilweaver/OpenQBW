@@ -30,11 +30,11 @@ use rusqlite::{Connection, Transaction, params};
 /// Version of the SQLite export layout, stored in `PRAGMA user_version` and
 /// in `meta.format_version`. Adding a table or column keeps it; renaming or
 /// removing one, or changing what a column means, increments it.
-const SQLITE_FORMAT_VERSION: i64 = 2;
+const SQLITE_FORMAT_VERSION: i64 = 1;
 
 /// Version of the CSV export layout, stored in `manifest.json`. Same rule as
 /// [`SQLITE_FORMAT_VERSION`].
-const CSV_FORMAT_VERSION: u32 = 2;
+const CSV_FORMAT_VERSION: u32 = 1;
 
 /// What `source_table` is, recorded in every export that has a place for it.
 const SOURCE_TABLE_ATTRIBUTION: &str = "position-based, unverified";
