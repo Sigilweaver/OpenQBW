@@ -118,7 +118,7 @@ Built on opensqlany 0.3 (pinned to a git revision until it is published).
   (`files`), next to `format_version` and `openqbw_version`; the top-level
   `lineitems` and `rejected` counts are replaced by it.
 - `openqbw verify` exits with status 3 when a check reports DIFF (it exited
-  0). `--no-regression-baseline` skips the Rock Castle line-item baseline.
+  0). The Rock Castle line-item baseline runs only with `--regression-baseline`.
   After writing its SQLite export it checks that file for a
   `meta.format_version` equal to `PRAGMA user_version` and no newer than the
   build writes, and fails on any database error while reading it. A row
@@ -211,6 +211,10 @@ Built on opensqlany 0.3 (pinned to a git revision until it is published).
   `ContentError` (now a `FormatError`) carry `kind`, `page_number` and
   `page_offset`. The package ships `.pyi` stubs and `py.typed`; the native
   module is `openqbw._openqbw`.
+
+### Changed
+
+- `verify` runs the Rock Castle regression baseline only with `--regression-baseline`. `--no-regression-baseline` is removed. Before, every file other than the Rock Castle sample failed `verify`.
 
 ### Fixed
 

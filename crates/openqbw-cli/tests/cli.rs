@@ -88,7 +88,7 @@ fn csv_export_writes_a_manifest() {
 #[test]
 fn verify_exits_3_when_a_check_differs() {
     let dir = tmp("verify");
-    // The fixture is not Rock Castle, so the built-in regression baseline
+    // The fixture is not Rock Castle, so the opt-in regression baseline
     // differs.
     let out = openqbw(&[
         "verify".as_ref(),
@@ -96,15 +96,40 @@ fn verify_exits_3_when_a_check_differs() {
         "--output".as_ref(),
         os(&dir.join("v.sqlite")),
     ]);
-    assert_eq!(out.status.code(), Some(3), "{out:?}");
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
     let out = openqbw(&[
         "verify".as_ref(),
         os(&fixture("synthetic.qbw")),
         "--output".as_ref(),
         os(&dir.join("v.sqlite")),
-        "--no-regression-baseline".as_ref(),
+        "--regression-baseline".as_ref(),
     ]);
-    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert_eq!(out.status.code(), Some(3), "{out:?}");
+}
+
+#[test]
+fn verify_skips_regression_baseline_unless_asked() {
+    let dir = tmp("verify-skip");
+    let out = openqbw(&[
+        "verify".as_ref(),
+        os(&fixture("synthetic.qbw")),
+        "--output".as_ref(),
+        os(&dir.join("v.sqlite")),
+    ]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stdout.contains("Phase 5 regression: skipped"),
+        "stdout: {stdout}"
+    );
+    let differ = stderr
+        .lines()
+        .find(|l| l.contains("checks that differ"))
+        .unwrap_or("");
+    assert!(
+        !differ.contains("Phase 5 regression baseline"),
+        "stderr: {stderr}"
+    );
 }
 
 #[test]
