@@ -41,6 +41,7 @@ mod attribution_content;
 mod attribution_schema;
 mod bv_recovery;
 mod date;
+mod decimal;
 mod decode;
 pub mod diagnostics;
 mod error;
@@ -63,6 +64,7 @@ mod transaction_header;
 mod testutil;
 
 pub use date::DateSource;
+pub use decimal::Decimal;
 pub use error::{Error, ErrorKind, Result};
 pub use lineitem::{AmountEncoding, AmountType, LineItem};
 pub use owner_bridge::BridgeSource;
