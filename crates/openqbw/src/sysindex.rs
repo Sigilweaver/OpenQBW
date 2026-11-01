@@ -37,9 +37,10 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::iter::FusedIterator;
 
-use opensqlany::{ApModel, PageStore, PageType, Result as SaResult};
+use opensqlany::{ApModel, PageStore, PageType};
 
-use crate::bv_recovery::{deobfuscate_with_bv, recover_bv_any};
+use crate::decode::decode_page;
+use crate::error::Result;
 use crate::page_attribution::PageAttribution;
 use crate::systable::SysTableEntry;
 
@@ -192,22 +193,21 @@ impl<'a> SysIndexIter<'a> {
         }
     }
 
-    fn fill_buffer(&mut self) -> SaResult<bool> {
+    fn fill_buffer(&mut self) -> Result<bool> {
         while self.buffer.is_empty() && self.pn < self.n_pages {
             let pn = self.pn;
             self.pn += 1;
-            let page = self.store.page(pn)?;
+            let page = self
+                .store
+                .page(pn)
+                .map_err(|e| crate::Error::from_store(e, Some(pn)))?;
             if page.trailer().page_type() != PageType::Extent {
                 continue;
             }
-            let raw = page.bytes();
-            let plain = if let Some(bv) = recover_bv_any(pn, raw) {
-                deobfuscate_with_bv(raw, pn, bv)
-            } else {
-                self.model.deobfuscate_with_store(raw, pn, self.store)
-            };
+            let decoded = decode_page(self.store, self.model, pn)?;
+            let plain = decoded.bytes();
             let mut found = Vec::new();
-            scan_page(&plain, pn, &mut found);
+            scan_page(plain, pn, &mut found);
             for e in found.into_iter().rev() {
                 self.buffer.push(e);
             }

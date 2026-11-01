@@ -18,7 +18,7 @@
 //! See `OpenQBW/re/NOTES.md` (entry C.51, WP-5C) for the empirical
 //! characterisation across the four-file corpus.
 
-use crate::bv_recovery::{deobfuscate_with_bv, recover_bv_qb_data};
+use crate::decode::decode_page;
 use opensqlany::{ApModel, PageStore, PageType};
 
 const TRAILER_START: usize = 0xFF0;
@@ -90,8 +90,8 @@ impl OpaqueCount {
 
 /// Count opaque and total `E` pages in `store`.
 ///
-/// Each page is decoded the way the line-item scan decodes it (QB anchor bv
-/// recovery, then the generic `model`) before its entropy is measured.
+/// Each page is decoded the way the line-item scan decodes it (`decode_page`: confirmed
+/// keystream, QB anchor bv, then the lenient `model` fallback) before its entropy is measured.
 pub fn count_opaque_pages(store: &PageStore, model: &ApModel) -> crate::Result<OpaqueCount> {
     let mut c = OpaqueCount {
         opaque: 0,
@@ -105,12 +105,13 @@ pub fn count_opaque_pages(store: &PageStore, model: &ApModel) -> crate::Result<O
             continue;
         }
         c.extent += 1;
-        let raw = page.bytes();
-        let plain = match recover_bv_qb_data(pn, raw) {
-            Some(bv) => deobfuscate_with_bv(raw, pn, bv),
-            None => model.deobfuscate_with_store(raw, pn, store),
+        // A page no decoder can read is opaque. The line-item scan decodes
+        // the same page and reports the decode error itself.
+        let readable = match decode_page(store, model, pn) {
+            Ok(d) => !is_opaque_high_entropy(d.bytes()),
+            Err(_) => false,
         };
-        if is_opaque_high_entropy(&plain) {
+        if !readable {
             c.opaque += 1;
         }
     }
@@ -200,8 +201,8 @@ mod tests {
         for pn in 1..=4u64 {
             bytes.extend(encode_e_page(pn, 0x5a, 7, &plain));
         }
-        let store = PageStore::from_bytes(bytes).unwrap();
-        let model = ApModel::learn(&store);
+        let store = crate::testutil::sealed_store(bytes);
+        let model = crate::testutil::lenient_model(&store);
         let c = count_opaque_pages(&store, &model).unwrap();
         assert_eq!((c.opaque, c.extent), (0, 4));
     }

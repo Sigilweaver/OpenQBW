@@ -36,6 +36,19 @@ pub enum Error {
         /// `version_b` found at offset 0x1A.
         version_b: u16,
     },
+    /// The superblock `flags_06` byte lacks the base bits every supported
+    /// file carries.
+    #[error("unsupported superblock flags 0x{flags_06:02X}")]
+    UnsupportedFlags {
+        /// The byte at superblock offset 0x06.
+        flags_06: u8,
+    },
+    /// A page's reserved trailer bytes are not zero.
+    #[error("bad page trailer on page {page_number}: reserved bytes non-zero")]
+    BadTrailer {
+        /// Zero-based page number.
+        page_number: u64,
+    },
     /// A page failed its CRC-32 check.
     #[error("crc mismatch on page {page_number}: stored 0x{stored:08X}, computed 0x{computed:08X}")]
     BadCrc {
@@ -100,6 +113,10 @@ pub enum ErrorKind {
     BadMagic,
     /// [`Error::UnsupportedVersion`]
     UnsupportedVersion,
+    /// [`Error::UnsupportedFlags`]
+    UnsupportedFlags,
+    /// [`Error::BadTrailer`]
+    BadTrailer,
     /// [`Error::BadCrc`]
     BadCrc,
     /// [`Error::Store`]
@@ -119,6 +136,8 @@ impl ErrorKind {
             Self::Io => "io",
             Self::BadMagic => "bad_magic",
             Self::UnsupportedVersion => "unsupported_version",
+            Self::UnsupportedFlags => "unsupported_flags",
+            Self::BadTrailer => "bad_trailer",
             Self::BadCrc => "bad_crc",
             Self::Store => "store",
             Self::UnknownAmountType => "unknown_amount_type",
@@ -135,6 +154,8 @@ impl Error {
             Self::Io(_) => ErrorKind::Io,
             Self::BadMagic { .. } => ErrorKind::BadMagic,
             Self::UnsupportedVersion { .. } => ErrorKind::UnsupportedVersion,
+            Self::UnsupportedFlags { .. } => ErrorKind::UnsupportedFlags,
+            Self::BadTrailer { .. } => ErrorKind::BadTrailer,
             Self::BadCrc { .. } => ErrorKind::BadCrc,
             Self::Store { .. } => ErrorKind::Store,
             Self::UnknownAmountType { .. } => ErrorKind::UnknownAmountType,
@@ -147,6 +168,7 @@ impl Error {
     pub fn page_number(&self) -> Option<u64> {
         match self {
             Self::BadCrc { page_number, .. }
+            | Self::BadTrailer { page_number }
             | Self::UnknownAmountType { page_number, .. }
             | Self::TruncatedAmount { page_number, .. } => Some(*page_number),
             Self::Store { page_number, .. } => *page_number,
@@ -167,21 +189,31 @@ impl Error {
     pub(crate) fn from_store(e: opensqlany::Error, page_number: Option<u64>) -> Self {
         match e {
             opensqlany::Error::Io(io) => Self::Io(io),
-            opensqlany::Error::BadMagic { got, want } => Self::BadMagic {
+            opensqlany::Error::BadMagic { got, want, .. } => Self::BadMagic {
                 found: got,
                 expected: want,
             },
+            opensqlany::Error::UnsupportedVersion { major, a, b, .. } => Self::UnsupportedVersion {
+                format_major: major,
+                version_a: a,
+                version_b: b,
+            },
+            opensqlany::Error::UnsupportedFlags { flags_06, .. } => {
+                Self::UnsupportedFlags { flags_06 }
+            }
             opensqlany::Error::BadCrc {
                 page,
                 stored,
                 computed,
+                ..
             } => Self::BadCrc {
                 page_number: page,
                 stored,
                 computed,
             },
+            opensqlany::Error::BadTrailer { page, .. } => Self::BadTrailer { page_number: page },
             other => Self::Store {
-                page_number,
+                page_number: other.page().or(page_number),
                 source: Box::new(other),
             },
         }

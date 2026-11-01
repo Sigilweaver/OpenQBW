@@ -32,7 +32,7 @@ use std::collections::{HashMap, HashSet};
 
 use opensqlany::{ApModel, PageStore, PageType};
 
-use crate::bv_recovery::{deobfuscate_with_bv, recover_bv_any};
+use crate::decode::decode_page;
 use crate::syscolumn::SysColumn;
 use crate::systable::SysTableEntry;
 
@@ -85,12 +85,10 @@ pub fn bridge_owners_to_tables(
         if page.trailer().page_type() != PageType::Extent {
             continue;
         }
-        let raw = page.bytes();
-        let plain = if let Some(bv) = recover_bv_any(pn, raw) {
-            deobfuscate_with_bv(raw, pn, bv)
-        } else {
-            model.deobfuscate_with_store(raw, pn, store)
+        let Ok(decoded) = decode_page(store, model, pn) else {
+            continue;
         };
+        let plain = decoded.bytes();
 
         let mut i = SYSOBJECT_NAME_OFFSET;
         while i + 1 < plain.len() {

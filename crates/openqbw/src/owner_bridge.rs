@@ -49,7 +49,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use opensqlany::{ApModel, PageStore};
 
-use crate::bv_recovery::{deobfuscate_with_bv, recover_bv_any};
+use crate::decode::decode_page;
 use crate::syscolumn::SysColumn;
 use crate::systable::SysTableEntry;
 
@@ -297,14 +297,10 @@ pub fn bridge_owners_via_backref(
 
     let mut votes = BackrefVotes::new();
     for (pn, rows) in &by_page {
-        let Ok(page) = store.page(*pn) else { continue };
-        let raw = page.bytes();
-        let plain = if let Some(bv) = recover_bv_any(*pn, raw) {
-            deobfuscate_with_bv(raw, *pn, bv)
-        } else {
-            model.deobfuscate_with_store(raw, *pn, store)
+        let Ok(decoded) = decode_page(store, model, *pn) else {
+            continue;
         };
-        votes.observe_page(&plain, rows, &owners);
+        votes.observe_page(decoded.bytes(), rows, &owners);
     }
 
     match votes.best_distance() {
@@ -472,8 +468,8 @@ mod tests {
         for (offset, byte) in raw[..0xFF0].iter_mut().enumerate() {
             *byte = byte.wrapping_add((offset / 512) as u8);
         }
-        let store = PageStore::from_bytes(raw).unwrap();
-        let model = ApModel::default();
+        let store = crate::testutil::sealed_store(raw);
+        let model = crate::testutil::lenient_model(&store);
         let mut bridge = bridge_owners_via_backref(&store, &model, &columns, &tables);
         assert!(bridge.is_empty());
         assert_eq!(bridge.backref_distance, None);

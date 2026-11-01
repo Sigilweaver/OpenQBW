@@ -6,9 +6,9 @@
 #![allow(clippy::useless_conversion)] // pyo3 macro expansions can trigger this on newer clippy
 
 use openqbw_rs::{
-    collect_unique as collect_unique_systable, collect_unique_sysindex, open_store, scan_lineitems,
-    scan_transaction_headers, OpenOptions, PageAttribution, ScanOptions, ScanWarning,
-    SysIndexEntry, SysTableEntry,
+    collect_unique as collect_unique_systable, collect_unique_sysindex, learn_model, open_store,
+    scan_lineitems, scan_transaction_headers, OpenOptions, PageAttribution, ScanOptions,
+    ScanWarning, SysIndexEntry, SysTableEntry,
 };
 use opensqlany::{ApModel, PageStore};
 use pyo3::exceptions::{PyIOError, PyValueError};
@@ -337,7 +337,7 @@ impl Reader {
 #[pyfunction]
 fn open(py: Python<'_>, path: PathBuf) -> PyResult<Reader> {
     let store = open_store(&path, &OpenOptions::default()).map_err(|e| to_py_err(py, &e))?;
-    let model = ApModel::learn(&store);
+    let model = learn_model(&store).map_err(|e| to_py_err(py, &e))?;
     let attribution = PageAttribution::build(&store, &model);
     if let Some(gap) = attribution.gap() {
         warn_user(

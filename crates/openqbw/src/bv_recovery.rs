@@ -43,6 +43,32 @@ pub fn oracle_bv_e_page(pn: u64, raw_page: &[u8]) -> u8 {
 /// `raw_page` must be exactly 4096 bytes (the full physical page including
 /// the trailer at `0xFF0`).
 pub fn recover_bv_qb_data(pn: u64, raw_page: &[u8]) -> Option<u8> {
+    let (c_table, oracle_bv, trailer_rc) = qb_anchor_table(pn, raw_page)?;
+    // Try oracle first.
+    if anchor_present_with_bv(&c_table, oracle_bv, trailer_rc) {
+        return Some(oracle_bv);
+    }
+    (0u16..=255)
+        .map(|bv| bv as u8)
+        .filter(|&bv| bv != oracle_bv)
+        .find(|&bv| anchor_present_with_bv(&c_table, bv, trailer_rc))
+}
+
+/// The `bv` that decodes the C.36 anchor, when exactly one of the 256 does.
+/// `None` when none or more than one does, so the anchor cannot confirm a
+/// key on its own.
+pub(crate) fn qb_anchor_bv_unique(pn: u64, raw_page: &[u8]) -> Option<u8> {
+    let (c_table, _, trailer_rc) = qb_anchor_table(pn, raw_page)?;
+    let mut hits = (0u16..=255)
+        .map(|bv| bv as u8)
+        .filter(|&bv| anchor_present_with_bv(&c_table, bv, trailer_rc));
+    let first = hits.next()?;
+    hits.next().is_none().then_some(first)
+}
+
+/// Per-sector `C[i]` tables (stored byte minus the bv-independent part of
+/// the keystream), the oracle `bv` and the trailer row count.
+fn qb_anchor_table(pn: u64, raw_page: &[u8]) -> Option<([Vec<u8>; SECTORS], u8, u8)> {
     if raw_page.len() != PAGE {
         return None;
     }
@@ -81,21 +107,7 @@ pub fn recover_bv_qb_data(pn: u64, raw_page: &[u8]) -> Option<u8> {
         }
         c_table[si] = c;
     }
-
-    // Try oracle first.
-    if anchor_present_with_bv(&c_table, oracle_bv, trailer_rc) {
-        return Some(oracle_bv);
-    }
-    for bv in 0u16..=255 {
-        let bv = bv as u8;
-        if bv == oracle_bv {
-            continue;
-        }
-        if anchor_present_with_bv(&c_table, bv, trailer_rc) {
-            return Some(bv);
-        }
-    }
-    None
+    Some((c_table, oracle_bv, trailer_rc))
 }
 
 /// For a candidate bv, scan the decoded page body for the anchor pattern.
