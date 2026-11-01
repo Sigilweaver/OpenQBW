@@ -6,7 +6,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Built on opensqlany 0.3 (pinned to a git revision until it is published).
+Built on opensqlany 0.3.0.
 `Cargo.lock` is committed. The minimum Rust version is 1.95.
 
 ### Behavior changes
@@ -42,16 +42,32 @@ Built on opensqlany 0.3 (pinned to a git revision until it is published).
   `SyscolumnStats::pages_unconfirmed_directory`, and `openqbw schema` prints
   the count. Not measured on a corpus: opensqlany reports that about a fifth
   of `E` pages with a directory are not confirmed.
+- A line-item anchor outside every live row of a page with a confirmed slot
+  directory (in the page prelude, the directory, or the free space below the
+  lowest live row) is left out and counted in a `records_outside_live_rows`
+  warning; earlier versions exported such residue of deleted or moved records
+  as live line items. A live row runs from its slot offset to the next live
+  offset, because row lengths are not decoded, so a deleted row inside that
+  span is still read. Pages without a confirmed directory keep every anchor,
+  and freed pages are still read, because the allocation map is not decoded.
+  Not measured on a corpus.
 - Line items take the nearest `04 00 10 <id>` item ID instead of the farthest
   in the 96 bytes before the anchor, and their search windows stop at the
   neighbouring records' anchors, so a record no longer reports the previous
   record's item ID or date.
+- Live rows on header pages that hold no header ID are counted in a
+  `header_rows_without_id` warning instead of being skipped silently.
 - Transaction headers whose row holds more than one 16-character ID in the
   header shape, and all headers on pages without a readable slot directory,
   carry `RecordFlag::HeaderIdAmbiguous`.
 - `SYSTABLE` trailer fields (`col_count`, `data_root_page`, `last_page`) are no
   longer read from the page trailer bytes at 0xFF0 and above; a row too close
   to the end of the page data area gets `None` for fields that do not fit.
+- A `SYSTABLE` row whose `data_root_page` is past the end of the file or not
+  a data (`E`) page carries `RecordFlag::RootPageInvalid` and is not used for
+  page-to-table attribution; the catalog carries an `invalid_root_pages`
+  warning. Earlier versions let such a value move the attribution boundaries
+  of every page above it.
 - `SYSCOLUMN` name recovery tries every default-value length and requires the
   default's length byte to agree. A column whose default value is itself a
   valid identifier (for example `is_active` with default `Y`) is counted in
@@ -74,6 +90,9 @@ Built on opensqlany 0.3 (pinned to a git revision until it is published).
   not been measured on a corpus.
 - When page-to-table attribution is unavailable, the catalog, line-item and
   header scans carry an `attribution_gap` warning.
+- When only part of the file is attributed, the line-item scan carries an
+  `unattributed_records` warning with the number of line items that have no
+  source table.
 - Line-item and header dates are found in a wider window (SA-days
   10000..=40000, was 13000..20000, which stopped at Oct 2013), so records
   dated after Oct 2013 now have a date. When two separate date/counter pairs
@@ -85,29 +104,57 @@ Built on opensqlany 0.3 (pinned to a git revision until it is published).
   conversion uses the offset documented in `date.rs`; it is fitted to the
   Rock Castle sample and not checked against a date known from another
   source.
-- Line-item amounts are decoded per source table. Journal lines
-  (`abmc_general_journal_inventory_lineitem`) use the sign bit, so a line
-  stored as `02 c0 2d 01` is -$771.20, where earlier versions reported
-  +$772.48. Invoice lines (`abmc_invoice_inventory_lineitem`) are unsigned.
-  Lines on any other table, lines without a source table, and lines with
-  amount type `0x00`, `0x01` or `0x03` have no amount (`amount_cents` is
-  `None` / NULL), where earlier versions reported an unsigned reading or 0.
-- An anchor followed by an unknown amount-type byte, or one whose amount runs
-  past the page data area, is an error (`UnknownAmountType`,
-  `TruncatedAmount`) instead of a line item with a zero or unknown amount.
+- Line-item values are decoded by structure, whatever the source table. The
+  field after the anchor is the SQL Anywhere NUMERIC encoding described in
+  issue #22 (write-up by pete-green): `[k][ctrl][k digit bytes]` with base-100
+  digits least significant first, the sign in `ctrl & 0x80` and the exponent
+  `(ctrl & 0x7F) - 64`, so `02 3f 2f 4b` is 75.47 and `02 c0 3c 09` is -960.
+  The value is exact (a `Decimal`, no floats). On the Rock Castle sample, 1586
+  of 4260 parent groups of three or more lines sum to exactly zero under this
+  reading, against 5 of 4260 for shuffled digits. A field is decoded when
+  `1 <= k <= 10`, every digit is at most 99, the field lies inside the page
+  and the exponent is in -1..=2. Otherwise the line keeps its raw bytes with
+  `value` `None` and a reason (`zero_length`, `digit_over_99`,
+  `exponent_out_of_range`), and an `undecoded_values` warning counts them by
+  reason. A `k` of 0 (`00 81` in practice) stays undecoded, because reading it
+  as zero lowers the balance rate. That the value is the line's amount is not
+  established: no header total or quantity-times-rate relation was found.
+  Earlier versions read three bytes as an unsigned u24 (invoice lines) or a
+  sign-bit u23 (journal lines) and reported `None` elsewhere; the data
+  contradicts both readings.
+- `source_table` is a position-based attribution that is unverified. The
+  content-based cross-check (`verify --strict-attribution`) agrees with it
+  on 0.3% of pages on the Rock Castle sample, and line items land in 130
+  tables there. It is kept, and exports say so (`meta.source_table_attribution`
+  in SQLite, `source_table_attribution` in `manifest.json`).
+- A line-item anchor followed by a value-length byte above 10, or by a value
+  field that runs past the page data area, is an error (`InvalidValueLength`,
+  `TruncatedValue`) instead of a line item with a zero or unknown amount. Type
+  bytes `0x04` to `0x0a` are digit counts now, not unknown types.
+- Line items are read only when the field after the parent ID is
+  `float32(1.0)`, which the module documentation calls the quantity. An
+  anchor with any other plausible value there (zero, negative, or a magnitude
+  from 0.001 to 1,000,000) is now counted in a `line_items_not_read` warning,
+  because such a line is missing from the results and from every sum;
+  earlier versions left it out silently. The count leaves out anchors outside
+  every live row and anchors that overlap a parsed record. Whether the field
+  is the quantity is not confirmed.
 - Line items are scanned to the end of the page data area (0xFF0, was 0xFE0).
-- SQLite export: `transactions.total_cents` is NULL when any line of the
-  transaction has no decoded amount; `unresolved_lines` counts them.
-  `transaction_line_items` gains `amount_encoding` and `amount_raw_u24_cents`
-  (the undecoded unsigned reading, kept for the `verify` regression baseline)
-  and loses `amount_cents_signed`. Export summaries state how many
-  transactions and line items are excluded from the grand total.
-- CSV export: `amount_signed_cents` is replaced by `amount_encoding`;
-  `amount_decimal` is computed from integer cents. `rejected.csv` is always
-  written, with a `kind` column, and a `manifest.json` records
-  `format_version`.
+- SQLite export: `transaction_line_items` has `value` (exact decimal text,
+  NULL when not decoded), `value_undecoded` (the reason) and `value_raw_hex`
+  in place of `amount_type`, `amount_cents`, `amount_encoding` and
+  `amount_raw_u24_cents`. `transactions.total_cents` is replaced by
+  `value_sum`, the exact sum of the decoded line values (undecoded lines are
+  not in it), and `unresolved_lines` by `undecoded_lines`; `has_deferred` is
+  removed. Export summaries state `value_sum` as a sum of values, not
+  invoice totals, and how many line items are not in it.
+- CSV export: `lineitems.csv` has `value`, `value_undecoded` and
+  `value_raw_hex` in place of `amount_cents`, `amount_encoding` and
+  `amount_decimal`. `rejected.csv` is always written, with a `kind` column,
+  and a `manifest.json` records `format_version`.
 - SQLite export: a `meta` table and `PRAGMA user_version` record the format
-  version (1); `scan_rejections` stores `kind` and `message`. A lenient
+  version (2, because the value columns above changed what the line-item
+  columns mean); `scan_rejections` stores `kind` and `message`. A lenient
   export that skipped a record no longer fails while writing
   `scan_rejections`.
 - SQLite export: `source_table` is NULL instead of an empty string when a
@@ -119,14 +166,27 @@ Built on opensqlany 0.3 (pinned to a git revision until it is published).
   (`files`), next to `format_version` and `openqbw_version`; the top-level
   `lineitems` and `rejected` counts are replaced by it.
 - `openqbw verify` exits with status 3 when a check reports DIFF (it exited
-  0). The Rock Castle line-item baseline runs only with `--regression-baseline`.
-  After writing its SQLite export it checks that file for a
+  0). After writing its SQLite export it checks that file for a
   `meta.format_version` equal to `PRAGMA user_version` and no newer than the
   build writes, and fails on any database error while reading it. A row
   read error while comparing attribution is an error instead of shrinking the compared page set.
 - `openqbw migrate --format iif` exits with an error. `--placeholder-accounts`
   writes the file with placeholder accounts and leaves out, and counts,
-  transactions that have an undecoded amount.
+  lines whose value is not decoded (and transactions with no decoded line).
+  The `TRNS` amount is the sum of the lines written.
+- Transaction headers that repeat an earlier `qb_id` are left out of every
+  export format (SQLite, CSV and IIF) and counted on stderr, together with
+  the number of IDs seen under more than one transaction type; the first in
+  page order is kept. CSV `transactions.csv` used to list every sighting, and
+  IIF used the last.
+- SQLite exports record the counts behind the stderr warnings
+  (`records_outside_live_rows`, `line_items_not_read`, `unattributed_records`,
+  `header_rows_without_id`, `invalid_root_pages`, `keystream_unverified_pages`,
+  `unconfirmed_directory_pages` and the others) and the duplicate header ID
+  counts as `count.<scan>.<name>` rows in `meta`; CSV exports record the same
+  keys in a `counts` object in `manifest.json`. Adding keys leaves the
+  format version unchanged. IIF output has no metadata and still reports them on
+  stderr only.
 - `openqbw forensics` reports the size of the opened store instead of 0 when
   file metadata cannot be read.
 
@@ -159,13 +219,28 @@ Built on opensqlany 0.3 (pinned to a git revision until it is published).
   `page_number()` and `page_offset()` replaces `LineItemError`. New variants
   `UnsupportedFlags` and `BadTrailer`. Struct-like variants are
   `#[non_exhaustive]`.
-- `LineItem::amount_cents` is `Option<i64>` and holds the amount under
-  `amount_encoding`; `amount_cents_signed` and `AmountType::decode_cents*`
-  are removed. `AmountType::OneByteOne` is `Unestablished`, `AmountType::Other`
-  is removed, and `LineItem::amount_type_byte()` gives the raw byte.
-  `LineItem` and `TransactionHeader` gain `amount_encoding` (line items),
-  `date_source` and `flags`; `SysTableEntry`, `SysIndexEntry` and `SysColumn`
-  gain `flags`.
+- `LineItem::value` is `Option<Decimal>` (the new exact `Decimal` type),
+  with `value_undecoded: Option<UndecodedReason>` and `value_raw: Vec<u8>`.
+  Removed: `amount_cents`, `amount_cents_signed`, `amount_type`,
+  `amount_encoding`, `amount_raw`, `amount_type_byte()`, `AmountType`,
+  `AmountEncoding` (with `for_source_table`, `JOURNAL_TABLE`,
+  `INVOICE_TABLE`), `AmountType::decode_cents*`, and the record flags
+  `AmountEncodingUnconfirmed` and `AmountTypeUnestablished`. Decoding no
+  longer depends on the source table. `Error::UnknownAmountType` and
+  `TruncatedAmount` are renamed `InvalidValueLength` (field `length_byte`)
+  and `TruncatedValue`; their `ErrorKind` codes are `invalid_value_length` and
+  `truncated_value`. `WarningKind` gains `UndecodedValues`. `LineItem` and
+  `TransactionHeader` gain `date_source` and `flags`; `SysTableEntry`,
+  `SysIndexEntry` and `SysColumn` gain `flags`.
+- Python `LineItem.value` is a `decimal.Decimal` or `None`, with
+  `value_undecoded` and `value_raw`; `amount_cents`, `amount_encoding`,
+  `amount_type` and `amount_raw` are removed.
+- `openqbw verify --regression-baseline` is removed with its `PHASE5_*`
+  constants: the baseline (13,375 parents, $399.9M) was the same anchor
+  pattern and unsigned sum it checked. The journal pair check, built on the
+  sign-bit reading, is removed too. `verify` reports the sum of decoded
+  values, undecoded values by reason, and how many parent groups of three
+  or more decoded lines sum to exactly zero (informational).
 - Every public struct and enum is `#[non_exhaustive]`.
 - Reverse-engineering cross-checks moved to `openqbw::diagnostics`, which is
   outside semantic versioning: `fk_graph`, `nulls_flag_histogram`,
@@ -215,12 +290,32 @@ Built on opensqlany 0.3 (pinned to a git revision until it is published).
   `page_offset`. The package ships `.pyi` stubs and `py.typed`; the native
   module is `openqbw._openqbw`.
 
-### Changed
+### Added
 
-- `verify` runs the Rock Castle regression baseline only with `--regression-baseline`. `--no-regression-baseline` is removed. Before, every file other than the Rock Castle sample failed `verify`.
+- `Decimal`, an exact decimal number with checked addition and a lossless
+  `Display`, is the type of `LineItem::value`.
+- Timestamps (issue #45, reported by SmithJesko). The 4 bytes between the
+  table id and the name in a `SYSTABLE` row, and the `u32` at superblock
+  offset 0x2A, are counts of minutes since 1600-02-29. `SysTableEntry` has
+  `stamp_raw()` and `stamp_unix_seconds()`, `Reader` has `created_raw()` and
+  `created_unix_seconds()`, and Python `Table.stamp_unix_seconds` and
+  `Reader.created_unix_seconds` carry the same values. A stamp outside
+  1990-01-01..2100-01-01 is `None`. `SPECIFICATION.md` documents both fields
+  as timestamps; superblock `0x2D` was the high byte of the creation stamp,
+  not a separate constant.
 
 ### Fixed
 
+- Line-item amounts read as an unsigned u24 (invoice lines, and every line in
+  0.1.6) or a sign-bit u23 (journal lines) disagreed with the data on about
+  half of all values. The structure-based decoding above replaces both.
+  Credit to pete-green for the encoding write-up in issue #22.
+- Opening a file that is not a SQL Anywhere page store, such as the 2001-era
+  QuickBooks file in issue #38 (reported by flywire), fails with `BadMagic`
+  ("not a QuickBooks SQL Anywhere company file ... older QuickBooks versions,
+  such as 2001-era files, use a different format and are not supported").
+  The superblock magic is checked before the file size, so the error no
+  longer reads "file size ... is not a multiple of page size".
 - Page 0 (the superblock) is checked by its CRC only, so real company files
   open again.
 - The opaque-page count measures entropy on the decoded page body. It

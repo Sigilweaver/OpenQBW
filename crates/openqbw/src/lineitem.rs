@@ -1,22 +1,35 @@
-//! Invoice line-item record parsing.
+//! Line-item record parsing.
 //!
 //! The lineitem record is anchored by the 25-byte pattern
 //! `00 00 00 00 10 <16 ASCII base62 chars> 00 00 80 3F` where the 16 chars
-//! are the parent invoice's QB-ID and the trailing bytes are a `float32(1.0)`
-//! quantity. Immediately after the anchor sit the typed amount bytes and a
-//! date/counter pair.
+//! are the parent transaction's QB-ID and the trailing bytes are a
+//! `float32(1.0)` quantity. Immediately after the anchor sits a numeric
+//! value field and a date/counter pair.
 //!
-//! Amount-type byte semantics:
-//!   - `0x02`         -- `[type][3 bytes]`, decoded per source table (see
-//!     [`AmountEncoding`]): unsigned u24 on invoice lines, sign-bit u23 on
-//!     general-journal lines, not decoded on any other table
-//!   - `0x01`         -- meaning not established; never decoded
-//!   - `0x03`         -- deferred (raw bytes recorded but not converted)
-//!   - `0x00`         -- non-amount marker (record carries date/counter only)
-//!   - any other byte -- reported as [`Error::UnknownAmountType`]
+//! The value field is the SQL Anywhere NUMERIC encoding, laid out as
+//! `[k][ctrl][k digit bytes]`:
+//!
+//!   - `k` is the digit count, 1 to 10; the field is `2 + k` bytes wide
+//!   - the digits are base 100, least significant first, each 0 to 99, so
+//!     `coef = sum(d[i] * 100^i)`
+//!   - `ctrl & 0x80` is the sign (set is negative) and `(ctrl & 0x7F) - 64`
+//!     is the base-100 exponent `e`
+//!   - the value is `+/- coef * 100^e`, kept exact as a [`Decimal`]
+//!
+//! `k = 0` (`00 81` in practice) is not decoded. A field whose digits, or
+//! whose exponent outside -1..=2, do not fit the layout is not decoded
+//! either; the item keeps its raw bytes and the reason in
+//! [`LineItem::value_undecoded`]. A length byte above 10, or a field cut off
+//! by the page end, is an [`Error`].
+//!
+//! That the value is the line's amount is not established.
+
+use std::ops::Range;
 
 use opensqlany::{ApModel, PageStore};
 
+use crate::decimal::Decimal;
+use crate::decode::{DecodedPage, Directory};
 use crate::error::Error;
 use crate::opaque::count_opaque_pages;
 use crate::page_attribution::PageAttribution;
@@ -30,101 +43,117 @@ const QB_ID_LEN: usize = 16;
 const F32_ONE: [u8; 4] = [0x00, 0x00, 0x80, 0x3F];
 const PARENT_PREFIX: [u8; 5] = [0x00, 0x00, 0x00, 0x00, 0x10];
 
-/// How the 3 magnitude bytes of a `0x02` amount are interpreted for the
-/// table a line item came from.
-///
-/// The two readings of the same bytes disagree on about half of all values,
-/// so the reading is chosen per source table and recorded on every item.
+/// Most digit bytes a value field holds.
+const MAX_DIGITS: usize = 10;
+/// Smallest base-100 exponent read as a value.
+const MIN_EXPONENT: i32 = -1;
+/// Largest base-100 exponent read as a value.
+const MAX_EXPONENT: i32 = 2;
+/// Bytes a record's date search skips after the anchor, whatever the width
+/// of the value field.
+const MIN_VALUE_SPAN: usize = 4;
+
+/// Why a value field was kept as raw bytes and not decoded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
-pub enum AmountEncoding {
-    /// `[type][u24 LE]` unsigned cents. Used for invoice line-item tables.
-    UnsignedU24,
-    /// `[type][u23 LE magnitude + sign bit 7 of the first byte]`. Used for the
-    /// general-journal line-item table, where the `verify` pair-balance check
-    /// (`+x` and `-x` lines sum to zero) supports the sign bit.
-    SignBitU23,
-    /// The source table is unknown or has no established reading. The amount
-    /// is not decoded.
-    Unconfirmed,
+pub enum UndecodedReason {
+    /// The digit count is 0 (`00 81` in practice); the field has no digits
+    /// to read, and treating it as zero is not supported by the data.
+    ZeroLength,
+    /// A digit byte is above 99, so the bytes are not base-100 digits.
+    DigitOver99,
+    /// The exponent is outside -1..=2.
+    ExponentOutOfRange,
 }
 
-impl AmountEncoding {
-    /// Source table whose amounts carry a sign bit.
-    pub const JOURNAL_TABLE: &'static str = "abmc_general_journal_inventory_lineitem";
-    /// Source table whose amounts are unsigned.
-    pub const INVOICE_TABLE: &'static str = "abmc_invoice_inventory_lineitem";
-
-    /// Encoding for line items attributed to `source_table`.
-    pub fn for_source_table(source_table: Option<&str>) -> Self {
-        match source_table {
-            Some(Self::JOURNAL_TABLE) => Self::SignBitU23,
-            Some(Self::INVOICE_TABLE) => Self::UnsignedU24,
-            _ => Self::Unconfirmed,
-        }
-    }
-
-    /// Stable lowercase name, used in exports.
+impl UndecodedReason {
+    /// Stable snake_case name, used in exports.
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::UnsignedU24 => "unsigned_u24",
-            Self::SignBitU23 => "sign_bit_u23",
-            Self::Unconfirmed => "unconfirmed",
+            Self::ZeroLength => "zero_length",
+            Self::DigitOver99 => "digit_over_99",
+            Self::ExponentOutOfRange => "exponent_out_of_range",
         }
     }
 }
 
-/// Classification of the amount-type byte in a line item. The raw byte is
-/// [`LineItem::amount_type_byte`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[non_exhaustive]
-pub enum AmountType {
-    /// `0x00` - placeholder. The four bytes are not a cents value.
-    None,
-    /// `0x01` - meaning not established. The amount is never decoded.
-    Unestablished,
-    /// `0x02` - `[0x02][3 amount bytes]`.
-    Standard,
-    /// `0x03` - deferred. Encoding not yet known; only the raw bytes are kept.
-    Deferred,
-}
-
-impl AmountType {
-    /// Classify the leading amount-type byte. `None` for an unknown byte,
-    /// which scanning reports as [`Error::UnknownAmountType`].
-    pub fn from_byte(b: u8) -> Option<Self> {
-        match b {
-            0x00 => Some(Self::None),
-            0x01 => Some(Self::Unestablished),
-            0x02 => Some(Self::Standard),
-            0x03 => Some(Self::Deferred),
-            _ => None,
-        }
+impl std::fmt::Display for UndecodedReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
-/// Decode `[type][3 bytes]` under `encoding`. Only type `0x02` on a table
-/// with an established encoding yields a value.
-fn decode_amount(ty: AmountType, encoding: AmountEncoding, raw: &[u8; 4]) -> Option<i64> {
-    if ty != AmountType::Standard {
-        return None;
-    }
-    let hi = (raw[2] as i64) | ((raw[3] as i64) << 8);
-    match encoding {
-        AmountEncoding::UnsignedU24 => Some((raw[1] as i64) | (hi << 8)),
-        AmountEncoding::SignBitU23 => {
-            let mag = ((raw[1] & 0x7F) as i64) | (hi << 8);
-            Some(if raw[1] & 0x80 != 0 { -mag } else { mag })
-        }
-        _ => None,
-    }
+/// A value field as read from a page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ValueField {
+    /// The field's bytes: `[k][ctrl][digits]`, or just `[0][ctrl]`.
+    raw: Vec<u8>,
+    /// The decoded value, or why it was not decoded.
+    value: Result<Decimal, UndecodedReason>,
 }
 
-/// Parsed invoice line-item record.
+/// Read the value field at `at` in `body`. `anchor` is the offset of the
+/// record's anchor, named in errors.
+fn read_value(body: &[u8], at: usize, pn: u64, anchor: usize) -> Result<ValueField, Error> {
+    let truncated = || Error::TruncatedValue {
+        page_number: pn,
+        page_offset: anchor,
+    };
+    let (&k, &ctrl) = match (body.get(at), body.get(at + 1)) {
+        (Some(k), Some(ctrl)) => (k, ctrl),
+        _ => return Err(truncated()),
+    };
+    let k = k as usize;
+    if k > MAX_DIGITS {
+        return Err(Error::InvalidValueLength {
+            page_number: pn,
+            page_offset: anchor,
+            length_byte: k as u8,
+        });
+    }
+    let Some(raw) = body.get(at..at + 2 + k) else {
+        return Err(truncated());
+    };
+    let raw = raw.to_vec();
+    if k == 0 {
+        return Ok(ValueField {
+            raw,
+            value: Err(UndecodedReason::ZeroLength),
+        });
+    }
+    let value = numeric_value(ctrl, &raw[2..]);
+    Ok(ValueField { raw, value })
+}
+
+/// The value of `digits` (base 100, least significant first) under the
+/// control byte `ctrl`.
+fn numeric_value(ctrl: u8, digits: &[u8]) -> Result<Decimal, UndecodedReason> {
+    if digits.iter().any(|&d| d > 99) {
+        return Err(UndecodedReason::DigitOver99);
+    }
+    let exponent = i32::from(ctrl & 0x7F) - 64;
+    if !(MIN_EXPONENT..=MAX_EXPONENT).contains(&exponent) {
+        return Err(UndecodedReason::ExponentOutOfRange);
+    }
+    // At most ten digits: the coefficient is below 10^20 and, at the largest
+    // exponent, the value below 10^30, so i128 holds every case.
+    let coef = digits
+        .iter()
+        .rev()
+        .fold(0i128, |acc, &d| acc * 100 + i128::from(d));
+    let sign = if ctrl & 0x80 != 0 { -1 } else { 1 };
+    Ok(if exponent >= 0 {
+        Decimal::new(sign * coef * 100i128.pow(exponent as u32), 0)
+    } else {
+        Decimal::new(sign * coef, exponent.unsigned_abs() * 2)
+    })
+}
+
+/// Parsed line-item record.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct LineItem {
-    /// Parent invoice QB-ID (16 base62 characters).
+    /// Parent transaction QB-ID (16 base62 characters).
     pub invoice_id: String,
     /// Source page number in the QBW file.
     pub page_number: u64,
@@ -132,18 +161,15 @@ pub struct LineItem {
     pub page_offset: usize,
     /// Item QB-ID - the line item's own identifier, when discovered.
     pub item_qb_id: Option<String>,
-    /// Amount-type classification.
-    pub amount_type: AmountType,
-    /// Reading applied to the amount bytes, chosen from `source_table`.
-    pub amount_encoding: AmountEncoding,
-    /// Amount in cents under `amount_encoding`. `None` when the amount type
-    /// carries no cents value (`0x00`, `0x03`), when its meaning is not
-    /// established (`0x01`), or when `amount_encoding` is
-    /// [`AmountEncoding::Unconfirmed`]. Callers must treat `None` as
-    /// "unknown", not zero.
-    pub amount_cents: Option<i64>,
-    /// Raw 4 bytes immediately following the float32(1.0) quantity.
-    pub amount_raw: [u8; 4],
+    /// The numeric value field, exact. `None` when the field was not decoded
+    /// (see `value_undecoded`); callers must treat `None` as "unknown", not
+    /// zero. That this value is the line's amount is not established.
+    pub value: Option<Decimal>,
+    /// Why `value` is `None`; `None` when it was decoded.
+    pub value_undecoded: Option<UndecodedReason>,
+    /// The bytes of the value field, `[k][ctrl][k digit bytes]` (just
+    /// `[k][ctrl]` when `k` is 0).
+    pub value_raw: Vec<u8>,
     /// SA17 transaction date (SA-day), set only when `date_source` is
     /// [`DateSource::WindowScan`].
     pub txn_date_raw: Option<u32>,
@@ -153,63 +179,34 @@ pub struct LineItem {
     /// date and counter unset.
     pub date_source: DateSource,
     /// Owning `SYSTABLE` name (e.g. `abmc_invoice_inventory_lineitem`) when
-    /// the line item's page was attributable; `None` otherwise.
+    /// the line item's page was attributable; `None` otherwise. The
+    /// attribution is by page position only and is unverified: the
+    /// content-based cross-check (`verify --strict-attribution`) agrees
+    /// with it on a small share of pages.
     pub source_table: Option<String>,
     /// Reasons this record deserves less trust. Empty when no check flagged it.
     pub flags: Vec<RecordFlag>,
 }
 
 impl LineItem {
-    /// The raw amount-type byte that followed the anchor.
-    pub fn amount_type_byte(&self) -> u8 {
-        self.amount_raw[0]
-    }
-
-    /// Build a record with the given invoice id, source table and decoded
-    /// amount, all other fields empty. For tests and tools that need to
-    /// synthesize records; scans never call it.
+    /// Build a record with the given invoice id, source table and value, all
+    /// other fields empty. For tests and tools that need to synthesize
+    /// records; scans never call it.
     #[doc(hidden)]
-    pub fn synthetic(
-        invoice_id: &str,
-        source_table: Option<&str>,
-        amount_cents: Option<i64>,
-    ) -> Self {
+    pub fn synthetic(invoice_id: &str, source_table: Option<&str>, value: Option<Decimal>) -> Self {
         Self {
             invoice_id: invoice_id.to_owned(),
             page_number: 0,
             page_offset: 0,
             item_qb_id: None,
-            amount_type: AmountType::Standard,
-            amount_encoding: AmountEncoding::for_source_table(source_table),
-            amount_cents,
-            amount_raw: [0; 4],
+            value,
+            value_undecoded: value.is_none().then_some(UndecodedReason::ZeroLength),
+            value_raw: Vec::new(),
             txn_date_raw: None,
             counter: None,
             date_source: DateSource::NotFound,
             source_table: source_table.map(str::to_owned),
             flags: Vec::new(),
-        }
-    }
-
-    /// Attribute the item to `source_table` and decode its amount with the
-    /// reading that fits that table.
-    fn set_source_table(&mut self, source_table: Option<String>) {
-        self.amount_encoding = AmountEncoding::for_source_table(source_table.as_deref());
-        self.source_table = source_table;
-        self.amount_cents = decode_amount(self.amount_type, self.amount_encoding, &self.amount_raw);
-        self.flags.retain(|f| {
-            !matches!(
-                f,
-                RecordFlag::AmountEncodingUnconfirmed | RecordFlag::AmountTypeUnestablished
-            )
-        });
-        if self.amount_type == AmountType::Standard
-            && self.amount_encoding == AmountEncoding::Unconfirmed
-        {
-            self.flags.push(RecordFlag::AmountEncodingUnconfirmed);
-        }
-        if self.amount_type == AmountType::Unestablished {
-            self.flags.push(RecordFlag::AmountTypeUnestablished);
         }
     }
 
@@ -224,8 +221,7 @@ impl LineItem {
 }
 
 /// Collect every line item in `store`, tagging each with the table its page
-/// is attributed to (when `attribution` is given) and decoding its amount
-/// with the reading for that table.
+/// is attributed to (when `attribution` is given).
 ///
 /// In strict mode the first undecodable record or page is returned as an
 /// error. Under [`Leniency::RECORDS`](crate::Leniency::RECORDS) each is
@@ -251,6 +247,7 @@ pub(crate) fn scan_lineitems(
             extent: opaque.extent,
         }));
     }
+    let (mut outside_live_rows, mut other_quantity) = (0u64, 0u64);
     for_each_extent_page(
         store,
         model,
@@ -258,43 +255,150 @@ pub(crate) fn scan_lineitems(
         &mut scan,
         |_| true,
         |decoded, scan| {
-            let pn = decoded.pn();
             let source = attribution
-                .and_then(|a| a.attribute(pn))
+                .and_then(|a| a.attribute(decoded.pn()))
                 .map(|e| e.name.clone());
-            let mut found = Vec::new();
-            scan_page(&decoded.bytes()[..PAGE_DATA_END], pn, &mut found);
-            for r in found {
-                let mut li = match r {
-                    Ok(li) => li,
-                    Err(e) => {
-                        scan.reject(e, options)?;
-                        continue;
-                    }
-                };
-                // A record reads up to 96 bytes before its anchor (item ID)
-                // and 64 bytes after its payload (date); flag it when any of
-                // those bytes came from an unconfirmed keystream or a weak
-                // sector.
-                let span = li.page_offset.saturating_sub(96)
-                    ..(li.page_offset + ANCHOR_LEN + 64).min(PAGE_DATA_END);
-                li.flags.extend(decoded.flags_for(span));
-                if source.is_some() {
-                    li.set_source_table(source.clone());
+            let found = page_lineitems(decoded, source)?;
+            outside_live_rows += found.outside_live_rows;
+            other_quantity += found.other_quantity;
+            for r in found.records {
+                match r {
+                    Ok(li) => scan.items.push(li),
+                    Err(e) => scan.reject(e, options)?,
                 }
-                scan.items.push(li);
             }
             Ok(())
         },
     )?;
+    if outside_live_rows > 0 {
+        scan.warnings
+            .push(Warning::new(WarningKind::RecordsOutsideLiveRows {
+                records: outside_live_rows,
+            }));
+    }
+    if other_quantity > 0 {
+        scan.warnings
+            .push(Warning::new(WarningKind::LineItemsNotRead {
+                anchors: other_quantity,
+            }));
+    }
+    let mut undecoded = [0u64; 3];
+    for reason in scan.items.iter().filter_map(|li| li.value_undecoded) {
+        match reason {
+            UndecodedReason::ZeroLength => undecoded[0] += 1,
+            UndecodedReason::DigitOver99 => undecoded[1] += 1,
+            UndecodedReason::ExponentOutOfRange => undecoded[2] += 1,
+        }
+    }
+    if undecoded.iter().any(|&n| n > 0) {
+        scan.warnings
+            .push(Warning::new(WarningKind::UndecodedValues {
+                zero_length: undecoded[0],
+                digit_over_99: undecoded[1],
+                exponent_out_of_range: undecoded[2],
+            }));
+    }
+    let unattributed = scan
+        .items
+        .iter()
+        .filter(|li| li.source_table.is_none())
+        .count() as u64;
+    if attribution.is_some() && unattributed > 0 {
+        scan.warnings
+            .push(Warning::new(WarningKind::UnattributedRecords {
+                records: unattributed,
+                total: scan.items.len() as u64,
+            }));
+    }
     Ok(scan)
+}
+
+/// Line items found on one decoded page.
+struct PageLineItems {
+    /// Records and record errors, in page order.
+    records: Vec<Result<LineItem, Error>>,
+    /// Anchors left out because they lie outside every live row.
+    outside_live_rows: u64,
+    /// Anchor-shaped records with a quantity other than 1.0, not parsed.
+    other_quantity: u64,
+}
+
+/// Parse the line items on `decoded`, flag them for the page's decode
+/// confidence, and attribute them to `source`.
+///
+/// When the page has a confirmed slot directory, a live row runs from its
+/// slot offset to the next live offset (or the page trailer). An anchor
+/// outside every such span lies in the page prelude, the directory or the
+/// free space below the lowest live row: it is the residue of a deleted or
+/// moved record, so it is counted and left out. Pages without a confirmed
+/// directory keep every anchor, because their row extents are unknown.
+///
+/// opensqlany does not decode row lengths, so a deleted row that sits inside
+/// a live row's span cannot be told from live data.
+fn page_lineitems(decoded: &DecodedPage, source: Option<String>) -> Result<PageLineItems, Error> {
+    let live_spans: Option<Vec<Range<usize>>> = match decoded.slotted()? {
+        Directory::Confirmed(sp) => Some(
+            sp.rows()
+                .iter()
+                .map(|r| r.offset() as usize..r.offset() as usize + r.bytes().len())
+                .collect(),
+        ),
+        _ => None,
+    };
+    let is_live = |offset: usize| {
+        live_spans
+            .as_ref()
+            .is_none_or(|spans| spans.iter().any(|s| s.contains(&offset)))
+    };
+    let mut found = Vec::new();
+    let other_quantity = scan_page(&decoded.bytes()[..PAGE_DATA_END], decoded.pn(), &mut found);
+    let mut out = PageLineItems {
+        records: Vec::with_capacity(found.len()),
+        outside_live_rows: 0,
+        other_quantity: 0,
+    };
+    for offset in other_quantity {
+        if is_live(offset) {
+            out.other_quantity += 1;
+        } else {
+            out.outside_live_rows += 1;
+        }
+    }
+    for r in found {
+        let mut li = match r {
+            Ok(li) => li,
+            Err(e) => {
+                out.records.push(Err(e));
+                continue;
+            }
+        };
+        if !is_live(li.page_offset) {
+            out.outside_live_rows += 1;
+            continue;
+        }
+        // A record reads up to 96 bytes before its anchor (item ID) and 64
+        // bytes after its payload (date); flag it when any of those bytes
+        // came from an unconfirmed keystream or a weak sector.
+        let span = li.page_offset.saturating_sub(96)
+            ..(li.page_offset + ANCHOR_LEN + 64).min(PAGE_DATA_END);
+        li.flags.extend(decoded.flags_for(span));
+        li.source_table = source.clone();
+        out.records.push(Ok(li));
+    }
+    Ok(out)
 }
 
 /// Scan a decoded page body for line-item anchors and append parsed records
 /// to `out` in page order.
-fn scan_page(body: &[u8], pn: u64, out: &mut Vec<Result<LineItem, Error>>) {
+///
+/// Returns the offsets of anchors whose quantity position holds a plausible
+/// quantity other than 1.0 (see [`plausible_quantity`]); they are not
+/// parsed. A candidate whose bytes overlap a parsed anchor is part of that
+/// record and is not returned.
+fn scan_page(body: &[u8], pn: u64, out: &mut Vec<Result<LineItem, Error>>) -> Vec<usize> {
+    let mut other_quantity = Vec::new();
     if body.len() < ANCHOR_LEN {
-        return;
+        return other_quantity;
     }
     let limit = body.len() - ANCHOR_LEN;
     let mut start = Vec::new();
@@ -311,14 +415,26 @@ fn scan_page(body: &[u8], pn: u64, out: &mut Vec<Result<LineItem, Error>>) {
             pos += 1;
             continue;
         }
-        // Verify trailing float32(1.0).
-        if body[pos + 5 + QB_ID_LEN..pos + ANCHOR_LEN] != F32_ONE {
+        // Verify trailing float32(1.0). Any other plausible quantity is
+        // counted: the record may be a real line this decoder cannot read.
+        let qty = &body[pos + 5 + QB_ID_LEN..pos + ANCHOR_LEN];
+        if qty != F32_ONE {
+            let q = f32::from_le_bytes([qty[0], qty[1], qty[2], qty[3]]);
+            if plausible_quantity(q)
+                && other_quantity
+                    .last()
+                    .is_none_or(|&last| pos - last >= ANCHOR_LEN)
+            {
+                other_quantity.push(pos);
+            }
             pos += 1;
             continue;
         }
         start.push(pos);
         pos += ANCHOR_LEN;
     }
+
+    other_quantity.retain(|&c| start.iter().all(|&a| c.abs_diff(a) >= ANCHOR_LEN));
 
     // Each record's search windows stop at its neighbours' anchors, so a
     // field of the previous or next record is never read as this one's.
@@ -336,6 +452,16 @@ fn scan_page(body: &[u8], pn: u64, out: &mut Vec<Result<LineItem, Error>>) {
     for (anchor, floor, ceil) in bounds {
         out.push(parse_anchor(body, pn, anchor, floor, ceil));
     }
+    other_quantity
+}
+
+/// Whether `q`, read from the quantity position of an anchor-shaped record,
+/// is a quantity a line could carry: zero, or a magnitude from 0.001 to
+/// 1,000,000, either sign (returns and credits are negative). The bounds
+/// are a plausibility choice of this crate, not a format rule; anything else
+/// (NaN, infinities, denormals, huge values) is taken as other bytes.
+fn plausible_quantity(q: f32) -> bool {
+    q == 0.0 || (q.is_finite() && (1.0e-3..=1.0e6).contains(&q.abs()))
 }
 
 fn parse_anchor(
@@ -351,26 +477,12 @@ fn parse_anchor(
         .to_owned();
 
     let payload_start = anchor_start + ANCHOR_LEN;
-    if payload_start + 4 > body.len() {
-        return Err(Error::TruncatedAmount {
-            page_number: pn,
-            page_offset: anchor_start,
-        });
-    }
-    let mut amount_raw = [0u8; 4];
-    amount_raw.copy_from_slice(&body[payload_start..payload_start + 4]);
-    let Some(amount_type) = AmountType::from_byte(amount_raw[0]) else {
-        return Err(Error::UnknownAmountType {
-            page_number: pn,
-            page_offset: anchor_start,
-            type_byte: amount_raw[0],
-        });
-    };
+    let field = read_value(body, payload_start, pn, anchor_start)?;
 
-    // Forward search for a date+counter pair after the amount bytes.
+    // Forward search for a date+counter pair after the value field.
     let scan = scan_date_counter(
         body,
-        payload_start + 4,
+        payload_start + field.raw.len().max(MIN_VALUE_SPAN),
         (payload_start + 64).min(ceil.saturating_sub(7)),
         1_000_000,
     );
@@ -385,17 +497,15 @@ fn parse_anchor(
         page_number: pn,
         page_offset: anchor_start,
         item_qb_id,
-        amount_type,
-        amount_encoding: AmountEncoding::Unconfirmed,
-        amount_cents: None,
-        amount_raw,
+        value: field.value.ok(),
+        value_undecoded: field.value.err(),
+        value_raw: field.raw,
         txn_date_raw: scan.date,
         counter: scan.counter,
         date_source: scan.source,
         source_table: None,
         flags: Vec::new(),
     };
-    li.set_source_table(None);
     if li.date_source == DateSource::Ambiguous {
         li.flags.push(RecordFlag::DateAmbiguous);
     }
@@ -426,47 +536,122 @@ fn find_item_id_nearest(window: &[u8]) -> Option<String> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn amount_type_classification() {
-        assert_eq!(AmountType::from_byte(0x00), Some(AmountType::None));
-        assert_eq!(AmountType::from_byte(0x01), Some(AmountType::Unestablished));
-        assert_eq!(AmountType::from_byte(0x02), Some(AmountType::Standard));
-        assert_eq!(AmountType::from_byte(0x03), Some(AmountType::Deferred));
-        assert_eq!(AmountType::from_byte(0x42), None);
+    /// Decode `payload` as a value field in the middle of a page.
+    fn value_of(payload: &[u8]) -> Result<ValueField, Error> {
+        let mut body = [0u8; 64];
+        let end = payload.len().min(body.len() - 8);
+        body[8..8 + end].copy_from_slice(&payload[..end]);
+        read_value(&body[..8 + payload.len()], 8, 7, 0)
     }
 
-    #[test]
-    fn decode_known_record_both_readings() {
-        // 02 40 0f 04: unsigned 0x040f40 = 266,048 ($2,660.48).
-        let raw = [0x02, 0x40, 0x0F, 0x04];
-        let u = decode_amount(AmountType::Standard, AmountEncoding::UnsignedU24, &raw);
-        assert_eq!(u, Some(266_048));
-    }
-
-    #[test]
-    fn type_03_has_no_cents() {
-        let raw = [0x03, 0xBF, 0x5F, 0x63];
-        for e in [AmountEncoding::UnsignedU24, AmountEncoding::SignBitU23] {
-            assert_eq!(decode_amount(AmountType::Deferred, e, &raw), None);
+    fn decoded(payload: &[u8]) -> String {
+        match value_of(payload).unwrap().value {
+            Ok(v) => v.to_string(),
+            Err(r) => format!("undecoded: {r}"),
         }
     }
 
     #[test]
-    fn sign_bit_pairs_sum_to_zero() {
-        // C.48 example: paired 2-line journal lines must sum to zero.
-        let pos = [0x02, 0x40, 0x2D, 0x01];
-        let neg = [0x02, 0xC0, 0x2D, 0x01];
-        let e = AmountEncoding::SignBitU23;
-        let a = decode_amount(AmountType::Standard, e, &pos).unwrap();
-        let b = decode_amount(AmountType::Standard, e, &neg).unwrap();
-        assert_eq!((a, b), (77_120, -77_120));
+    fn issue_22_examples_decode() {
+        assert_eq!(decoded(&[0x02, 0x40, 0x08, 0x02]), "208");
+        assert_eq!(decoded(&[0x01, 0x41, 0x03]), "300");
+        assert_eq!(decoded(&[0x02, 0x3F, 0x2F, 0x4B]), "75.47");
     }
 
     #[test]
-    fn sign_bit_magnitude_reaches_23_bits() {
-        let raw = [0x02, 0x7F, 0xFF, 0xFF];
-        let v = decode_amount(AmountType::Standard, AmountEncoding::SignBitU23, &raw);
-        assert_eq!(v, Some(16_777_087));
+    fn real_data_shapes_decode() {
+        assert_eq!(decoded(&[0x02, 0xBF, 0x2D, 0x22]), "-34.45");
+        assert_eq!(decoded(&[0x03, 0x3F, 0x39, 0x56, 0x2F]), "4786.57");
+        assert_eq!(decoded(&[0x02, 0xC0, 0x3C, 0x09]), "-960");
+        assert_eq!(decoded(&[0x01, 0x41, 0x12]), "1800");
+        assert_eq!(decoded(&[0x03, 0xBF, 0x32, 0x31, 0x03]), "-349.5");
+    }
+
+    #[test]
+    fn field_width_is_two_plus_the_digit_count() {
+        let f = value_of(&[0x03, 0x3F, 0x39, 0x56, 0x2F]).unwrap();
+        assert_eq!(f.raw, [0x03, 0x3F, 0x39, 0x56, 0x2F]);
+        let f = value_of(&[0x02, 0x40, 0x08, 0x02, 0xEE, 0xEE]).unwrap();
+        assert_eq!(f.raw, [0x02, 0x40, 0x08, 0x02]);
+    }
+
+    #[test]
+    fn extreme_valid_fields_are_exact() {
+        // Ten 99 digits at the largest exponent.
+        let mut p = vec![0x0A, 0x40 + 2];
+        p.extend([99u8; 10]);
+        assert_eq!(decoded(&p), "99999999999999999999".to_owned() + "0000");
+        // Smallest exponent: two decimal places.
+        assert_eq!(decoded(&[0x01, 0x40 - 1, 0x01]), "0.01");
+        assert_eq!(decoded(&[0x01, 0xC0 - 1, 0x01]), "-0.01");
+    }
+
+    #[test]
+    fn a_zero_coefficient_is_zero_whatever_the_sign() {
+        assert_eq!(decoded(&[0x01, 0x40, 0x00]), "0");
+        assert_eq!(decoded(&[0x02, 0xC0, 0x00, 0x00]), "0");
+    }
+
+    #[test]
+    fn zero_length_field_is_undecoded_and_keeps_its_bytes() {
+        let f = value_of(&[0x00, 0x81, 0x07, 0x07]).unwrap();
+        assert_eq!(f.value, Err(UndecodedReason::ZeroLength));
+        assert_eq!(f.raw, [0x00, 0x81]);
+    }
+
+    #[test]
+    fn digit_above_99_is_undecoded() {
+        let f = value_of(&[0x02, 0x40, 0x08, 0x64]).unwrap();
+        assert_eq!(f.value, Err(UndecodedReason::DigitOver99));
+        assert_eq!(f.raw, [0x02, 0x40, 0x08, 0x64]);
+    }
+
+    #[test]
+    fn exponent_outside_range_is_undecoded() {
+        // 0x40 - 2 is e = -2; 0x40 + 3 is e = 3; 0x80 and 0x00 are -64.
+        // 0xC5 is the -23 x 100^5 field seen once on the Rock Castle sample.
+        for ctrl in [0x3Eu8, 0x43, 0xBE, 0xC3, 0x3D, 0xC5, 0x80, 0x00, 0x7F] {
+            let f = value_of(&[0x01, ctrl, 0x01]).unwrap();
+            assert_eq!(
+                f.value,
+                Err(UndecodedReason::ExponentOutOfRange),
+                "{ctrl:#x}"
+            );
+        }
+        for ctrl in [0x3Fu8, 0x42, 0xBF, 0xC2] {
+            assert!(
+                value_of(&[0x01, ctrl, 0x01]).unwrap().value.is_ok(),
+                "{ctrl:#x}"
+            );
+        }
+    }
+
+    #[test]
+    fn length_above_ten_is_an_error() {
+        // 0x04 and the lengths up to ten are digit counts now.
+        assert!(value_of(&[0x04, 0x40, 1, 2, 3, 4]).unwrap().value.is_ok());
+        let mut p = vec![0x0B, 0x40];
+        p.extend([1u8; 11]);
+        assert!(matches!(
+            value_of(&p).unwrap_err(),
+            Error::InvalidValueLength {
+                page_number: 7,
+                page_offset: 0,
+                length_byte: 0x0B
+            }
+        ));
+    }
+
+    #[test]
+    fn field_cut_off_by_the_page_end_is_an_error() {
+        for payload in [&[][..], &[0x02][..], &[0x02, 0x40, 0x08][..], &[0x00][..]] {
+            assert!(
+                matches!(value_of(payload).unwrap_err(), Error::TruncatedValue { .. }),
+                "{payload:?}"
+            );
+        }
+        // A zero-length field needs only its two bytes.
+        assert!(value_of(&[0x00, 0x81]).is_ok());
     }
 
     #[test]
@@ -521,56 +706,14 @@ mod tests {
 
         let li = scan_one(&body).unwrap();
         assert_eq!(li.invoice_id, "0000000000001QBm");
-        assert_eq!(li.amount_type, AmountType::Standard);
-        assert_eq!(li.amount_type_byte(), 0x02);
-        assert_eq!(li.amount_raw, [0x02, 0x40, 0x0F, 0x04]);
+        assert_eq!(li.value_raw, [0x02, 0x40, 0x0F, 0x04]);
+        assert_eq!(li.value.unwrap().to_string(), "415");
+        assert_eq!(li.value_undecoded, None);
         assert_eq!(li.txn_date_raw, Some(15511));
         assert_eq!(li.counter, Some(12671));
         assert_eq!(li.date_source, DateSource::WindowScan);
-        // No source table: the reading is not established, so no amount.
-        assert_eq!(li.amount_encoding, AmountEncoding::Unconfirmed);
-        assert_eq!(li.amount_cents, None);
-    }
-
-    #[test]
-    fn journal_line_decodes_with_sign_bit() {
-        // C.48 pair: 02 40 2d 01 = +771.20 and 02 c0 2d 01 = -771.20.
-        // The unsigned reading of the second would be +772.48.
-        let mut pos = scan_one(&anchor_body(PAGE_DATA_END, 32, &[0x02, 0x40, 0x2D, 0x01])).unwrap();
-        let mut neg = scan_one(&anchor_body(PAGE_DATA_END, 32, &[0x02, 0xC0, 0x2D, 0x01])).unwrap();
-        pos.set_source_table(Some(AmountEncoding::JOURNAL_TABLE.to_owned()));
-        neg.set_source_table(Some(AmountEncoding::JOURNAL_TABLE.to_owned()));
-        assert_eq!(pos.amount_encoding, AmountEncoding::SignBitU23);
-        assert_eq!(pos.amount_cents, Some(77_120));
-        assert_eq!(neg.amount_cents, Some(-77_120));
-    }
-
-    #[test]
-    fn invoice_line_decodes_unsigned() {
-        // 02 80 0f 04 is $2,661.12 on an invoice line; the sign-bit reading
-        // would give -$2,659.84.
-        let mut li = scan_one(&anchor_body(PAGE_DATA_END, 32, &[0x02, 0x80, 0x0F, 0x04])).unwrap();
-        li.set_source_table(Some(AmountEncoding::INVOICE_TABLE.to_owned()));
-        assert_eq!(li.amount_encoding, AmountEncoding::UnsignedU24);
-        assert_eq!(li.amount_cents, Some(266_112));
-    }
-
-    #[test]
-    fn unlisted_table_leaves_amount_unknown() {
-        let mut li = scan_one(&anchor_body(PAGE_DATA_END, 32, &[0x02, 0x80, 0x0F, 0x04])).unwrap();
-        li.set_source_table(Some("abmc_credit_memo_inventory_lineitem".to_owned()));
-        assert_eq!(li.amount_encoding, AmountEncoding::Unconfirmed);
-        assert_eq!(li.amount_cents, None);
-    }
-
-    #[test]
-    fn types_without_cents_stay_unknown_on_known_tables() {
-        for first in [0x00u8, 0x01, 0x03] {
-            let mut li =
-                scan_one(&anchor_body(PAGE_DATA_END, 32, &[first, 0x80, 0x0F, 0x04])).unwrap();
-            li.set_source_table(Some(AmountEncoding::INVOICE_TABLE.to_owned()));
-            assert_eq!(li.amount_cents, None, "type {first:#x}");
-        }
+        // No attribution is needed to decode the value.
+        assert_eq!(li.source_table, None);
     }
 
     #[test]
@@ -645,14 +788,14 @@ mod tests {
     }
 
     #[test]
-    fn unknown_amount_type_is_an_error() {
+    fn invalid_value_length_is_an_error() {
         let err = scan_one(&anchor_body(PAGE_DATA_END, 32, &[0x5A, 0x01, 0x02, 0x03])).unwrap_err();
         assert!(matches!(
             err,
-            Error::UnknownAmountType {
+            Error::InvalidValueLength {
                 page_number: 7,
                 page_offset: 32,
-                type_byte: 0x5A
+                length_byte: 0x5A
             }
         ));
     }
@@ -666,9 +809,7 @@ mod tests {
             &[0x02, 0x40, 0x0F, 0x04],
         ))
         .unwrap();
-        assert_eq!(li.amount_type, AmountType::Standard);
-        assert_eq!(li.amount_type_byte(), 0x02);
-        assert_eq!(li.amount_raw, [0x02, 0x40, 0x0F, 0x04]);
+        assert_eq!(li.value_raw, [0x02, 0x40, 0x0F, 0x04]);
     }
 
     #[test]
@@ -679,7 +820,223 @@ mod tests {
             &[0x02, 0x40],
         ))
         .unwrap_err();
-        assert!(matches!(err, Error::TruncatedAmount { .. }));
+        assert!(matches!(err, Error::TruncatedValue { .. }));
+    }
+
+    /// A plaintext page whose prelude-confirmed slot directory at 0x100 has
+    /// four live rows at 0xC00..0xF00, leaving 0x108..0xC00 as free space.
+    fn slotted_page() -> Vec<u8> {
+        let mut page = vec![0u8; 4096];
+        page[0xFC..0xFE].copy_from_slice(&4u16.to_le_bytes());
+        for (k, off) in [0xF00u16, 0xE00, 0xD00, 0xC00].iter().enumerate() {
+            page[0x100 + 2 * k..0x102 + 2 * k].copy_from_slice(&off.to_le_bytes());
+        }
+        page[PAGE_DATA_END] = 4;
+        page
+    }
+
+    fn put_anchor(page: &mut [u8], at: usize) {
+        page[at..at + 5].copy_from_slice(&PARENT_PREFIX);
+        page[at + 5..at + 21].copy_from_slice(b"0000000000001QBm");
+        page[at + 21..at + 25].copy_from_slice(&F32_ONE);
+        page[at + 25..at + 29].copy_from_slice(&[0x02, 0x40, 0x0F, 0x04]);
+    }
+
+    #[test]
+    fn anchor_in_free_space_is_not_a_live_record() {
+        // S1-6: bytes between the slot directory and the lowest live row
+        // are free space; an anchor there is a deleted or stale record.
+        let mut page = slotted_page();
+        put_anchor(&mut page, 0x800);
+        put_anchor(&mut page, 0xC10);
+        let decoded = DecodedPage::from_plain(9, page);
+        let found = page_lineitems(&decoded, None).unwrap();
+        let offsets: Vec<usize> = found
+            .records
+            .iter()
+            .map(|r| r.as_ref().unwrap().page_offset)
+            .collect();
+        assert_eq!(offsets, [0xC10]);
+        assert_eq!(found.outside_live_rows, 1);
+    }
+
+    #[test]
+    fn anchor_with_another_quantity_is_counted() {
+        // S2-16: the anchor requires a float32 1.0 in the position the
+        // module docs call the quantity. A line with quantity 3 would be
+        // silently absent; it is now counted.
+        let mut page = vec![0u8; 4096];
+        put_anchor(&mut page, 0x800);
+        page[0x800 + 21..0x800 + 25].copy_from_slice(&3.0f32.to_le_bytes());
+        let decoded = DecodedPage::from_plain(9, page);
+        let found = page_lineitems(&decoded, None).unwrap();
+        assert!(found.records.is_empty());
+        assert_eq!(found.other_quantity, 1);
+    }
+
+    fn offsets(found: &PageLineItems) -> Vec<usize> {
+        found
+            .records
+            .iter()
+            .map(|r| r.as_ref().unwrap().page_offset)
+            .collect()
+    }
+
+    fn put_quantity(page: &mut [u8], anchor: usize, q: f32) {
+        page[anchor + 21..anchor + 25].copy_from_slice(&q.to_le_bytes());
+    }
+
+    #[test]
+    fn anchor_before_the_directory_is_not_a_live_record() {
+        // Bytes below the lowest live row are outside every row, including
+        // the page prelude that precedes the slot directory.
+        let mut page = slotted_page();
+        put_anchor(&mut page, 0x20);
+        put_anchor(&mut page, 0xC10);
+        let found = page_lineitems(&DecodedPage::from_plain(9, page), None).unwrap();
+        assert_eq!(offsets(&found), [0xC10]);
+        assert_eq!(found.outside_live_rows, 1);
+    }
+
+    #[test]
+    fn zero_and_negative_quantities_are_counted() {
+        let mut page = vec![0u8; 4096];
+        put_anchor(&mut page, 0x800);
+        put_quantity(&mut page, 0x800, 0.0);
+        put_anchor(&mut page, 0x900);
+        put_quantity(&mut page, 0x900, -2.0);
+        let found = page_lineitems(&DecodedPage::from_plain(9, page), None).unwrap();
+        assert!(found.records.is_empty());
+        assert_eq!(found.other_quantity, 2);
+    }
+
+    #[test]
+    fn implausible_quantity_bytes_are_not_counted() {
+        let mut page = vec![0u8; 4096];
+        put_anchor(&mut page, 0x800);
+        put_quantity(&mut page, 0x800, 5.0e8);
+        put_anchor(&mut page, 0x900);
+        put_quantity(&mut page, 0x900, 1.0e-30);
+        let found = page_lineitems(&DecodedPage::from_plain(9, page), None).unwrap();
+        assert_eq!(found.other_quantity, 0);
+    }
+
+    #[test]
+    fn other_quantity_anchor_outside_live_rows_is_not_counted_as_unread() {
+        let mut page = slotted_page();
+        put_anchor(&mut page, 0x800);
+        put_quantity(&mut page, 0x800, 3.0);
+        put_anchor(&mut page, 0xC10);
+        put_quantity(&mut page, 0xC10, 3.0);
+        let found = page_lineitems(&DecodedPage::from_plain(9, page), None).unwrap();
+        assert_eq!(found.other_quantity, 1);
+        assert_eq!(found.outside_live_rows, 1);
+    }
+
+    #[test]
+    fn candidate_overlapping_a_record_is_not_counted() {
+        // The candidate's zero quantity is the start of the real anchor that
+        // follows it.
+        let mut page = vec![0u8; 4096];
+        put_anchor(&mut page, 0x800);
+        put_quantity(&mut page, 0x800, 0.0);
+        put_anchor(&mut page, 0x800 + 21);
+        let found = page_lineitems(&DecodedPage::from_plain(9, page), None).unwrap();
+        assert_eq!(offsets(&found), [0x800 + 21]);
+        assert_eq!(found.other_quantity, 0);
+    }
+
+    #[test]
+    fn anchors_a_few_bytes_apart_are_both_read() {
+        let mut page = vec![0u8; 4096];
+        put_anchor(&mut page, 0x800);
+        put_anchor(&mut page, 0x800 + ANCHOR_LEN);
+        let found = page_lineitems(&DecodedPage::from_plain(9, page), None).unwrap();
+        assert_eq!(offsets(&found), [0x800, 0x800 + ANCHOR_LEN]);
+    }
+
+    #[test]
+    fn page_without_directory_keeps_every_anchor() {
+        let mut page = vec![0u8; 4096];
+        put_anchor(&mut page, 0x800);
+        let decoded = DecodedPage::from_plain(9, page);
+        let found = page_lineitems(&decoded, None).unwrap();
+        assert_eq!(found.records.len(), 1);
+        assert_eq!(found.outside_live_rows, 0);
+    }
+
+    #[test]
+    fn unattributed_line_items_are_counted() {
+        // S2-20: when attribution covers only part of the file, line items
+        // on the other pages have no source table and no decoded amount; the
+        // scan says how many.
+        let mut plain = vec![0u8; 4096];
+        put_anchor(&mut plain, 0x800);
+        plain[0xF00..0xF04].copy_from_slice(&[0x00, 0x00, 0xD5, 0x0B]);
+        plain[0xFF2] = b'E';
+        let bias = 0u8; // page 1
+        for (i, b) in plain[..PAGE_DATA_END].iter_mut().enumerate() {
+            *b = b.wrapping_add(0x5Au8.wrapping_add(1 + (i / 512) as u8).wrapping_sub(bias));
+        }
+        let mut bytes = vec![0u8; 4096];
+        bytes.extend(plain);
+        let store = crate::testutil::sealed_store(bytes);
+        let model = crate::testutil::lenient_model(&store);
+        let attribution = PageAttribution::from_catalog(Vec::new());
+        let scan =
+            scan_lineitems(&store, &model, Some(&attribution), &ReadOptions::strict()).unwrap();
+        assert_eq!(scan.items.len(), 1);
+        assert!(scan.warnings.iter().any(|w| w.kind
+            == WarningKind::UnattributedRecords {
+                records: 1,
+                total: 1
+            }));
+    }
+
+    #[test]
+    fn undecoded_values_are_counted_by_reason() {
+        // Three fields that cannot be decoded, one of each reason, and one
+        // that can: the scan counts each reason.
+        let mut plain = vec![0u8; 4096];
+        for (at, payload) in [
+            (0x200, &[0x00u8, 0x81, 0x00, 0x00][..]),
+            (0x400, &[0x02, 0x40, 0x08, 0x64][..]),
+            (0x600, &[0x01, 0x80, 0x01][..]),
+            (0x800, &[0x02, 0x40, 0x0F, 0x04][..]),
+        ] {
+            put_anchor(&mut plain, at);
+            plain[at + 25..at + 25 + payload.len()].copy_from_slice(payload);
+        }
+        plain[0xF00..0xF04].copy_from_slice(&[0x00, 0x00, 0xD5, 0x0B]);
+        plain[0xFF2] = b'E';
+        let bias = 0u8; // page 1
+        for (i, b) in plain[..PAGE_DATA_END].iter_mut().enumerate() {
+            *b = b.wrapping_add(0x5Au8.wrapping_add(1 + (i / 512) as u8).wrapping_sub(bias));
+        }
+        let mut bytes = vec![0u8; 4096];
+        bytes.extend(plain);
+        let store = crate::testutil::sealed_store(bytes);
+        let model = crate::testutil::lenient_model(&store);
+        let attribution = PageAttribution::from_catalog(Vec::new());
+        let scan =
+            scan_lineitems(&store, &model, Some(&attribution), &ReadOptions::strict()).unwrap();
+        assert_eq!(scan.items.len(), 4);
+        let reasons: Vec<_> = scan.items.iter().map(|li| li.value_undecoded).collect();
+        assert_eq!(
+            reasons,
+            [
+                Some(UndecodedReason::ZeroLength),
+                Some(UndecodedReason::DigitOver99),
+                Some(UndecodedReason::ExponentOutOfRange),
+                None
+            ]
+        );
+        assert!(scan.warnings.iter().any(|w| w.kind
+            == WarningKind::UndecodedValues {
+                zero_length: 1,
+                digit_over_99: 1,
+                exponent_out_of_range: 1
+            }));
     }
 
     fn random_extent_store(pages: usize, opaque: usize) -> PageStore {

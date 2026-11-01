@@ -27,8 +27,8 @@ pub struct Leniency {
 impl Leniency {
     /// Relax nothing.
     pub const STRICT: Leniency = Leniency { bits: 0 };
-    /// Skip a record or page that cannot be decoded (an unknown amount-type
-    /// byte, an amount cut off by the page end, a page that fails to
+    /// Skip a record or page that cannot be decoded (a value-length byte
+    /// above 10, a value field cut off by the page end, a page that fails to
     /// decode) and list it in [`Scan::rejected`] instead of returning the
     /// error.
     pub const RECORDS: Leniency = Leniency { bits: 1 };
@@ -105,12 +105,6 @@ impl ReadOptions {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum RecordFlag {
-    /// The amount's source table has no established encoding, so the amount
-    /// was not decoded.
-    AmountEncodingUnconfirmed,
-    /// The amount type is one whose meaning is not established, so the
-    /// amount was not decoded.
-    AmountTypeUnestablished,
     /// Two or more separate date/counter pairs sat in the search window, so
     /// no date was chosen.
     DateAmbiguous,
@@ -123,18 +117,21 @@ pub enum RecordFlag {
     /// Some bytes the record was read from lie in a 512-byte sector whose
     /// keystream step could not be told apart from its runner-up.
     LowConfidenceSector,
+    /// A `SYSTABLE` row's `data_root_page` is past the end of the file or
+    /// not a data (`E`) page, so it cannot be the table's root. The row is
+    /// not used for page-to-table attribution.
+    RootPageInvalid,
 }
 
 impl RecordFlag {
     /// Stable snake_case name, used in exports.
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::AmountEncodingUnconfirmed => "amount_encoding_unconfirmed",
-            Self::AmountTypeUnestablished => "amount_type_unestablished",
             Self::DateAmbiguous => "date_ambiguous",
             Self::HeaderIdAmbiguous => "header_id_ambiguous",
             Self::KeystreamUnverified => "keystream_unverified",
             Self::LowConfidenceSector => "low_confidence_sector",
+            Self::RootPageInvalid => "root_page_invalid",
         }
     }
 }
@@ -185,6 +182,57 @@ pub enum WarningKind {
         /// Pages affected.
         pages: u64,
     },
+    /// Record anchors found outside every live row of a page (in the page
+    /// prelude, the slot directory or the free space below the lowest live
+    /// row) were left out: they are residue of deleted or moved records.
+    #[non_exhaustive]
+    RecordsOutsideLiveRows {
+        /// Anchors left out.
+        records: u64,
+    },
+    /// Live rows on header pages that hold no 16-character header ID and so
+    /// gave no transaction header.
+    #[non_exhaustive]
+    HeaderRowsWithoutId {
+        /// Rows affected.
+        rows: u64,
+    },
+    /// Records whose page is not attributed to any table. Their
+    /// `source_table` is `None`.
+    #[non_exhaustive]
+    UnattributedRecords {
+        /// Records without a source table.
+        records: u64,
+        /// All records in the scan.
+        total: u64,
+    },
+    /// Line items whose value field was kept as raw bytes and not decoded
+    /// (`LineItem::value` is `None`), counted by reason.
+    #[non_exhaustive]
+    UndecodedValues {
+        /// Fields with a digit count of 0.
+        zero_length: u64,
+        /// Fields with a digit byte above 99.
+        digit_over_99: u64,
+        /// Fields with an exponent outside -1..=2.
+        exponent_out_of_range: u64,
+    },
+    /// Line-item anchors whose quantity field is a plausible value other than
+    /// 1.0. The decoder reads only lines with quantity 1.0, so these lines are
+    /// missing from the results and from every total.
+    #[non_exhaustive]
+    LineItemsNotRead {
+        /// Anchors seen.
+        anchors: u64,
+    },
+    /// `SYSTABLE` rows whose `data_root_page` cannot be a root (past the end
+    /// of the file or not a data page). They carry
+    /// [`RecordFlag::RootPageInvalid`] and are not used for attribution.
+    #[non_exhaustive]
+    InvalidRootPages {
+        /// Rows affected.
+        tables: u64,
+    },
     /// Page-to-table attribution is unavailable, so records have no
     /// source table and header scans find nothing.
     AttributionGap(AttributionGap),
@@ -200,6 +248,12 @@ impl WarningKind {
             Self::KeystreamUnverifiedPages { .. } => "keystream_unverified_pages",
             Self::LowConfidenceSectorPages { .. } => "low_confidence_sector_pages",
             Self::UnconfirmedDirectoryPages { .. } => "unconfirmed_directory_pages",
+            Self::RecordsOutsideLiveRows { .. } => "records_outside_live_rows",
+            Self::HeaderRowsWithoutId { .. } => "header_rows_without_id",
+            Self::UnattributedRecords { .. } => "unattributed_records",
+            Self::UndecodedValues { .. } => "undecoded_values",
+            Self::LineItemsNotRead { .. } => "line_items_not_read",
+            Self::InvalidRootPages { .. } => "invalid_root_pages",
             Self::AttributionGap(_) => "attribution_gap",
             Self::Other(code) => code,
         }
@@ -241,6 +295,41 @@ impl fmt::Display for Warning {
             WarningKind::UnconfirmedDirectoryPages { pages } => write!(
                 f,
                 "{pages} pages have a slot directory the page prelude does not confirm"
+            ),
+            WarningKind::RecordsOutsideLiveRows { records } => write!(
+                f,
+                "{records} record anchors outside every live row (deleted or moved records) were \
+                 left out"
+            ),
+            WarningKind::HeaderRowsWithoutId { rows } => write!(
+                f,
+                "{rows} rows on header pages hold no header ID and gave no transaction"
+            ),
+            WarningKind::UnattributedRecords { records, total } => write!(
+                f,
+                "{records} of {total} records are on pages not attributed to any table; they \
+                 have no source table"
+            ),
+            WarningKind::UndecodedValues {
+                zero_length,
+                digit_over_99,
+                exponent_out_of_range,
+            } => write!(
+                f,
+                "{} line-item values were not decoded and keep their raw bytes ({zero_length} \
+                 with a digit count of 0, {digit_over_99} with a digit above 99, \
+                 {exponent_out_of_range} with an exponent outside -1..=2)",
+                zero_length + digit_over_99 + exponent_out_of_range
+            ),
+            WarningKind::LineItemsNotRead { anchors } => write!(
+                f,
+                "{anchors} line-item anchors have a quantity other than 1.0; this version reads \
+                 only quantity-1.0 lines, so these are missing from the results and totals"
+            ),
+            WarningKind::InvalidRootPages { tables } => write!(
+                f,
+                "{tables} SYSTABLE rows name a data_root_page that is past the end of the file \
+                 or not a data page; they are not used for attribution"
             ),
             WarningKind::AttributionGap(AttributionGap::NoCatalogRows) => write!(
                 f,
@@ -366,13 +455,13 @@ mod tests {
     #[test]
     fn strict_scan_returns_the_rejection() {
         let mut scan: Scan<()> = Scan::default();
-        let e = Error::TruncatedAmount {
+        let e = Error::TruncatedValue {
             page_number: 1,
             page_offset: 2,
         };
         assert!(scan.reject(e, &ReadOptions::strict()).is_err());
         assert!(scan.rejected.is_empty());
-        let e = Error::TruncatedAmount {
+        let e = Error::TruncatedValue {
             page_number: 1,
             page_offset: 2,
         };

@@ -28,6 +28,26 @@
 /// SA-day 4017 is Unix-day 0 (1970-01-01); SA-day 0 is 1959-01-02.
 pub(crate) const DATE_EPOCH_DAYS_BEFORE_UNIX: i64 = 4017;
 
+/// Seconds from the stamp epoch (1600-02-29) to the Unix epoch.
+pub(crate) const STAMP_EPOCH_TO_UNIX_SECONDS: i64 = 11_670_998_400;
+
+/// Earliest stamp reported: 1990-01-01 (Unix seconds).
+pub(crate) const STAMP_UNIX_MIN: i64 = 631_152_000;
+
+/// Latest stamp reported: 2100-01-01 (Unix seconds).
+pub(crate) const STAMP_UNIX_MAX: i64 = 4_102_444_800;
+
+/// Convert a `u32` count of minutes since 1600-02-29 to Unix seconds.
+///
+/// Returns `None` outside 1990-01-01..2100-01-01, so a zero or garbage
+/// value is reported as absent, not as a date.
+pub(crate) fn stamp_to_unix_seconds(raw: u32) -> Option<i64> {
+    let unix = i64::from(raw) * 60 - STAMP_EPOCH_TO_UNIX_SECONDS;
+    (STAMP_UNIX_MIN..STAMP_UNIX_MAX)
+        .contains(&unix)
+        .then_some(unix)
+}
+
 /// Lower plausibility bound for SA-day values: any `sa_day < 1` is
 /// rejected as a missing/zero placeholder.
 pub(crate) const SA_DAY_MIN_PLAUSIBLE: u32 = 1;
@@ -141,6 +161,22 @@ pub(crate) fn scan_date_counter(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stamp_decodes_the_values_from_issue_45() {
+        // 2017-12-20 04:33 UTC and 2017-08-10 18:01 UTC.
+        assert_eq!(stamp_to_unix_seconds(0x0d19_0db1), Some(1_513_744_380));
+        assert_eq!(stamp_to_unix_seconds(0x0d16_2a59), Some(1_502_388_060));
+        // 2009-08-31 00:44 UTC.
+        assert_eq!(stamp_to_unix_seconds(0x0cd6_682c), Some(1_251_679_440));
+    }
+
+    #[test]
+    fn stamp_out_of_range_is_none() {
+        assert_eq!(stamp_to_unix_seconds(0), None);
+        assert_eq!(stamp_to_unix_seconds(u32::MAX), None);
+        assert_eq!(stamp_to_unix_seconds(0x1000_0000), None);
+    }
 
     /// 1990-01-01 is unix-day 7305. With offset 4017, sa_day is 11322.
     #[test]

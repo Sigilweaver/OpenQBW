@@ -86,10 +86,8 @@ fn csv_export_writes_a_manifest() {
 }
 
 #[test]
-fn verify_exits_3_when_a_check_differs() {
+fn verify_reports_values_and_has_no_regression_baseline() {
     let dir = tmp("verify");
-    // The fixture is not Rock Castle, so the opt-in regression baseline
-    // differs.
     let out = openqbw(&[
         "verify".as_ref(),
         os(&fixture("synthetic.qbw")),
@@ -97,38 +95,103 @@ fn verify_exits_3_when_a_check_differs() {
         os(&dir.join("v.sqlite")),
     ]);
     assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!stdout.contains("Phase 5"), "{stdout}");
+    assert!(stdout.contains("position-based and unverified"), "{stdout}");
+    assert!(stdout.contains("sum of decoded values"), "{stdout}");
+    assert!(
+        stdout.contains("value_sum=380.55 (sum of decoded line values, not invoice totals"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("parent groups of 3+ lines, all decoded: 0; summing to exactly zero: 0"),
+        "{stdout}"
+    );
+
+    // The baseline flag is gone.
     let out = openqbw(&[
         "verify".as_ref(),
         os(&fixture("synthetic.qbw")),
-        "--output".as_ref(),
-        os(&dir.join("v.sqlite")),
         "--regression-baseline".as_ref(),
     ]);
-    assert_eq!(out.status.code(), Some(3), "{out:?}");
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
 }
 
 #[test]
-fn verify_skips_regression_baseline_unless_asked() {
-    let dir = tmp("verify-skip");
-    let out = openqbw(&[
-        "verify".as_ref(),
-        os(&fixture("synthetic.qbw")),
-        "--output".as_ref(),
-        os(&dir.join("v.sqlite")),
-    ]);
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stdout.contains("Phase 5 regression: skipped"),
-        "stdout: {stdout}"
+fn sqlite_export_writes_exact_values_raw_hex_and_the_attribution_note() {
+    let dir = tmp("values");
+    let db = dir.join("out.sqlite");
+    let out = openqbw(&["export".as_ref(), os(&fixture("synthetic.qbw")), os(&db)]);
+    assert!(out.status.success(), "{out:?}");
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let rows: Vec<(Option<String>, Option<String>, String)> = conn
+        .prepare("SELECT value, value_undecoded, value_raw_hex FROM transaction_line_items ORDER BY page_number, page_offset")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let want = [
+        ("415", "02400f04"),
+        ("-34.45", "02bf2d22"),
+        ("145", "02402d01"),
+        ("-145", "02c02d01"),
+    ];
+    assert_eq!(rows.len(), want.len());
+    for ((value, undecoded, hex), (v, h)) in rows.iter().zip(want) {
+        assert_eq!(value.as_deref(), Some(v));
+        assert_eq!(undecoded, &None);
+        assert_eq!(hex, h);
+    }
+    let sums: Vec<(String, String, i64)> = conn
+        .prepare("SELECT qb_id, value_sum, undecoded_lines FROM transactions ORDER BY qb_id")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        sums,
+        [
+            ("0000000000001QBm".to_owned(), "380.55".to_owned(), 0),
+            ("0000000000002JRn".to_owned(), "0".to_owned(), 0)
+        ]
     );
-    let differ = stderr
-        .lines()
-        .find(|l| l.contains("checks that differ"))
-        .unwrap_or("");
+    assert_eq!(
+        meta(&conn, "source_table_attribution").as_deref(),
+        Some("position-based, unverified")
+    );
+}
+
+#[test]
+fn csv_export_writes_exact_values_and_the_attribution_note() {
+    let dir = tmp("csv-values");
+    let out = openqbw(&[
+        "migrate".as_ref(),
+        os(&fixture("synthetic.qbw")),
+        "--format".as_ref(),
+        "csv".as_ref(),
+        "--out".as_ref(),
+        os(&dir),
+    ]);
+    assert!(out.status.success(), "{out:?}");
+    let lines = std::fs::read_to_string(dir.join("lineitems.csv")).unwrap();
+    let mut it = lines.lines();
     assert!(
-        !differ.contains("Phase 5 regression baseline"),
-        "stderr: {stderr}"
+        it.next()
+            .unwrap()
+            .starts_with("invoice_id,item_qb_id,value,value_undecoded,value_raw_hex,"),
+        "{lines}"
+    );
+    let second = it.nth(1).unwrap();
+    assert!(
+        second.starts_with("0000000000001QBm,ITEM000000000002,-34.45,,02bf2d22,"),
+        "{second}"
+    );
+    let manifest = std::fs::read_to_string(dir.join("manifest.json")).unwrap();
+    assert!(
+        manifest.contains("\"source_table_attribution\": \"position-based, unverified\""),
+        "{manifest}"
     );
 }
 
@@ -145,7 +208,7 @@ fn undecodable_record_fails_unless_lenient() {
     let kind: String = conn
         .query_row("SELECT kind FROM scan_rejections", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(kind, "unknown_amount_type");
+    assert_eq!(kind, "invalid_value_length");
 }
 
 #[test]
@@ -156,4 +219,148 @@ fn not_a_company_file_fails_with_exit_1() {
     let out = openqbw(&["catalog".as_ref(), os(&p)]);
     assert_eq!(out.status.code(), Some(1), "{out:?}");
     assert!(String::from_utf8_lossy(&out.stderr).contains("bad superblock magic"));
+}
+
+#[test]
+fn foreign_file_that_is_not_page_aligned_reports_the_magic() {
+    let dir = tmp("foreign");
+    let p = dir.join("old.qbw");
+    std::fs::write(&p, vec![0x41u8; 668_672]).unwrap();
+    let out = openqbw(&["catalog".as_ref(), os(&p)]);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("bad superblock magic"), "{err}");
+    assert!(!err.contains("page size"), "{err}");
+}
+
+#[test]
+fn duplicate_header_ids_are_resolved_the_same_way_in_every_format() {
+    // The fixture repeats one header ID on an invoice header page (first in
+    // page order) and a bill header page. Every format keeps the first.
+    let dir = tmp("dupes");
+    let fixture = fixture("synthetic-counts.qbw");
+
+    let db = dir.join("out.sqlite");
+    let out = openqbw(&["export".as_ref(), os(&fixture), os(&db)]);
+    assert!(out.status.success(), "{out:?}");
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let kinds: Vec<String> = conn
+        .prepare("SELECT type FROM transactions WHERE qb_id = '0000000000001QBm'")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(kinds, ["invoice"]);
+
+    let csv = dir.join("csv");
+    let out = openqbw(&[
+        "migrate".as_ref(),
+        os(&fixture),
+        "--format".as_ref(),
+        "csv".as_ref(),
+        "--out".as_ref(),
+        os(&csv),
+    ]);
+    assert!(out.status.success(), "{out:?}");
+    let rows = std::fs::read_to_string(csv.join("transactions.csv")).unwrap();
+    let data: Vec<&str> = rows.lines().skip(1).collect();
+    assert_eq!(data.len(), 1, "{rows}");
+    assert!(data[0].starts_with("0000000000001QBm,invoice,"), "{rows}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("repeat an earlier qb_id"), "{stderr}");
+
+    let iif = dir.join("out.iif");
+    let out = openqbw(&[
+        "migrate".as_ref(),
+        os(&fixture),
+        "--format".as_ref(),
+        "iif".as_ref(),
+        "--out".as_ref(),
+        os(&iif),
+        "--placeholder-accounts".as_ref(),
+    ]);
+    assert!(out.status.success(), "{out:?}");
+    let text = std::fs::read_to_string(&iif).unwrap();
+    assert!(text.contains("\tINVOICE\t"), "{text}");
+    assert!(!text.contains("\tBILL\t"), "{text}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("repeat an earlier qb_id"), "{stderr}");
+}
+
+fn meta(conn: &rusqlite::Connection, key: &str) -> Option<String> {
+    conn.query_row("SELECT value FROM meta WHERE key = ?", [key], |r| r.get(0))
+        .ok()
+}
+
+#[test]
+fn run_counts_are_recorded_in_the_sqlite_meta_table() {
+    let dir = tmp("counts-sqlite");
+    let db = dir.join("out.sqlite");
+    let out = openqbw(&[
+        "export".as_ref(),
+        os(&fixture("synthetic-counts.qbw")),
+        os(&db),
+    ]);
+    assert!(out.status.success(), "{out:?}");
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    for (key, want) in [
+        ("count.catalog.invalid_root_pages", "1"),
+        ("count.line_items.line_items_not_read", "1"),
+        ("count.headers.duplicate_header_ids", "1"),
+        ("count.headers.duplicate_header_ids_conflicting_types", "1"),
+        // Counts that are zero are written too, so absence is never "zero".
+        ("count.line_items.records_outside_live_rows", "0"),
+        ("count.line_items.unattributed_records", "0"),
+        ("count.line_items.keystream_unverified_pages", "0"),
+        ("count.headers.header_rows_without_id", "0"),
+        ("count.headers.unconfirmed_directory_pages", "0"),
+    ] {
+        assert_eq!(meta(&conn, key).as_deref(), Some(want), "{key}");
+    }
+    // The format version does not change when keys are added.
+    assert_eq!(meta(&conn, "format_version").as_deref(), Some("1"));
+}
+
+#[test]
+fn clean_file_records_zero_counts() {
+    let dir = tmp("counts-clean");
+    let db = dir.join("out.sqlite");
+    let out = openqbw(&["export".as_ref(), os(&fixture("synthetic.qbw")), os(&db)]);
+    assert!(out.status.success(), "{out:?}");
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let nonzero: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM meta WHERE key LIKE 'count.%' AND value != '0'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(nonzero, 0);
+    assert!(meta(&conn, "count.line_items.line_items_not_read").is_some());
+}
+
+#[test]
+fn run_counts_are_recorded_in_the_csv_manifest() {
+    let dir = tmp("counts-csv");
+    let out = openqbw(&[
+        "migrate".as_ref(),
+        os(&fixture("synthetic-counts.qbw")),
+        "--format".as_ref(),
+        "csv".as_ref(),
+        "--out".as_ref(),
+        os(&dir),
+    ]);
+    assert!(out.status.success(), "{out:?}");
+    let manifest = std::fs::read_to_string(dir.join("manifest.json")).unwrap();
+    for line in [
+        "\"catalog.invalid_root_pages\": 1",
+        "\"line_items.line_items_not_read\": 1",
+        "\"headers.duplicate_header_ids\": 1",
+        "\"headers.duplicate_header_ids_conflicting_types\": 1",
+        "\"line_items.records_outside_live_rows\": 0",
+    ] {
+        assert!(manifest.contains(line), "{line} missing from {manifest}");
+    }
+    assert!(manifest.contains("\"format_version\": 1"), "{manifest}");
 }

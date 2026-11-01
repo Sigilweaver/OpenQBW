@@ -7,9 +7,11 @@
 //! company file, or a page damaged on disk, is an error before any record
 //! is decoded.
 
+use std::fs::File;
+use std::io::Read;
 use std::path::Path;
 
-use opensqlany::{ApModel, PageStore, ReadOptions};
+use opensqlany::{ApModel, PageStore, ReadOptions, SA_MAGIC};
 
 use crate::error::{Error, Result};
 
@@ -18,11 +20,34 @@ use crate::error::{Error, Result};
 /// Enterprise 2024).
 pub const SUPPORTED_VERSION: (u32, u16, u16) = (3, 201, 12);
 
-/// Index of the superblock page.
-const SUPERBLOCK_PAGE: u64 = 0;
+/// End of the superblock magic (offsets 0x14..0x18).
+const MAGIC_END: usize = 0x18;
+
+/// Check the superblock magic in the first bytes of a file, before the file
+/// size is held to the page size: a file from another format has neither the
+/// magic nor, usually, a size in whole pages, and the magic is the clearer
+/// thing to report. Input shorter than the magic is left to the page store.
+fn check_magic(prefix: &[u8]) -> Result<()> {
+    let Some(raw) = prefix.get(0x14..MAGIC_END) else {
+        return Ok(());
+    };
+    let found = u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]);
+    if found != SA_MAGIC {
+        return Err(Error::BadMagic {
+            found,
+            expected: SA_MAGIC,
+        });
+    }
+    Ok(())
+}
 
 /// Open `path` as a page store and run [`check_store`].
 pub(crate) fn open_store(path: &Path) -> Result<PageStore> {
+    let mut prefix = Vec::with_capacity(MAGIC_END);
+    File::open(path)?
+        .take(MAGIC_END as u64)
+        .read_to_end(&mut prefix)?;
+    check_magic(&prefix)?;
     let store = PageStore::open(path).map_err(|e| Error::from_store(e, None))?;
     check_store(&store)?;
     Ok(store)
@@ -30,6 +55,7 @@ pub(crate) fn open_store(path: &Path) -> Result<PageStore> {
 
 /// As [`open_store`], over bytes already in memory.
 pub(crate) fn store_from_bytes(bytes: Vec<u8>) -> Result<PageStore> {
+    check_magic(&bytes)?;
     let store = PageStore::from_bytes(bytes).map_err(|e| Error::from_store(e, None))?;
     check_store(&store)?;
     Ok(store)
@@ -61,19 +87,10 @@ pub(crate) fn check_store(store: &PageStore) -> Result<()> {
             version_b: found.2,
         });
     }
+    // `page_verified` checks page 0, the superblock, by CRC alone: from
+    // 0x400 it holds the rolled engine fingerprint text, so 0xFF0..0xFFB is
+    // ASCII, not a page trailer (SPECIFICATION.md sections 2.1 and 2.3).
     for pn in 0..store.page_count() {
-        if pn == SUPERBLOCK_PAGE {
-            // Page 0 is the superblock, not a data page: from 0x400 it
-            // holds the rolled engine fingerprint text, so 0xFF0..0xFFB
-            // is ASCII (SPECIFICATION.md sections 2.1 and 2.3). It has
-            // the CRC footer but not the page trailer, so only the CRC
-            // is checked.
-            store
-                .page(pn)
-                .and_then(|page| page.verify_crc())
-                .map_err(|e| Error::from_store(e, Some(pn)))?;
-            continue;
-        }
         store
             .page_verified(pn)
             .map_err(|e| Error::from_store(e, Some(pn)))?;

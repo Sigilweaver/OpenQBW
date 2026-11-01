@@ -13,8 +13,8 @@
 //! for w in &lines.warnings {
 //!     eprintln!("warning: {w}");
 //! }
-//! let decoded: i64 = lines.items.iter().filter_map(|li| li.amount_cents).sum();
-//! println!("{} lines, {decoded} cents decoded", lines.items.len());
+//! let decoded = lines.items.iter().filter(|li| li.value.is_some()).count();
+//! println!("{} lines, {decoded} with a decoded value", lines.items.len());
 //! # Ok::<(), openqbw::Error>(())
 //! ```
 //!
@@ -41,6 +41,7 @@ mod attribution_content;
 mod attribution_schema;
 mod bv_recovery;
 mod date;
+mod decimal;
 mod decode;
 pub mod diagnostics;
 mod error;
@@ -63,8 +64,9 @@ mod transaction_header;
 mod testutil;
 
 pub use date::DateSource;
+pub use decimal::Decimal;
 pub use error::{Error, ErrorKind, Result};
-pub use lineitem::{AmountEncoding, AmountType, LineItem};
+pub use lineitem::{LineItem, UndecodedReason};
 pub use owner_bridge::BridgeSource;
 pub use page_attribution::{AttributionGap, PageAttribution};
 pub use reader::Reader;

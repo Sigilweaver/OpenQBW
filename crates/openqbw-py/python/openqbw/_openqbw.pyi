@@ -1,4 +1,5 @@
 from collections.abc import Iterator
+from decimal import Decimal
 from os import PathLike
 from typing import Any, Generic, Optional, TypeVar, Union, overload
 
@@ -36,12 +37,15 @@ class ScanReport(Generic[_T]):
     def __getitem__(self, index: slice) -> list[_T]: ...
 
 class LineItem:
+    """A line item. `value` is the numeric value field, exact; `None` means not
+    decoded, never zero. It is not established as the line's amount, and
+    `source_table` is a position-based, unverified attribution."""
+
     invoice_id: str
     item_qb_id: Optional[str]
-    amount_cents: Optional[int]
-    amount_encoding: str
-    amount_type: int
-    amount_raw: bytes
+    value: Optional[Decimal]
+    value_undecoded: Optional[str]
+    value_raw: bytes
     txn_date_raw: Optional[int]
     counter: Optional[int]
     date_source: str
@@ -72,6 +76,7 @@ class Table:
     data_root_page: Optional[int]
     last_page: Optional[int]
     page_number: int
+    stamp_unix_seconds: Optional[int]
     flags: list[str]
     def to_dict(self) -> dict[str, Any]: ...
 
@@ -89,6 +94,7 @@ class Reader:
     lenient: bool
     page_count: int
     file_size: int
+    created_unix_seconds: Optional[int]
     attribution_gap: Optional[str]
     def tables(self) -> ScanReport[Table]: ...
     def indexes(self) -> ScanReport[Index]: ...

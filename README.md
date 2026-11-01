@@ -32,10 +32,12 @@ OpenQBW is in active development. The current code can:
   validator (Phase 6, WP-6Z).
 - Export the parsed catalog and lineitems to a SQLite database.
 
-The line-item extractor reads invoice and journal line items from page
-bytes. Amounts are decoded for the invoice and general-journal line-item
-tables only; every other line item is exported with no amount, and
-exports report how many.
+The line-item extractor reads line items from page bytes. Each carries its
+numeric value field, decoded by structure (the SQL Anywhere NUMERIC layout)
+as an exact decimal; a field that does not fit the layout keeps its raw
+bytes and is counted. That the value is the line's amount is not
+established, and `source_table` is a position-based attribution that is
+unverified.
 
 A full write-up of the format work lives in [SPECIFICATION.md](SPECIFICATION.md)
 and the empirical notebook in [re/NOTES.md](re/NOTES.md).
@@ -128,9 +130,7 @@ See [docs/cli.md](docs/cli.md) for the full subcommand reference.
 
 Exit status: 0 on success, 1 on an error (including a file that is not a
 supported company file, or an undecodable record without `--lenient`), 2
-on a usage error, and 3 when `verify` finds a check that differs. The
-`verify` regression baseline is specific to the Rock Castle Construction
-sample; it runs only with `--regression-baseline`.
+on a usage error, and 3 when `verify` finds a check that differs.
 
 ### Output formats
 
@@ -142,13 +142,35 @@ Every file set openqbw writes records the version of its layout:
   `openqbw_version` and each file's row count. `rejected.csv` is always
   written.
 
-The layout version is 1. Adding a table, a column, a CSV file or a manifest
+Both also record the counts behind the warnings printed on stderr, as
+`count.<scan>.<name>` rows in `meta` and a `counts` object in `manifest.json`
+(`<scan>.<name>` keys). `<scan>` is `catalog`, `line_items` or `headers`;
+the names are the warning codes (`records_outside_live_rows`,
+`line_items_not_read`, `unattributed_records`, `header_rows_without_id`,
+`invalid_root_pages`, `keystream_unverified_pages`,
+`low_confidence_sector_pages`, `unconfirmed_directory_pages`, `opaque_pages`,
+`attribution_gap`) plus `headers.duplicate_header_ids` and
+`headers.duplicate_header_ids_conflicting_types`. Each scan's usual counts
+are written even when zero. The totals a count is out of (`..._decoded`,
+`..._extent`, `..._total`) and the `undecoded_values_*` breakdown appear
+only when the count is nonzero. IIF files
+have no place for metadata; `migrate --format iif` prints
+`duplicate_headers` and the warnings on stderr only.
+
+The layout version is 2. Adding a table, a column, a CSV file or a manifest
 key leaves it unchanged; renaming or removing one, or changing what a value
 means, increments it. Readers should ignore tables, columns and keys they do
 not know. Codes stored in the exports (`kind` in `scan_rejections` and
-`rejected.csv`, `flags`, `amount_encoding`, `date_source`) are stable
+`rejected.csv`, `flags`, `value_undecoded`, `date_source`) are stable
 snake_case strings; the `message` text is for people and may change.
 NULL (an empty CSV field) means a value was not decoded, never zero.
+
+Line items carry `value` as an exact decimal string (SQLite `TEXT`, never a
+float), `value_undecoded` (the reason, when it is not decoded) and
+`value_raw_hex`. `transactions.value_sum` is the exact sum of the decoded
+line values of one parent, not an invoice total. `source_table` is
+position-based and unverified; exports record that in
+`meta.source_table_attribution` and in `manifest.json`.
 
 ## Library usage
 
@@ -160,10 +182,10 @@ let lines = reader.line_items()?;
 for w in &lines.warnings {
     eprintln!("warning: {w}");
 }
-// `None` means the amount was not decoded, not zero.
-let decoded: i64 = lines.items.iter().filter_map(|li| li.amount_cents).sum();
-let undecoded = lines.items.iter().filter(|li| li.amount_cents.is_none()).count();
-println!("decoded total: {decoded} cents; {undecoded} lines not decoded");
+// `value` is an exact `Decimal`; `None` means it was not decoded, not zero.
+let decoded = openqbw::Decimal::checked_sum(lines.items.iter().filter_map(|li| li.value));
+let undecoded = lines.items.iter().filter(|li| li.value.is_none()).count();
+println!("sum of decoded values: {decoded:?}; {undecoded} lines not decoded");
 # Ok::<(), openqbw::Error>(())
 ```
 

@@ -31,9 +31,10 @@ for t in r.tables()[:5]:
 
 lines = r.line_items()
 for li in lines[:3]:
-    # amount_cents is None when the amount was not decoded; it is never 0
-    # for "unknown".
-    print(li.invoice_id, li.amount_cents, li.source_table, li.flags)
+    # value is a decimal.Decimal, or None when the field was not decoded; it
+    # is never 0 for "unknown". It is not established as the line amount, and
+    # source_table is a position-based, unverified attribution.
+    print(li.invoice_id, li.value, li.source_table, li.flags)
 for w in lines.warnings:
     print("warning:", w.kind, w.message)
 
@@ -56,7 +57,7 @@ result's `rejected`, and an `openqbw.OpenQBWWarning` is issued.
 
 - `tables()` - `Table` rows of the SYSTABLE catalog
 - `indexes()` - `Index` rows of the SYSINDEX catalog
-- `line_items()` - `LineItem` records, attributed to source tables
+- `line_items()` - `LineItem` records, attributed to source tables by page position (unverified)
 - `transactions()` - `Transaction` headers
 
 A `ScanReport` is a sequence of its `items` and also has `rejected` (a list

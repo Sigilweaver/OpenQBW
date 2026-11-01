@@ -94,8 +94,10 @@ Data-liberation export with three target formats:
   invoice id; each group becomes one `TRNS` followed by `SPL`
   rows and an `ENDTRNS`. When a matching transaction header is
   available the header's transaction type is used, otherwise the
-  group is emitted as `GENERAL JOURNAL`. SPL amounts are negated
-  per IIF's double-entry convention.
+  group is emitted as `GENERAL JOURNAL`. SPL amounts are the negated
+  line values per IIF's double-entry convention. A line whose value is
+  not decoded is left out and counted. The value is not established as
+  the line amount.
 
 ### `forensics`
 
@@ -110,7 +112,8 @@ File-level discovery report covering:
 - Catalog summary (total tables, user tables).
 - Business-record summary (transaction headers, line items,
   distinct parent ids, orphan parents, childless headers,
-  lineitem grand total).
+  the sum of decoded line values, which is a sum of values and not
+  of invoice totals).
 
 A non-zero orphan-parent count is a discovery signal: the file
 may contain partially purged records or a header table this
@@ -122,13 +125,16 @@ build does not parse yet.
 $ openqbw verify mybooks.qbw
 ```
 
-Runs the regression invariants:
+Exports the file, then reports:
 
-- Invoice grand-total reconciliation (Phase 5)
-- Per-table page-coverage check
+- Per-table line-item counts and the sum of decoded values
+  (`source_table` is position-based and unverified)
+- Undecoded values by reason
+- How many parent groups of three or more decoded lines sum to
+  exactly zero (informational)
 - SYSINDEX cross-validation summary (WP-6Z.3)
 
-Exit code is non-zero if any invariant fails.
+Exit code is 3 if a check differs.
 
 ### `validate-attribution`
 

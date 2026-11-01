@@ -272,8 +272,9 @@ dependencies = [
 
 [[package]]
 name = "opensqlany"
-version = "0.2.0"
-source = "git+https://github.com/Sigilweaver/OpenSQLAnywhere?rev=0fae7d9f320d4fdb62f70571d399989f57e1da48#0fae7d9f320d4fdb62f70571d399989f57e1da48"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1941d1210aeb49ddbe3672c8c263ca2886c6a93eeccac646d516e6d3fe146926"
 dependencies = [
  "crc32fast",
  "thiserror",

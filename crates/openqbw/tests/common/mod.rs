@@ -12,7 +12,12 @@
 //! | 4 | `E` | `abmc_invoice_header`: one header |
 //! | 5 | `E` | `abmc_invoice_inventory_lineitem`: two invoice lines |
 //! | 6 | `E` | `abmc_general_journal_inventory_lineitem`: a balanced pair |
-//! | 7 | `E` | same table; with `bad_record`, one anchor with amount type 0x5A |
+//! | 7 | `E` | same table; with `bad_record`, one anchor with value length byte 0x5A |
+//!
+//! The counts variant ([`synthetic_qbw_counts`]) adds a bogus `SYSTABLE` row
+//! (as [`synthetic_qbw_bad_root`]), a line on page 5 whose quantity is 3.0,
+//! and page 8, the `abmc_bill_header` table, which repeats the header ID of
+//! page 4 under another transaction type.
 
 #![allow(dead_code)] // each test binary uses a different subset
 
@@ -27,8 +32,26 @@ pub const JOURNAL_ID: &str = "0000000000002JRn";
 pub const SA_DAY: u32 = 23_817;
 
 /// The fixture as bytes. With `bad_record`, page 7 holds a line-item anchor
-/// followed by an unknown amount-type byte.
+/// followed by a value length byte above 10.
 pub fn synthetic_qbw(bad_record: bool) -> Vec<u8> {
+    build(bad_record, false, false)
+}
+
+/// The fixture with a fourth `SYSTABLE` row, `abmc_bogus`, whose
+/// `data_root_page` is page 1, the `@` calibration page.
+pub fn synthetic_qbw_bad_root() -> Vec<u8> {
+    build(false, true, false)
+}
+
+/// The fixture with one of each countable condition: an invalid root page, a
+/// line-item anchor with quantity 3.0, and a header ID that appears on two
+/// header pages under two transaction types (the first, in page order, is
+/// `abmc_invoice_header`).
+pub fn synthetic_qbw_counts() -> Vec<u8> {
+    build(false, true, true)
+}
+
+fn build(bad_record: bool, bad_root: bool, counts: bool) -> Vec<u8> {
     let mut pages: Vec<Vec<u8>> = Vec::new();
     pages.push(superblock());
     pages.push(encode(&[0u8; PAGE], 1, b'@', [3, 5, 7, 9, 11, 13, 15, 17]));
@@ -51,6 +74,12 @@ pub fn synthetic_qbw(bad_record: bool) -> Vec<u8> {
         6,
         7,
     );
+    if bad_root {
+        put_systable_row(&mut systable, 0x500, 103, "abmc_bogus", 1, 1);
+    }
+    if counts {
+        put_systable_row(&mut systable, 0x600, 104, "abmc_bill_header", 8, 8);
+    }
     pages.push(e_page(systable, 2));
     pages.push(e_page(vec![0u8; PAGE], 3));
 
@@ -71,8 +100,18 @@ pub fn synthetic_qbw(bad_record: bool) -> Vec<u8> {
         0x600,
         HEADER_ID,
         b"ITEM000000000002",
-        [0x02, 0x80, 0x0F, 0x04],
+        [0x02, 0xBF, 0x2D, 0x22],
     );
+    if counts {
+        put_lineitem(
+            &mut invoice,
+            0x800,
+            HEADER_ID,
+            b"ITEM000000000009",
+            [0x02, 0x40, 0x0F, 0x04],
+        );
+        invoice[0x800 + 21..0x800 + 25].copy_from_slice(&3.0f32.to_le_bytes());
+    }
     pages.push(e_page(invoice, 5));
 
     let mut journal = vec![0u8; PAGE];
@@ -104,6 +143,12 @@ pub fn synthetic_qbw(bad_record: bool) -> Vec<u8> {
     }
     pages.push(e_page(tail, 7));
 
+    if counts {
+        let mut bill = vec![0u8; PAGE];
+        put_header(&mut bill, 0x400, HEADER_ID, 42);
+        pages.push(e_page(bill, 8));
+    }
+
     pages.concat()
 }
 
@@ -114,6 +159,10 @@ fn superblock() -> Vec<u8> {
     p[0x14..0x18].copy_from_slice(&0xDA7A_BA5Eu32.to_le_bytes());
     p[0x18..0x1A].copy_from_slice(&201u16.to_le_bytes());
     p[0x1A..0x1C].copy_from_slice(&12u16.to_le_bytes());
+    // Creation stamp: the SYSTABLE rows' stamp plus one minute, then the
+    // constant `04 00`.
+    p[0x2A..0x2E].copy_from_slice(&219_745_714u32.to_le_bytes());
+    p[0x2E..0x30].copy_from_slice(&[0x04, 0x00]);
     seal(&mut p);
     p
 }

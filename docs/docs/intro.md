@@ -34,9 +34,9 @@ or IIF.
   attribution metadata.
 - Export to CSV, SQLite, or Intuit's own IIF interchange format.
 
-Validated on the Rock Castle Construction sample file:
-**13,375 / 13,375** invoices recovered, grand total
-**$399,914,792.78**.
+Line items carry their numeric value field as an exact decimal. That
+the value is the line's amount is not established, and `source_table`
+is a position-based, unverified attribution.
 
 ## How it stacks
 

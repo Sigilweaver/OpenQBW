@@ -57,6 +57,23 @@ pub struct TransactionHeader {
 }
 
 impl TransactionHeader {
+    /// Build a header with the given ID and source table, all other fields
+    /// empty. For tests and tools that need to synthesize records; scans
+    /// never call it.
+    #[doc(hidden)]
+    pub fn synthetic(qb_id: &str, source_table: &str) -> Self {
+        Self {
+            qb_id: qb_id.to_owned(),
+            source_table: source_table.to_owned(),
+            txn_date_raw: None,
+            counter: None,
+            date_source: DateSource::NotFound,
+            flags: Vec::new(),
+            page_number: 0,
+            page_offset: 0,
+        }
+    }
+
     /// The transaction date as days since the Unix epoch (1970-01-01), with
     /// the crate's SA-day offset (see `txn_date_raw` for the stored value).
     /// The offset is fitted to one sample file and not confirmed against a
@@ -92,7 +109,7 @@ pub(crate) fn scan_transaction_headers(
     options: &ReadOptions,
 ) -> Result<Scan<TransactionHeader>, Error> {
     let mut scan = Scan::default();
-    let mut unconfirmed = 0u64;
+    let (mut unconfirmed, mut rows_without_id) = (0u64, 0u64);
     for_each_extent_page(
         store,
         model,
@@ -114,7 +131,7 @@ pub(crate) fn scan_transaction_headers(
             // date search inside the row. Otherwise use the linear scan.
             let before = scan.items.len();
             match scan_page_slotted(decoded, &source_table, &mut scan.items)? {
-                SlottedOutcome::Read => {}
+                SlottedOutcome::Read { rows_without_id: n } => rows_without_id += n,
                 outcome => {
                     unconfirmed += (outcome == SlottedOutcome::Unconfirmed) as u64;
                     scan_page(
@@ -139,13 +156,22 @@ pub(crate) fn scan_transaction_headers(
                 pages: unconfirmed,
             }));
     }
+    if rows_without_id > 0 {
+        scan.warnings
+            .push(Warning::new(WarningKind::HeaderRowsWithoutId {
+                rows: rows_without_id,
+            }));
+    }
     Ok(scan)
 }
 
 #[derive(Debug, PartialEq, Eq)]
 enum SlottedOutcome {
     /// Rows were read through a confirmed directory.
-    Read,
+    Read {
+        /// Live rows that held no header ID and gave no record.
+        rows_without_id: u64,
+    },
     /// The page has no directory.
     Absent,
     /// The page has a directory its prelude does not confirm.
@@ -242,9 +268,11 @@ fn scan_page_slotted(
         Directory::Absent => return Ok(SlottedOutcome::Absent),
         Directory::Unconfirmed => return Ok(SlottedOutcome::Unconfirmed),
     };
+    let mut rows_without_id = 0u64;
     for r in sp.rows() {
         let (slot_off, row) = (r.offset(), r.bytes());
         if row.len() < HEADER_PREFIX.len() + QB_ID_LEN {
+            rows_without_id += 1;
             continue;
         }
         let limit = row.len() - (HEADER_PREFIX.len() + QB_ID_LEN);
@@ -262,6 +290,7 @@ fn scan_page_slotted(
             }
         }
         let Some(&first) = candidates.first() else {
+            rows_without_id += 1;
             continue;
         };
         let qb_id = String::from_utf8_lossy(&row[first + 3..first + 3 + QB_ID_LEN]).into_owned();
@@ -283,7 +312,7 @@ fn scan_page_slotted(
             page_offset: slot_off as usize + first,
         });
     }
-    Ok(SlottedOutcome::Read)
+    Ok(SlottedOutcome::Read { rows_without_id })
 }
 
 fn is_base62(s: &[u8]) -> bool {
@@ -461,7 +490,10 @@ mod tests {
             .collect();
         let page = build_slotted_page(&rows);
         let mut out = Vec::new();
-        assert_eq!(slotted(page, 4242, &mut out), SlottedOutcome::Read);
+        assert_eq!(
+            slotted(page, 4242, &mut out),
+            SlottedOutcome::Read { rows_without_id: 0 }
+        );
         assert_eq!(out.len(), 8);
         // Every emitted record should reference the correct page.
         for h in &out {
@@ -499,7 +531,10 @@ mod tests {
             .collect();
         let page = build_slotted_page(&rows);
         let mut out = Vec::new();
-        assert_eq!(slotted(page, 1, &mut out), SlottedOutcome::Read);
+        assert_eq!(
+            slotted(page, 1, &mut out),
+            SlottedOutcome::Read { rows_without_id: 0 }
+        );
         assert_eq!(out.len(), 8);
         let flagged: Vec<_> = out
             .iter()
@@ -538,7 +573,11 @@ mod tests {
             .collect();
         let page = build_slotted_page(&rows);
         let mut out = Vec::new();
-        assert_eq!(slotted(page, 7, &mut out), SlottedOutcome::Read);
+        // S2-21: the seven rows without an ID are counted, not just skipped.
+        assert_eq!(
+            slotted(page, 7, &mut out),
+            SlottedOutcome::Read { rows_without_id: 7 }
+        );
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].qb_id, "0000000000001QBm");
     }
@@ -563,7 +602,10 @@ mod tests {
             .collect();
         let page = build_slotted_page(&rows);
         let mut out = Vec::new();
-        assert_eq!(slotted(page, 9, &mut out), SlottedOutcome::Read);
+        assert_eq!(
+            slotted(page, 9, &mut out),
+            SlottedOutcome::Read { rows_without_id: 7 }
+        );
         // The only "1QBm"/"1QBn" record we expect is the FIRST one.
         let qbm = out.iter().filter(|h| h.qb_id == "0000000000001QBm").count();
         let qbn = out.iter().filter(|h| h.qb_id == "0000000000001QBn").count();

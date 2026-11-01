@@ -58,17 +58,18 @@ against what QuickBooks itself reported (a saved P&L PDF, a
 sales-by-customer report, or a trial balance) before relying on
 the export.
 
-OpenQBW preserves cents (it does not introduce floating-point
-rounding), so reconciliation to the penny is expected.
+OpenQBW keeps values as exact decimals (it does not introduce
+floating-point rounding). The value is the line's numeric value
+field; that it is the line amount is not established, so reconcile
+before relying on it.
 
 ## Mapping notes
 
 - **Dates** are stored as SA-days (days since 1900-01-01 minus an
   offset) in the on-disk format. OpenQBW emits them as ISO-8601
   date strings.
-- **Amounts** are i64 cents on the QB side. Exports preserve
-  this; CSV/IIF outputs include a separate decimal column for
-  readability.
+- **Values** are exact decimals (`+/- coef * 100^e`). Exports write
+  them as decimal text, with the raw bytes in hex beside them.
 - **Foreign keys** are surfaced from the SA17 SYSINDEX catalog
   where present, and via a name-heuristic fallback otherwise.
 - **Deleted records** are not recoverable in general. OpenQBW

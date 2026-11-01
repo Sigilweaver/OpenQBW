@@ -23,6 +23,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::scan::RecordFlag;
 use crate::systable::SysTableEntry;
 
 /// Why [`PageAttribution`] has no usable entries, when it doesn't.
@@ -72,6 +73,7 @@ impl PageAttribution {
         let mut by_root: Vec<SysTableEntry> = catalog
             .into_iter()
             .filter(|e| matches!(e.data_root_page, Some(p) if p > 0))
+            .filter(|e| !e.flags.contains(&RecordFlag::RootPageInvalid))
             .collect();
         let gap = if !by_root.is_empty() {
             None

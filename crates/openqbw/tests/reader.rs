@@ -4,7 +4,7 @@ mod common;
 
 use std::path::PathBuf;
 
-use openqbw::{AmountEncoding, ErrorKind, ReadOptions, Reader, RecordFlag};
+use openqbw::{ErrorKind, ReadOptions, Reader, RecordFlag};
 
 fn fixture_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data")
@@ -14,9 +14,13 @@ fn fixture_dir() -> PathBuf {
 fn committed_fixtures_match_the_generator() {
     // Set OPENQBW_REGEN_FIXTURES=1 to rewrite them after changing the
     // generator.
-    for (name, bad) in [("synthetic.qbw", false), ("synthetic-bad-record.qbw", true)] {
+    let fixtures = [
+        ("synthetic.qbw", common::synthetic_qbw(false)),
+        ("synthetic-bad-record.qbw", common::synthetic_qbw(true)),
+        ("synthetic-counts.qbw", common::synthetic_qbw_counts()),
+    ];
+    for (name, bytes) in fixtures {
         let path = fixture_dir().join(name);
-        let bytes = common::synthetic_qbw(bad);
         if std::env::var_os("OPENQBW_REGEN_FIXTURES").is_some() {
             std::fs::create_dir_all(fixture_dir()).unwrap();
             std::fs::write(&path, &bytes).unwrap();
@@ -42,20 +46,13 @@ fn reads_catalog_headers_and_line_items() {
 
     let lines = r.line_items().unwrap();
     assert!(lines.rejected.is_empty());
-    let amounts: Vec<(Option<i64>, AmountEncoding)> = lines
+    let values: Vec<String> = lines
         .items
         .iter()
-        .map(|l| (l.amount_cents, l.amount_encoding))
+        .map(|l| l.value.expect("decoded").to_string())
         .collect();
-    assert_eq!(
-        amounts,
-        [
-            (Some(266_048), AmountEncoding::UnsignedU24),
-            (Some(266_112), AmountEncoding::UnsignedU24),
-            (Some(77_120), AmountEncoding::SignBitU23),
-            (Some(-77_120), AmountEncoding::SignBitU23),
-        ]
-    );
+    assert_eq!(values, ["415", "-34.45", "145", "-145"]);
+    assert_eq!(lines.items[1].value_raw, [0x02, 0xBF, 0x2D, 0x22]);
     for l in &lines.items {
         assert!(
             !l.flags.contains(&RecordFlag::KeystreamUnverified),
@@ -75,14 +72,35 @@ fn undecodable_record_is_an_error_unless_lenient() {
     let bytes = common::synthetic_qbw(true);
     let strict = Reader::from_bytes(bytes.clone(), &ReadOptions::strict()).unwrap();
     let e = strict.line_items().unwrap_err();
-    assert_eq!(e.kind(), ErrorKind::UnknownAmountType);
+    assert_eq!(e.kind(), ErrorKind::InvalidValueLength);
     assert_eq!(e.page_number(), Some(7));
 
     let lenient = Reader::from_bytes(bytes, &ReadOptions::lenient()).unwrap();
     let scan = lenient.line_items().unwrap();
     assert_eq!(scan.items.len(), 4);
     assert_eq!(scan.rejected.len(), 1);
-    assert_eq!(scan.rejected[0].kind(), ErrorKind::UnknownAmountType);
+    assert_eq!(scan.rejected[0].kind(), ErrorKind::InvalidValueLength);
+}
+
+#[test]
+fn root_page_that_is_not_a_data_page_is_flagged_and_not_used() {
+    // S1-11: a data_root_page that is past the end of the file or not an `E`
+    // page cannot be a table root, but used to move attribution boundaries.
+    let r = Reader::from_bytes(common::synthetic_qbw_bad_root(), &ReadOptions::default()).unwrap();
+    let bogus = r
+        .catalog()
+        .items
+        .iter()
+        .find(|t| t.name == "abmc_bogus")
+        .unwrap();
+    assert!(bogus.flags.contains(&RecordFlag::RootPageInvalid));
+    assert!(r.attribution().attribute(3).is_none());
+    assert!(
+        r.catalog()
+            .warnings
+            .iter()
+            .any(|w| w.kind.as_str() == "invalid_root_pages")
+    );
 }
 
 #[test]
@@ -91,6 +109,30 @@ fn not_a_company_file_is_a_format_error() {
     bytes[0x14] ^= 0xFF;
     let e = Reader::from_bytes(bytes, &ReadOptions::default()).unwrap_err();
     assert_eq!(e.kind(), ErrorKind::BadMagic);
+}
+
+#[test]
+fn reads_the_creation_and_row_stamps() {
+    let r = Reader::from_bytes(common::synthetic_qbw(false), &ReadOptions::default()).unwrap();
+    // Superblock 0x2A holds one minute more than the rows' stamp.
+    assert_eq!(r.created_raw(), 219_745_714);
+    assert_eq!(r.created_unix_seconds(), Some(1_513_744_440));
+    for t in &r.catalog().items {
+        assert_eq!(t.stamp_unix_seconds(), Some(1_513_744_380), "{}", t.name);
+    }
+}
+
+#[test]
+fn foreign_file_that_is_not_page_aligned_reports_the_magic() {
+    // 668672 bytes is the size of the 2001-era file in issue 38; its length is
+    // not a multiple of the page size and its header is not SQL Anywhere's.
+    let mut bytes = vec![0x41u8; 668_672];
+    bytes[0x14..0x18].copy_from_slice(&0x1234_5678u32.to_le_bytes());
+    let e = Reader::from_bytes(bytes, &ReadOptions::default()).unwrap_err();
+    assert_eq!(e.kind(), ErrorKind::BadMagic, "{e}");
+    let msg = e.to_string();
+    assert!(msg.contains("bad superblock magic 0x12345678"), "{msg}");
+    assert!(msg.contains("not supported"), "{msg}");
 }
 
 #[test]
