@@ -25,6 +25,7 @@ progression model needed to attribute pages to tables. Raises
 | `path` | `str` | The filesystem path the reader was opened from. |
 | `page_count` | `int` | Number of pages in the underlying page-store. |
 | `file_size` | `int` | File size in bytes. |
+| `created_unix_seconds` | `int \| None` | Database creation time as Unix seconds (UTC), or `None` when the stamp at superblock offset 0x2A is outside 1990..2100. |
 | `tables()` | `list[dict]` | SYSTABLE catalog rows. |
 | `indexes()` | `list[dict]` | SYSINDEX entries. |
 | `line_items()` | `list[dict]` | Invoice line items, attributed to their source table. |
@@ -33,7 +34,8 @@ progression model needed to attribute pages to tables. Raises
 ### `tables()`
 
 Each dict has `table_id`, `name`, `col_count`, `data_root_page`,
-`last_page`, `page_number`.
+`last_page`, `page_number`, `stamp_unix_seconds` (Unix seconds, UTC, or
+`None` when the row stamp is outside 1990..2100).
 
 ```python
 for t in r.tables()[:5]:
