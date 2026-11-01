@@ -12,7 +12,7 @@
 //! | 4 | `E` | `abmc_invoice_header`: one header |
 //! | 5 | `E` | `abmc_invoice_inventory_lineitem`: two invoice lines |
 //! | 6 | `E` | `abmc_general_journal_inventory_lineitem`: a balanced pair |
-//! | 7 | `E` | same table; with `bad_record`, one anchor with amount type 0x5A |
+//! | 7 | `E` | same table; with `bad_record`, one anchor with value length byte 0x5A |
 //!
 //! The counts variant ([`synthetic_qbw_counts`]) adds a bogus `SYSTABLE` row
 //! (as [`synthetic_qbw_bad_root`]), a line on page 5 whose quantity is 3.0,
@@ -32,7 +32,7 @@ pub const JOURNAL_ID: &str = "0000000000002JRn";
 pub const SA_DAY: u32 = 23_817;
 
 /// The fixture as bytes. With `bad_record`, page 7 holds a line-item anchor
-/// followed by an unknown amount-type byte.
+/// followed by a value length byte above 10.
 pub fn synthetic_qbw(bad_record: bool) -> Vec<u8> {
     build(bad_record, false, false)
 }
@@ -100,7 +100,7 @@ fn build(bad_record: bool, bad_root: bool, counts: bool) -> Vec<u8> {
         0x600,
         HEADER_ID,
         b"ITEM000000000002",
-        [0x02, 0x80, 0x0F, 0x04],
+        [0x02, 0xBF, 0x2D, 0x22],
     );
     if counts {
         put_lineitem(

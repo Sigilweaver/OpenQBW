@@ -123,8 +123,8 @@ impl Reader {
         self.attribution.gap()
     }
 
-    /// Every invoice and journal line item, each attributed to its source
-    /// table and decoded with that table's amount reading.
+    /// Every line item, each attributed to its source table by page position
+    /// (unverified) and carrying its decoded numeric value.
     pub fn line_items(&self) -> Result<Scan<LineItem>> {
         let mut scan = scan_lineitems(
             &self.store,

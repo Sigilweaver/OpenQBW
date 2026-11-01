@@ -76,28 +76,28 @@ pub enum Error {
         /// Underlying failure.
         source: Box<dyn std::error::Error + Send + Sync>,
     },
-    /// A line-item anchor was followed by an amount-type byte that is not
-    /// one of the known codes `0x00..=0x03`. The anchor may be a false
-    /// positive, or the file may use an encoding this crate does not know.
+    /// A line-item anchor was followed by a value-length byte above 10.
+    /// The anchor may be a false positive, or the file may use a layout this
+    /// crate does not know.
     #[error(
-        "page {page_number} offset {page_offset:#x}: unknown amount-type byte {type_byte:#04x} after line-item anchor"
+        "page {page_number} offset {page_offset:#x}: value length byte {length_byte:#04x} after line-item anchor is above 10"
     )]
     #[non_exhaustive]
-    UnknownAmountType {
+    InvalidValueLength {
         /// Page holding the anchor.
         page_number: u64,
         /// Offset of the anchor within the decoded page.
         page_offset: usize,
-        /// The unrecognised type byte.
-        type_byte: u8,
+        /// The length byte.
+        length_byte: u8,
     },
     /// A line-item anchor ends too close to the end of the page data area
-    /// for its 4 amount bytes to be read.
+    /// for its value field to be read.
     #[error(
-        "page {page_number} offset {page_offset:#x}: line-item anchor leaves fewer than 4 bytes for the amount"
+        "page {page_number} offset {page_offset:#x}: line-item anchor leaves too few bytes for the value field"
     )]
     #[non_exhaustive]
-    TruncatedAmount {
+    TruncatedValue {
         /// Page holding the anchor.
         page_number: u64,
         /// Offset of the anchor within the decoded page.
@@ -133,10 +133,10 @@ pub enum ErrorKind {
     BadCrc,
     /// [`Error::Store`]
     Store,
-    /// [`Error::UnknownAmountType`]
-    UnknownAmountType,
-    /// [`Error::TruncatedAmount`]
-    TruncatedAmount,
+    /// [`Error::InvalidValueLength`]
+    InvalidValueLength,
+    /// [`Error::TruncatedValue`]
+    TruncatedValue,
     /// [`Error::ContentOpaque`]
     ContentOpaque,
 }
@@ -152,8 +152,8 @@ impl ErrorKind {
             Self::BadTrailer => "bad_trailer",
             Self::BadCrc => "bad_crc",
             Self::Store => "store",
-            Self::UnknownAmountType => "unknown_amount_type",
-            Self::TruncatedAmount => "truncated_amount",
+            Self::InvalidValueLength => "invalid_value_length",
+            Self::TruncatedValue => "truncated_value",
             Self::ContentOpaque => "content_opaque",
         }
     }
@@ -170,8 +170,8 @@ impl Error {
             Self::BadTrailer { .. } => ErrorKind::BadTrailer,
             Self::BadCrc { .. } => ErrorKind::BadCrc,
             Self::Store { .. } => ErrorKind::Store,
-            Self::UnknownAmountType { .. } => ErrorKind::UnknownAmountType,
-            Self::TruncatedAmount { .. } => ErrorKind::TruncatedAmount,
+            Self::InvalidValueLength { .. } => ErrorKind::InvalidValueLength,
+            Self::TruncatedValue { .. } => ErrorKind::TruncatedValue,
             Self::ContentOpaque { .. } => ErrorKind::ContentOpaque,
         }
     }
@@ -181,8 +181,8 @@ impl Error {
         match self {
             Self::BadCrc { page_number, .. }
             | Self::BadTrailer { page_number }
-            | Self::UnknownAmountType { page_number, .. }
-            | Self::TruncatedAmount { page_number, .. } => Some(*page_number),
+            | Self::InvalidValueLength { page_number, .. }
+            | Self::TruncatedValue { page_number, .. } => Some(*page_number),
             Self::Store { page_number, .. } => *page_number,
             _ => None,
         }
@@ -191,8 +191,8 @@ impl Error {
     /// Byte offset within the decoded page, when known.
     pub fn page_offset(&self) -> Option<usize> {
         match self {
-            Self::UnknownAmountType { page_offset, .. }
-            | Self::TruncatedAmount { page_offset, .. } => Some(*page_offset),
+            Self::InvalidValueLength { page_offset, .. }
+            | Self::TruncatedValue { page_offset, .. } => Some(*page_offset),
             _ => None,
         }
     }

@@ -27,8 +27,8 @@ pub struct Leniency {
 impl Leniency {
     /// Relax nothing.
     pub const STRICT: Leniency = Leniency { bits: 0 };
-    /// Skip a record or page that cannot be decoded (an unknown amount-type
-    /// byte, an amount cut off by the page end, a page that fails to
+    /// Skip a record or page that cannot be decoded (a value-length byte
+    /// above 10, a value field cut off by the page end, a page that fails to
     /// decode) and list it in [`Scan::rejected`] instead of returning the
     /// error.
     pub const RECORDS: Leniency = Leniency { bits: 1 };
@@ -105,12 +105,6 @@ impl ReadOptions {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum RecordFlag {
-    /// The amount's source table has no established encoding, so the amount
-    /// was not decoded.
-    AmountEncodingUnconfirmed,
-    /// The amount type is one whose meaning is not established, so the
-    /// amount was not decoded.
-    AmountTypeUnestablished,
     /// Two or more separate date/counter pairs sat in the search window, so
     /// no date was chosen.
     DateAmbiguous,
@@ -133,8 +127,6 @@ impl RecordFlag {
     /// Stable snake_case name, used in exports.
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::AmountEncodingUnconfirmed => "amount_encoding_unconfirmed",
-            Self::AmountTypeUnestablished => "amount_type_unestablished",
             Self::DateAmbiguous => "date_ambiguous",
             Self::HeaderIdAmbiguous => "header_id_ambiguous",
             Self::KeystreamUnverified => "keystream_unverified",
@@ -206,13 +198,24 @@ pub enum WarningKind {
         rows: u64,
     },
     /// Records whose page is not attributed to any table. Their
-    /// `source_table` is `None` and line-item amounts are not decoded.
+    /// `source_table` is `None`.
     #[non_exhaustive]
     UnattributedRecords {
         /// Records without a source table.
         records: u64,
         /// All records in the scan.
         total: u64,
+    },
+    /// Line items whose value field was kept as raw bytes and not decoded
+    /// (`LineItem::value` is `None`), counted by reason.
+    #[non_exhaustive]
+    UndecodedValues {
+        /// Fields with a digit count of 0.
+        zero_length: u64,
+        /// Fields with a digit byte above 99.
+        digit_over_99: u64,
+        /// Fields with an exponent outside -3..=5.
+        exponent_out_of_range: u64,
     },
     /// Line-item anchors whose quantity field is a plausible value other than
     /// 1.0. The decoder reads only lines with quantity 1.0, so these lines are
@@ -248,6 +251,7 @@ impl WarningKind {
             Self::RecordsOutsideLiveRows { .. } => "records_outside_live_rows",
             Self::HeaderRowsWithoutId { .. } => "header_rows_without_id",
             Self::UnattributedRecords { .. } => "unattributed_records",
+            Self::UndecodedValues { .. } => "undecoded_values",
             Self::LineItemsNotRead { .. } => "line_items_not_read",
             Self::InvalidRootPages { .. } => "invalid_root_pages",
             Self::AttributionGap(_) => "attribution_gap",
@@ -304,7 +308,18 @@ impl fmt::Display for Warning {
             WarningKind::UnattributedRecords { records, total } => write!(
                 f,
                 "{records} of {total} records are on pages not attributed to any table; they \
-                 have no source table and line-item amounts are not decoded"
+                 have no source table"
+            ),
+            WarningKind::UndecodedValues {
+                zero_length,
+                digit_over_99,
+                exponent_out_of_range,
+            } => write!(
+                f,
+                "{} line-item values were not decoded and keep their raw bytes ({zero_length} \
+                 with a digit count of 0, {digit_over_99} with a digit above 99, \
+                 {exponent_out_of_range} with an exponent outside -3..=5)",
+                zero_length + digit_over_99 + exponent_out_of_range
             ),
             WarningKind::LineItemsNotRead { anchors } => write!(
                 f,
@@ -440,13 +455,13 @@ mod tests {
     #[test]
     fn strict_scan_returns_the_rejection() {
         let mut scan: Scan<()> = Scan::default();
-        let e = Error::TruncatedAmount {
+        let e = Error::TruncatedValue {
             page_number: 1,
             page_offset: 2,
         };
         assert!(scan.reject(e, &ReadOptions::strict()).is_err());
         assert!(scan.rejected.is_empty());
-        let e = Error::TruncatedAmount {
+        let e = Error::TruncatedValue {
             page_number: 1,
             page_offset: 2,
         };

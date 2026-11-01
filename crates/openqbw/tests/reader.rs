@@ -4,7 +4,7 @@ mod common;
 
 use std::path::PathBuf;
 
-use openqbw::{AmountEncoding, ErrorKind, ReadOptions, Reader, RecordFlag};
+use openqbw::{ErrorKind, ReadOptions, Reader, RecordFlag};
 
 fn fixture_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data")
@@ -46,20 +46,13 @@ fn reads_catalog_headers_and_line_items() {
 
     let lines = r.line_items().unwrap();
     assert!(lines.rejected.is_empty());
-    let amounts: Vec<(Option<i64>, AmountEncoding)> = lines
+    let values: Vec<String> = lines
         .items
         .iter()
-        .map(|l| (l.amount_cents, l.amount_encoding))
+        .map(|l| l.value.expect("decoded").to_string())
         .collect();
-    assert_eq!(
-        amounts,
-        [
-            (Some(266_048), AmountEncoding::UnsignedU24),
-            (Some(266_112), AmountEncoding::UnsignedU24),
-            (Some(77_120), AmountEncoding::SignBitU23),
-            (Some(-77_120), AmountEncoding::SignBitU23),
-        ]
-    );
+    assert_eq!(values, ["415", "-34.45", "145", "-145"]);
+    assert_eq!(lines.items[1].value_raw, [0x02, 0xBF, 0x2D, 0x22]);
     for l in &lines.items {
         assert!(
             !l.flags.contains(&RecordFlag::KeystreamUnverified),
@@ -79,14 +72,14 @@ fn undecodable_record_is_an_error_unless_lenient() {
     let bytes = common::synthetic_qbw(true);
     let strict = Reader::from_bytes(bytes.clone(), &ReadOptions::strict()).unwrap();
     let e = strict.line_items().unwrap_err();
-    assert_eq!(e.kind(), ErrorKind::UnknownAmountType);
+    assert_eq!(e.kind(), ErrorKind::InvalidValueLength);
     assert_eq!(e.page_number(), Some(7));
 
     let lenient = Reader::from_bytes(bytes, &ReadOptions::lenient()).unwrap();
     let scan = lenient.line_items().unwrap();
     assert_eq!(scan.items.len(), 4);
     assert_eq!(scan.rejected.len(), 1);
-    assert_eq!(scan.rejected[0].kind(), ErrorKind::UnknownAmountType);
+    assert_eq!(scan.rejected[0].kind(), ErrorKind::InvalidValueLength);
 }
 
 #[test]

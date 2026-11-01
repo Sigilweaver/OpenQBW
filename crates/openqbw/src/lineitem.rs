@@ -1,24 +1,34 @@
-//! Invoice line-item record parsing.
+//! Line-item record parsing.
 //!
 //! The lineitem record is anchored by the 25-byte pattern
 //! `00 00 00 00 10 <16 ASCII base62 chars> 00 00 80 3F` where the 16 chars
-//! are the parent invoice's QB-ID and the trailing bytes are a `float32(1.0)`
-//! quantity. Immediately after the anchor sit the typed amount bytes and a
-//! date/counter pair.
+//! are the parent transaction's QB-ID and the trailing bytes are a
+//! `float32(1.0)` quantity. Immediately after the anchor sits a numeric
+//! value field and a date/counter pair.
 //!
-//! Amount-type byte semantics:
-//!   - `0x02`         -- `[type][3 bytes]`, decoded per source table (see
-//!     [`AmountEncoding`]): unsigned u24 on invoice lines, sign-bit u23 on
-//!     general-journal lines, not decoded on any other table
-//!   - `0x01`         -- meaning not established; never decoded
-//!   - `0x03`         -- deferred (raw bytes recorded but not converted)
-//!   - `0x00`         -- non-amount marker (record carries date/counter only)
-//!   - any other byte -- reported as [`Error::UnknownAmountType`]
+//! The value field is the SQL Anywhere NUMERIC encoding, laid out as
+//! `[k][ctrl][k digit bytes]`:
+//!
+//!   - `k` is the digit count, 1 to 10; the field is `2 + k` bytes wide
+//!   - the digits are base 100, least significant first, each 0 to 99, so
+//!     `coef = sum(d[i] * 100^i)`
+//!   - `ctrl & 0x80` is the sign (set is negative) and `(ctrl & 0x7F) - 64`
+//!     is the base-100 exponent `e`
+//!   - the value is `+/- coef * 100^e`, kept exact as a [`Decimal`]
+//!
+//! `k = 0` (`00 81` in practice) is not decoded. A field whose digits, or
+//! whose exponent outside -3..=5, do not fit the layout is not decoded
+//! either; the item keeps its raw bytes and the reason in
+//! [`LineItem::value_undecoded`]. A length byte above 10, or a field cut off
+//! by the page end, is an [`Error`].
+//!
+//! That the value is the line's amount is not established.
 
 use std::ops::Range;
 
 use opensqlany::{ApModel, PageStore};
 
+use crate::decimal::Decimal;
 use crate::decode::{DecodedPage, Directory};
 use crate::error::Error;
 use crate::opaque::count_opaque_pages;
@@ -33,101 +43,117 @@ const QB_ID_LEN: usize = 16;
 const F32_ONE: [u8; 4] = [0x00, 0x00, 0x80, 0x3F];
 const PARENT_PREFIX: [u8; 5] = [0x00, 0x00, 0x00, 0x00, 0x10];
 
-/// How the 3 magnitude bytes of a `0x02` amount are interpreted for the
-/// table a line item came from.
-///
-/// The two readings of the same bytes disagree on about half of all values,
-/// so the reading is chosen per source table and recorded on every item.
+/// Most digit bytes a value field holds.
+const MAX_DIGITS: usize = 10;
+/// Smallest base-100 exponent read as a value.
+const MIN_EXPONENT: i32 = -3;
+/// Largest base-100 exponent read as a value.
+const MAX_EXPONENT: i32 = 5;
+/// Bytes a record's date search skips after the anchor, whatever the width
+/// of the value field.
+const MIN_VALUE_SPAN: usize = 4;
+
+/// Why a value field was kept as raw bytes and not decoded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
-pub enum AmountEncoding {
-    /// `[type][u24 LE]` unsigned cents. Used for invoice line-item tables.
-    UnsignedU24,
-    /// `[type][u23 LE magnitude + sign bit 7 of the first byte]`. Used for the
-    /// general-journal line-item table, where the `verify` pair-balance check
-    /// (`+x` and `-x` lines sum to zero) supports the sign bit.
-    SignBitU23,
-    /// The source table is unknown or has no established reading. The amount
-    /// is not decoded.
-    Unconfirmed,
+pub enum UndecodedReason {
+    /// The digit count is 0 (`00 81` in practice); the field has no digits
+    /// to read, and treating it as zero is not supported by the data.
+    ZeroLength,
+    /// A digit byte is above 99, so the bytes are not base-100 digits.
+    DigitOver99,
+    /// The exponent is outside -3..=5.
+    ExponentOutOfRange,
 }
 
-impl AmountEncoding {
-    /// Source table whose amounts carry a sign bit.
-    pub const JOURNAL_TABLE: &'static str = "abmc_general_journal_inventory_lineitem";
-    /// Source table whose amounts are unsigned.
-    pub const INVOICE_TABLE: &'static str = "abmc_invoice_inventory_lineitem";
-
-    /// Encoding for line items attributed to `source_table`.
-    pub fn for_source_table(source_table: Option<&str>) -> Self {
-        match source_table {
-            Some(Self::JOURNAL_TABLE) => Self::SignBitU23,
-            Some(Self::INVOICE_TABLE) => Self::UnsignedU24,
-            _ => Self::Unconfirmed,
-        }
-    }
-
-    /// Stable lowercase name, used in exports.
+impl UndecodedReason {
+    /// Stable snake_case name, used in exports.
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::UnsignedU24 => "unsigned_u24",
-            Self::SignBitU23 => "sign_bit_u23",
-            Self::Unconfirmed => "unconfirmed",
+            Self::ZeroLength => "zero_length",
+            Self::DigitOver99 => "digit_over_99",
+            Self::ExponentOutOfRange => "exponent_out_of_range",
         }
     }
 }
 
-/// Classification of the amount-type byte in a line item. The raw byte is
-/// [`LineItem::amount_type_byte`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[non_exhaustive]
-pub enum AmountType {
-    /// `0x00` - placeholder. The four bytes are not a cents value.
-    None,
-    /// `0x01` - meaning not established. The amount is never decoded.
-    Unestablished,
-    /// `0x02` - `[0x02][3 amount bytes]`.
-    Standard,
-    /// `0x03` - deferred. Encoding not yet known; only the raw bytes are kept.
-    Deferred,
-}
-
-impl AmountType {
-    /// Classify the leading amount-type byte. `None` for an unknown byte,
-    /// which scanning reports as [`Error::UnknownAmountType`].
-    pub fn from_byte(b: u8) -> Option<Self> {
-        match b {
-            0x00 => Some(Self::None),
-            0x01 => Some(Self::Unestablished),
-            0x02 => Some(Self::Standard),
-            0x03 => Some(Self::Deferred),
-            _ => None,
-        }
+impl std::fmt::Display for UndecodedReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
-/// Decode `[type][3 bytes]` under `encoding`. Only type `0x02` on a table
-/// with an established encoding yields a value.
-fn decode_amount(ty: AmountType, encoding: AmountEncoding, raw: &[u8; 4]) -> Option<i64> {
-    if ty != AmountType::Standard {
-        return None;
-    }
-    let hi = (raw[2] as i64) | ((raw[3] as i64) << 8);
-    match encoding {
-        AmountEncoding::UnsignedU24 => Some((raw[1] as i64) | (hi << 8)),
-        AmountEncoding::SignBitU23 => {
-            let mag = ((raw[1] & 0x7F) as i64) | (hi << 8);
-            Some(if raw[1] & 0x80 != 0 { -mag } else { mag })
-        }
-        _ => None,
-    }
+/// A value field as read from a page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ValueField {
+    /// The field's bytes: `[k][ctrl][digits]`, or just `[0][ctrl]`.
+    raw: Vec<u8>,
+    /// The decoded value, or why it was not decoded.
+    value: Result<Decimal, UndecodedReason>,
 }
 
-/// Parsed invoice line-item record.
+/// Read the value field at `at` in `body`. `anchor` is the offset of the
+/// record's anchor, named in errors.
+fn read_value(body: &[u8], at: usize, pn: u64, anchor: usize) -> Result<ValueField, Error> {
+    let truncated = || Error::TruncatedValue {
+        page_number: pn,
+        page_offset: anchor,
+    };
+    let (&k, &ctrl) = match (body.get(at), body.get(at + 1)) {
+        (Some(k), Some(ctrl)) => (k, ctrl),
+        _ => return Err(truncated()),
+    };
+    let k = k as usize;
+    if k > MAX_DIGITS {
+        return Err(Error::InvalidValueLength {
+            page_number: pn,
+            page_offset: anchor,
+            length_byte: k as u8,
+        });
+    }
+    let Some(raw) = body.get(at..at + 2 + k) else {
+        return Err(truncated());
+    };
+    let raw = raw.to_vec();
+    if k == 0 {
+        return Ok(ValueField {
+            raw,
+            value: Err(UndecodedReason::ZeroLength),
+        });
+    }
+    let value = numeric_value(ctrl, &raw[2..]);
+    Ok(ValueField { raw, value })
+}
+
+/// The value of `digits` (base 100, least significant first) under the
+/// control byte `ctrl`.
+fn numeric_value(ctrl: u8, digits: &[u8]) -> Result<Decimal, UndecodedReason> {
+    if digits.iter().any(|&d| d > 99) {
+        return Err(UndecodedReason::DigitOver99);
+    }
+    let exponent = i32::from(ctrl & 0x7F) - 64;
+    if !(MIN_EXPONENT..=MAX_EXPONENT).contains(&exponent) {
+        return Err(UndecodedReason::ExponentOutOfRange);
+    }
+    // At most ten digits: the coefficient is below 10^20 and, at the largest
+    // exponent, the value below 10^30, so i128 holds every case.
+    let coef = digits
+        .iter()
+        .rev()
+        .fold(0i128, |acc, &d| acc * 100 + i128::from(d));
+    let sign = if ctrl & 0x80 != 0 { -1 } else { 1 };
+    Ok(if exponent >= 0 {
+        Decimal::new(sign * coef * 100i128.pow(exponent as u32), 0)
+    } else {
+        Decimal::new(sign * coef, exponent.unsigned_abs() * 2)
+    })
+}
+
+/// Parsed line-item record.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct LineItem {
-    /// Parent invoice QB-ID (16 base62 characters).
+    /// Parent transaction QB-ID (16 base62 characters).
     pub invoice_id: String,
     /// Source page number in the QBW file.
     pub page_number: u64,
@@ -135,18 +161,15 @@ pub struct LineItem {
     pub page_offset: usize,
     /// Item QB-ID - the line item's own identifier, when discovered.
     pub item_qb_id: Option<String>,
-    /// Amount-type classification.
-    pub amount_type: AmountType,
-    /// Reading applied to the amount bytes, chosen from `source_table`.
-    pub amount_encoding: AmountEncoding,
-    /// Amount in cents under `amount_encoding`. `None` when the amount type
-    /// carries no cents value (`0x00`, `0x03`), when its meaning is not
-    /// established (`0x01`), or when `amount_encoding` is
-    /// [`AmountEncoding::Unconfirmed`]. Callers must treat `None` as
-    /// "unknown", not zero.
-    pub amount_cents: Option<i64>,
-    /// Raw 4 bytes immediately following the float32(1.0) quantity.
-    pub amount_raw: [u8; 4],
+    /// The numeric value field, exact. `None` when the field was not decoded
+    /// (see `value_undecoded`); callers must treat `None` as "unknown", not
+    /// zero. That this value is the line's amount is not established.
+    pub value: Option<Decimal>,
+    /// Why `value` is `None`; `None` when it was decoded.
+    pub value_undecoded: Option<UndecodedReason>,
+    /// The bytes of the value field, `[k][ctrl][k digit bytes]` (just
+    /// `[k][ctrl]` when `k` is 0).
+    pub value_raw: Vec<u8>,
     /// SA17 transaction date (SA-day), set only when `date_source` is
     /// [`DateSource::WindowScan`].
     pub txn_date_raw: Option<u32>,
@@ -156,63 +179,34 @@ pub struct LineItem {
     /// date and counter unset.
     pub date_source: DateSource,
     /// Owning `SYSTABLE` name (e.g. `abmc_invoice_inventory_lineitem`) when
-    /// the line item's page was attributable; `None` otherwise.
+    /// the line item's page was attributable; `None` otherwise. The
+    /// attribution is by page position only and is unverified: the
+    /// content-based cross-check (`verify --strict-attribution`) agrees
+    /// with it on a small share of pages.
     pub source_table: Option<String>,
     /// Reasons this record deserves less trust. Empty when no check flagged it.
     pub flags: Vec<RecordFlag>,
 }
 
 impl LineItem {
-    /// The raw amount-type byte that followed the anchor.
-    pub fn amount_type_byte(&self) -> u8 {
-        self.amount_raw[0]
-    }
-
-    /// Build a record with the given invoice id, source table and decoded
-    /// amount, all other fields empty. For tests and tools that need to
-    /// synthesize records; scans never call it.
+    /// Build a record with the given invoice id, source table and value, all
+    /// other fields empty. For tests and tools that need to synthesize
+    /// records; scans never call it.
     #[doc(hidden)]
-    pub fn synthetic(
-        invoice_id: &str,
-        source_table: Option<&str>,
-        amount_cents: Option<i64>,
-    ) -> Self {
+    pub fn synthetic(invoice_id: &str, source_table: Option<&str>, value: Option<Decimal>) -> Self {
         Self {
             invoice_id: invoice_id.to_owned(),
             page_number: 0,
             page_offset: 0,
             item_qb_id: None,
-            amount_type: AmountType::Standard,
-            amount_encoding: AmountEncoding::for_source_table(source_table),
-            amount_cents,
-            amount_raw: [0; 4],
+            value,
+            value_undecoded: value.is_none().then_some(UndecodedReason::ZeroLength),
+            value_raw: Vec::new(),
             txn_date_raw: None,
             counter: None,
             date_source: DateSource::NotFound,
             source_table: source_table.map(str::to_owned),
             flags: Vec::new(),
-        }
-    }
-
-    /// Attribute the item to `source_table` and decode its amount with the
-    /// reading that fits that table.
-    fn set_source_table(&mut self, source_table: Option<String>) {
-        self.amount_encoding = AmountEncoding::for_source_table(source_table.as_deref());
-        self.source_table = source_table;
-        self.amount_cents = decode_amount(self.amount_type, self.amount_encoding, &self.amount_raw);
-        self.flags.retain(|f| {
-            !matches!(
-                f,
-                RecordFlag::AmountEncodingUnconfirmed | RecordFlag::AmountTypeUnestablished
-            )
-        });
-        if self.amount_type == AmountType::Standard
-            && self.amount_encoding == AmountEncoding::Unconfirmed
-        {
-            self.flags.push(RecordFlag::AmountEncodingUnconfirmed);
-        }
-        if self.amount_type == AmountType::Unestablished {
-            self.flags.push(RecordFlag::AmountTypeUnestablished);
         }
     }
 
@@ -227,8 +221,7 @@ impl LineItem {
 }
 
 /// Collect every line item in `store`, tagging each with the table its page
-/// is attributed to (when `attribution` is given) and decoding its amount
-/// with the reading for that table.
+/// is attributed to (when `attribution` is given).
 ///
 /// In strict mode the first undecodable record or page is returned as an
 /// error. Under [`Leniency::RECORDS`](crate::Leniency::RECORDS) each is
@@ -287,6 +280,22 @@ pub(crate) fn scan_lineitems(
         scan.warnings
             .push(Warning::new(WarningKind::LineItemsNotRead {
                 anchors: other_quantity,
+            }));
+    }
+    let mut undecoded = [0u64; 3];
+    for reason in scan.items.iter().filter_map(|li| li.value_undecoded) {
+        match reason {
+            UndecodedReason::ZeroLength => undecoded[0] += 1,
+            UndecodedReason::DigitOver99 => undecoded[1] += 1,
+            UndecodedReason::ExponentOutOfRange => undecoded[2] += 1,
+        }
+    }
+    if undecoded.iter().any(|&n| n > 0) {
+        scan.warnings
+            .push(Warning::new(WarningKind::UndecodedValues {
+                zero_length: undecoded[0],
+                digit_over_99: undecoded[1],
+                exponent_out_of_range: undecoded[2],
             }));
     }
     let unattributed = scan
@@ -373,9 +382,7 @@ fn page_lineitems(decoded: &DecodedPage, source: Option<String>) -> Result<PageL
         let span = li.page_offset.saturating_sub(96)
             ..(li.page_offset + ANCHOR_LEN + 64).min(PAGE_DATA_END);
         li.flags.extend(decoded.flags_for(span));
-        if source.is_some() {
-            li.set_source_table(source.clone());
-        }
+        li.source_table = source.clone();
         out.records.push(Ok(li));
     }
     Ok(out)
@@ -470,26 +477,12 @@ fn parse_anchor(
         .to_owned();
 
     let payload_start = anchor_start + ANCHOR_LEN;
-    if payload_start + 4 > body.len() {
-        return Err(Error::TruncatedAmount {
-            page_number: pn,
-            page_offset: anchor_start,
-        });
-    }
-    let mut amount_raw = [0u8; 4];
-    amount_raw.copy_from_slice(&body[payload_start..payload_start + 4]);
-    let Some(amount_type) = AmountType::from_byte(amount_raw[0]) else {
-        return Err(Error::UnknownAmountType {
-            page_number: pn,
-            page_offset: anchor_start,
-            type_byte: amount_raw[0],
-        });
-    };
+    let field = read_value(body, payload_start, pn, anchor_start)?;
 
-    // Forward search for a date+counter pair after the amount bytes.
+    // Forward search for a date+counter pair after the value field.
     let scan = scan_date_counter(
         body,
-        payload_start + 4,
+        payload_start + field.raw.len().max(MIN_VALUE_SPAN),
         (payload_start + 64).min(ceil.saturating_sub(7)),
         1_000_000,
     );
@@ -504,17 +497,15 @@ fn parse_anchor(
         page_number: pn,
         page_offset: anchor_start,
         item_qb_id,
-        amount_type,
-        amount_encoding: AmountEncoding::Unconfirmed,
-        amount_cents: None,
-        amount_raw,
+        value: field.value.ok(),
+        value_undecoded: field.value.err(),
+        value_raw: field.raw,
         txn_date_raw: scan.date,
         counter: scan.counter,
         date_source: scan.source,
         source_table: None,
         flags: Vec::new(),
     };
-    li.set_source_table(None);
     if li.date_source == DateSource::Ambiguous {
         li.flags.push(RecordFlag::DateAmbiguous);
     }
@@ -545,47 +536,124 @@ fn find_item_id_nearest(window: &[u8]) -> Option<String> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn amount_type_classification() {
-        assert_eq!(AmountType::from_byte(0x00), Some(AmountType::None));
-        assert_eq!(AmountType::from_byte(0x01), Some(AmountType::Unestablished));
-        assert_eq!(AmountType::from_byte(0x02), Some(AmountType::Standard));
-        assert_eq!(AmountType::from_byte(0x03), Some(AmountType::Deferred));
-        assert_eq!(AmountType::from_byte(0x42), None);
+    /// Decode `payload` as a value field in the middle of a page.
+    fn value_of(payload: &[u8]) -> Result<ValueField, Error> {
+        let mut body = [0u8; 64];
+        let end = payload.len().min(body.len() - 8);
+        body[8..8 + end].copy_from_slice(&payload[..end]);
+        read_value(&body[..8 + payload.len()], 8, 7, 0)
     }
 
-    #[test]
-    fn decode_known_record_both_readings() {
-        // 02 40 0f 04: unsigned 0x040f40 = 266,048 ($2,660.48).
-        let raw = [0x02, 0x40, 0x0F, 0x04];
-        let u = decode_amount(AmountType::Standard, AmountEncoding::UnsignedU24, &raw);
-        assert_eq!(u, Some(266_048));
-    }
-
-    #[test]
-    fn type_03_has_no_cents() {
-        let raw = [0x03, 0xBF, 0x5F, 0x63];
-        for e in [AmountEncoding::UnsignedU24, AmountEncoding::SignBitU23] {
-            assert_eq!(decode_amount(AmountType::Deferred, e, &raw), None);
+    fn decoded(payload: &[u8]) -> String {
+        match value_of(payload).unwrap().value {
+            Ok(v) => v.to_string(),
+            Err(r) => format!("undecoded: {r}"),
         }
     }
 
     #[test]
-    fn sign_bit_pairs_sum_to_zero() {
-        // C.48 example: paired 2-line journal lines must sum to zero.
-        let pos = [0x02, 0x40, 0x2D, 0x01];
-        let neg = [0x02, 0xC0, 0x2D, 0x01];
-        let e = AmountEncoding::SignBitU23;
-        let a = decode_amount(AmountType::Standard, e, &pos).unwrap();
-        let b = decode_amount(AmountType::Standard, e, &neg).unwrap();
-        assert_eq!((a, b), (77_120, -77_120));
+    fn issue_22_examples_decode() {
+        assert_eq!(decoded(&[0x02, 0x40, 0x08, 0x02]), "208");
+        assert_eq!(decoded(&[0x01, 0x41, 0x03]), "300");
+        assert_eq!(decoded(&[0x02, 0x3F, 0x2F, 0x4B]), "75.47");
     }
 
     #[test]
-    fn sign_bit_magnitude_reaches_23_bits() {
-        let raw = [0x02, 0x7F, 0xFF, 0xFF];
-        let v = decode_amount(AmountType::Standard, AmountEncoding::SignBitU23, &raw);
-        assert_eq!(v, Some(16_777_087));
+    fn real_data_shapes_decode() {
+        assert_eq!(decoded(&[0x02, 0xBF, 0x2D, 0x22]), "-34.45");
+        assert_eq!(decoded(&[0x03, 0x3F, 0x39, 0x56, 0x2F]), "4786.57");
+        assert_eq!(decoded(&[0x02, 0xC0, 0x3C, 0x09]), "-960");
+        assert_eq!(decoded(&[0x01, 0x41, 0x12]), "1800");
+        assert_eq!(decoded(&[0x03, 0xBF, 0x32, 0x31, 0x03]), "-349.5");
+    }
+
+    #[test]
+    fn field_width_is_two_plus_the_digit_count() {
+        let f = value_of(&[0x03, 0x3F, 0x39, 0x56, 0x2F]).unwrap();
+        assert_eq!(f.raw, [0x03, 0x3F, 0x39, 0x56, 0x2F]);
+        let f = value_of(&[0x02, 0x40, 0x08, 0x02, 0xEE, 0xEE]).unwrap();
+        assert_eq!(f.raw, [0x02, 0x40, 0x08, 0x02]);
+    }
+
+    #[test]
+    fn extreme_valid_fields_are_exact() {
+        // Ten 99 digits at the largest exponent.
+        let mut p = vec![0x0A, 0x40 + 5];
+        p.extend([99u8; 10]);
+        assert_eq!(
+            decoded(&p),
+            "99999999999999999999".to_owned() + "0000000000"
+        );
+        // Smallest exponent: two decimal places per step, three steps.
+        assert_eq!(decoded(&[0x01, 0x40 - 3, 0x01]), "0.000001");
+        assert_eq!(decoded(&[0x01, 0xC0 - 3, 0x01]), "-0.000001");
+    }
+
+    #[test]
+    fn a_zero_coefficient_is_zero_whatever_the_sign() {
+        assert_eq!(decoded(&[0x01, 0x40, 0x00]), "0");
+        assert_eq!(decoded(&[0x02, 0xC0, 0x00, 0x00]), "0");
+    }
+
+    #[test]
+    fn zero_length_field_is_undecoded_and_keeps_its_bytes() {
+        let f = value_of(&[0x00, 0x81, 0x07, 0x07]).unwrap();
+        assert_eq!(f.value, Err(UndecodedReason::ZeroLength));
+        assert_eq!(f.raw, [0x00, 0x81]);
+    }
+
+    #[test]
+    fn digit_above_99_is_undecoded() {
+        let f = value_of(&[0x02, 0x40, 0x08, 0x64]).unwrap();
+        assert_eq!(f.value, Err(UndecodedReason::DigitOver99));
+        assert_eq!(f.raw, [0x02, 0x40, 0x08, 0x64]);
+    }
+
+    #[test]
+    fn exponent_outside_range_is_undecoded() {
+        // 0x40 - 4 is e = -4; 0x40 + 6 is e = 6; 0x80 and 0x00 are -64.
+        for ctrl in [0x3Cu8, 0x46, 0x80, 0x00, 0x7F, 0xC6] {
+            let f = value_of(&[0x01, ctrl, 0x01]).unwrap();
+            assert_eq!(
+                f.value,
+                Err(UndecodedReason::ExponentOutOfRange),
+                "{ctrl:#x}"
+            );
+        }
+        for ctrl in [0x3Du8, 0x45, 0xBD, 0xC5] {
+            assert!(
+                value_of(&[0x01, ctrl, 0x01]).unwrap().value.is_ok(),
+                "{ctrl:#x}"
+            );
+        }
+    }
+
+    #[test]
+    fn length_above_ten_is_an_error() {
+        // 0x04 and the lengths up to ten are digit counts now.
+        assert!(value_of(&[0x04, 0x40, 1, 2, 3, 4]).unwrap().value.is_ok());
+        let mut p = vec![0x0B, 0x40];
+        p.extend([1u8; 11]);
+        assert!(matches!(
+            value_of(&p).unwrap_err(),
+            Error::InvalidValueLength {
+                page_number: 7,
+                page_offset: 0,
+                length_byte: 0x0B
+            }
+        ));
+    }
+
+    #[test]
+    fn field_cut_off_by_the_page_end_is_an_error() {
+        for payload in [&[][..], &[0x02][..], &[0x02, 0x40, 0x08][..], &[0x00][..]] {
+            assert!(
+                matches!(value_of(payload).unwrap_err(), Error::TruncatedValue { .. }),
+                "{payload:?}"
+            );
+        }
+        // A zero-length field needs only its two bytes.
+        assert!(value_of(&[0x00, 0x81]).is_ok());
     }
 
     #[test]
@@ -640,56 +708,14 @@ mod tests {
 
         let li = scan_one(&body).unwrap();
         assert_eq!(li.invoice_id, "0000000000001QBm");
-        assert_eq!(li.amount_type, AmountType::Standard);
-        assert_eq!(li.amount_type_byte(), 0x02);
-        assert_eq!(li.amount_raw, [0x02, 0x40, 0x0F, 0x04]);
+        assert_eq!(li.value_raw, [0x02, 0x40, 0x0F, 0x04]);
+        assert_eq!(li.value.unwrap().to_string(), "415");
+        assert_eq!(li.value_undecoded, None);
         assert_eq!(li.txn_date_raw, Some(15511));
         assert_eq!(li.counter, Some(12671));
         assert_eq!(li.date_source, DateSource::WindowScan);
-        // No source table: the reading is not established, so no amount.
-        assert_eq!(li.amount_encoding, AmountEncoding::Unconfirmed);
-        assert_eq!(li.amount_cents, None);
-    }
-
-    #[test]
-    fn journal_line_decodes_with_sign_bit() {
-        // C.48 pair: 02 40 2d 01 = +771.20 and 02 c0 2d 01 = -771.20.
-        // The unsigned reading of the second would be +772.48.
-        let mut pos = scan_one(&anchor_body(PAGE_DATA_END, 32, &[0x02, 0x40, 0x2D, 0x01])).unwrap();
-        let mut neg = scan_one(&anchor_body(PAGE_DATA_END, 32, &[0x02, 0xC0, 0x2D, 0x01])).unwrap();
-        pos.set_source_table(Some(AmountEncoding::JOURNAL_TABLE.to_owned()));
-        neg.set_source_table(Some(AmountEncoding::JOURNAL_TABLE.to_owned()));
-        assert_eq!(pos.amount_encoding, AmountEncoding::SignBitU23);
-        assert_eq!(pos.amount_cents, Some(77_120));
-        assert_eq!(neg.amount_cents, Some(-77_120));
-    }
-
-    #[test]
-    fn invoice_line_decodes_unsigned() {
-        // 02 80 0f 04 is $2,661.12 on an invoice line; the sign-bit reading
-        // would give -$2,659.84.
-        let mut li = scan_one(&anchor_body(PAGE_DATA_END, 32, &[0x02, 0x80, 0x0F, 0x04])).unwrap();
-        li.set_source_table(Some(AmountEncoding::INVOICE_TABLE.to_owned()));
-        assert_eq!(li.amount_encoding, AmountEncoding::UnsignedU24);
-        assert_eq!(li.amount_cents, Some(266_112));
-    }
-
-    #[test]
-    fn unlisted_table_leaves_amount_unknown() {
-        let mut li = scan_one(&anchor_body(PAGE_DATA_END, 32, &[0x02, 0x80, 0x0F, 0x04])).unwrap();
-        li.set_source_table(Some("abmc_credit_memo_inventory_lineitem".to_owned()));
-        assert_eq!(li.amount_encoding, AmountEncoding::Unconfirmed);
-        assert_eq!(li.amount_cents, None);
-    }
-
-    #[test]
-    fn types_without_cents_stay_unknown_on_known_tables() {
-        for first in [0x00u8, 0x01, 0x03] {
-            let mut li =
-                scan_one(&anchor_body(PAGE_DATA_END, 32, &[first, 0x80, 0x0F, 0x04])).unwrap();
-            li.set_source_table(Some(AmountEncoding::INVOICE_TABLE.to_owned()));
-            assert_eq!(li.amount_cents, None, "type {first:#x}");
-        }
+        // No attribution is needed to decode the value.
+        assert_eq!(li.source_table, None);
     }
 
     #[test]
@@ -764,14 +790,14 @@ mod tests {
     }
 
     #[test]
-    fn unknown_amount_type_is_an_error() {
+    fn invalid_value_length_is_an_error() {
         let err = scan_one(&anchor_body(PAGE_DATA_END, 32, &[0x5A, 0x01, 0x02, 0x03])).unwrap_err();
         assert!(matches!(
             err,
-            Error::UnknownAmountType {
+            Error::InvalidValueLength {
                 page_number: 7,
                 page_offset: 32,
-                type_byte: 0x5A
+                length_byte: 0x5A
             }
         ));
     }
@@ -785,9 +811,7 @@ mod tests {
             &[0x02, 0x40, 0x0F, 0x04],
         ))
         .unwrap();
-        assert_eq!(li.amount_type, AmountType::Standard);
-        assert_eq!(li.amount_type_byte(), 0x02);
-        assert_eq!(li.amount_raw, [0x02, 0x40, 0x0F, 0x04]);
+        assert_eq!(li.value_raw, [0x02, 0x40, 0x0F, 0x04]);
     }
 
     #[test]
@@ -798,7 +822,7 @@ mod tests {
             &[0x02, 0x40],
         ))
         .unwrap_err();
-        assert!(matches!(err, Error::TruncatedAmount { .. }));
+        assert!(matches!(err, Error::TruncatedValue { .. }));
     }
 
     /// A plaintext page whose prelude-confirmed slot directory at 0x100 has
@@ -968,6 +992,52 @@ mod tests {
             == WarningKind::UnattributedRecords {
                 records: 1,
                 total: 1
+            }));
+    }
+
+    #[test]
+    fn undecoded_values_are_counted_by_reason() {
+        // Three fields that cannot be decoded, one of each reason, and one
+        // that can: the scan counts each reason.
+        let mut plain = vec![0u8; 4096];
+        for (at, payload) in [
+            (0x200, &[0x00u8, 0x81, 0x00, 0x00][..]),
+            (0x400, &[0x02, 0x40, 0x08, 0x64][..]),
+            (0x600, &[0x01, 0x80, 0x01][..]),
+            (0x800, &[0x02, 0x40, 0x0F, 0x04][..]),
+        ] {
+            put_anchor(&mut plain, at);
+            plain[at + 25..at + 25 + payload.len()].copy_from_slice(payload);
+        }
+        plain[0xF00..0xF04].copy_from_slice(&[0x00, 0x00, 0xD5, 0x0B]);
+        plain[0xFF2] = b'E';
+        let bias = 0u8; // page 1
+        for (i, b) in plain[..PAGE_DATA_END].iter_mut().enumerate() {
+            *b = b.wrapping_add(0x5Au8.wrapping_add(1 + (i / 512) as u8).wrapping_sub(bias));
+        }
+        let mut bytes = vec![0u8; 4096];
+        bytes.extend(plain);
+        let store = crate::testutil::sealed_store(bytes);
+        let model = crate::testutil::lenient_model(&store);
+        let attribution = PageAttribution::from_catalog(Vec::new());
+        let scan =
+            scan_lineitems(&store, &model, Some(&attribution), &ReadOptions::strict()).unwrap();
+        assert_eq!(scan.items.len(), 4);
+        let reasons: Vec<_> = scan.items.iter().map(|li| li.value_undecoded).collect();
+        assert_eq!(
+            reasons,
+            [
+                Some(UndecodedReason::ZeroLength),
+                Some(UndecodedReason::DigitOver99),
+                Some(UndecodedReason::ExponentOutOfRange),
+                None
+            ]
+        );
+        assert!(scan.warnings.iter().any(|w| w.kind
+            == WarningKind::UndecodedValues {
+                zero_length: 1,
+                digit_over_99: 1,
+                exponent_out_of_range: 1
             }));
     }
 

@@ -7,6 +7,7 @@ company file is involved.
 import inspect
 import pathlib
 import warnings
+from decimal import Decimal
 
 import pytest
 
@@ -52,9 +53,15 @@ def test_reads_the_synthetic_file():
     ]
     assert len(lines) == 4
     assert lines.rejected == []
-    assert [li.amount_cents for li in lines] == [266048, 266112, 77120, -77120]
-    assert lines[2].amount_encoding == "sign_bit_u23"
-    assert lines[0].amount_raw == bytes([0x02, 0x40, 0x0F, 0x04])
+    assert [li.value for li in lines] == [
+        Decimal("415"),
+        Decimal("-34.45"),
+        Decimal("145"),
+        Decimal("-145"),
+    ]
+    assert all(li.value_undecoded is None for li in lines)
+    assert lines[1].value_raw == bytes([0x02, 0xBF, 0x2D, 0x22])
+    assert lines[1].to_dict()["value"] == Decimal("-34.45")
     assert lines[0].txn_date_days_since_unix == 19800
     assert lines[0].to_dict()["invoice_id"] == "0000000000001QBm"
     assert [t.txn_type for t in txns] == ["invoice"]
@@ -65,14 +72,14 @@ def test_undecodable_record_raises_unless_lenient():
     r = openqbw.open(BAD)
     with pytest.raises(openqbw.RecordError) as exc:
         r.line_items()
-    assert exc.value.kind == "unknown_amount_type"
+    assert exc.value.kind == "invalid_value_length"
     assert exc.value.page_number == 7
 
     r = openqbw.open(BAD, lenient=True)
     with pytest.warns(openqbw.OpenQBWWarning):
         lines = r.line_items()
     assert len(lines) == 4
-    assert [x.kind for x in lines.rejected] == ["unknown_amount_type"]
+    assert [x.kind for x in lines.rejected] == ["invalid_value_length"]
 
 
 def test_missing_file_is_an_os_error(tmp_path):

@@ -32,7 +32,7 @@ fn to_py_err(py: Python<'_>, e: &openqbw_rs::Error, path: Option<&PathBuf>) -> P
 fn build_py_err(py: Python<'_>, e: &openqbw_rs::Error, path: Option<&PathBuf>) -> PyResult<PyErr> {
     let class = match e.kind() {
         ErrorKind::Io => "OpenQBWIOError",
-        ErrorKind::UnknownAmountType | ErrorKind::TruncatedAmount => "RecordError",
+        ErrorKind::InvalidValueLength | ErrorKind::TruncatedValue => "RecordError",
         ErrorKind::ContentOpaque => "ContentError",
         ErrorKind::BadMagic
         | ErrorKind::UnsupportedVersion
@@ -66,7 +66,7 @@ fn warn(py: Python<'_>, msg: &str) -> PyResult<()> {
 #[pyclass(module = "openqbw", frozen, get_all)]
 #[derive(Clone)]
 struct Rejected {
-    /// Stable error code, for example `"unknown_amount_type"`.
+    /// Stable error code, for example `"invalid_value_length"`.
     kind: String,
     page_number: Option<u64>,
     page_offset: Option<usize>,
@@ -171,13 +171,17 @@ impl ScanReport {
 
 /// Build a report, issuing an `OpenQBWWarning` for the skipped records and
 /// for each run-level warning.
-fn report<T, P>(py: Python<'_>, scan: &Scan<T>, to_py: impl Fn(&T) -> P) -> PyResult<ScanReport>
+fn report<T, P>(
+    py: Python<'_>,
+    scan: &Scan<T>,
+    to_py: impl Fn(&T) -> PyResult<P>,
+) -> PyResult<ScanReport>
 where
     P: pyo3::PyClass + Into<pyo3::PyClassInitializer<P>>,
 {
     let items = PyList::empty(py);
     for t in &scan.items {
-        items.append(Py::new(py, to_py(t))?)?;
+        items.append(Py::new(py, to_py(t)?)?)?;
     }
     let rejected: Vec<Rejected> = scan
         .rejected
@@ -231,11 +235,13 @@ fn flag_names(flags: &[openqbw_rs::RecordFlag]) -> Vec<String> {
 struct LineItem {
     invoice_id: String,
     item_qb_id: Option<String>,
-    /// Cents under `amount_encoding`; `None` means not decoded, not zero.
-    amount_cents: Option<i64>,
-    amount_encoding: String,
-    amount_type: u8,
-    amount_raw: Py<PyBytes>,
+    /// The numeric value field as a `decimal.Decimal`, exact; `None` means
+    /// not decoded, not zero. Not established as the line's amount.
+    value: Option<Py<PyAny>>,
+    /// Why `value` is `None` (`zero_length`, `digit_over_99` or
+    /// `exponent_out_of_range`); `None` when it is decoded.
+    value_undecoded: Option<String>,
+    value_raw: Py<PyBytes>,
     txn_date_raw: Option<u32>,
     counter: Option<u32>,
     date_source: String,
@@ -247,14 +253,22 @@ struct LineItem {
 }
 
 impl LineItem {
-    fn new(py: Python<'_>, li: &RsLineItem) -> Self {
-        Self {
+    fn new(py: Python<'_>, li: &RsLineItem) -> PyResult<Self> {
+        let value = match li.value {
+            Some(v) => Some(
+                py.import("decimal")?
+                    .getattr("Decimal")?
+                    .call1((v.to_string(),))?
+                    .unbind(),
+            ),
+            None => None,
+        };
+        Ok(Self {
             invoice_id: li.invoice_id.clone(),
             item_qb_id: li.item_qb_id.clone(),
-            amount_cents: li.amount_cents,
-            amount_encoding: li.amount_encoding.as_str().to_owned(),
-            amount_type: li.amount_type_byte(),
-            amount_raw: PyBytes::new(py, &li.amount_raw).unbind(),
+            value,
+            value_undecoded: li.value_undecoded.map(|r| r.as_str().to_owned()),
+            value_raw: PyBytes::new(py, &li.value_raw).unbind(),
             txn_date_raw: li.txn_date_raw,
             counter: li.counter,
             date_source: li.date_source.as_str().to_owned(),
@@ -263,7 +277,7 @@ impl LineItem {
             page_number: li.page_number,
             page_offset: li.page_offset,
             flags: flag_names(&li.flags),
-        }
+        })
     }
 }
 
@@ -273,10 +287,9 @@ impl LineItem {
         let d = PyDict::new(py);
         d.set_item("invoice_id", &self.invoice_id)?;
         d.set_item("item_qb_id", &self.item_qb_id)?;
-        d.set_item("amount_cents", self.amount_cents)?;
-        d.set_item("amount_encoding", &self.amount_encoding)?;
-        d.set_item("amount_type", self.amount_type)?;
-        d.set_item("amount_raw", self.amount_raw.bind(py))?;
+        d.set_item("value", self.value.as_ref().map(|v| v.bind(py)))?;
+        d.set_item("value_undecoded", &self.value_undecoded)?;
+        d.set_item("value_raw", self.value_raw.bind(py))?;
         d.set_item("txn_date_raw", self.txn_date_raw)?;
         d.set_item("counter", self.counter)?;
         d.set_item("date_source", &self.date_source)?;
@@ -288,10 +301,17 @@ impl LineItem {
         Ok(d)
     }
 
-    fn __repr__(&self) -> String {
+    fn __repr__(&self, py: Python<'_>) -> String {
+        let value = match &self.value {
+            Some(v) => v
+                .bind(py)
+                .str()
+                .map_or_else(|_| "?".to_owned(), |s| s.to_string()),
+            None => "None".to_owned(),
+        };
         format!(
-            "<openqbw.LineItem invoice_id={} amount_cents={:?} source_table={:?}>",
-            self.invoice_id, self.amount_cents, self.source_table
+            "<openqbw.LineItem invoice_id={} value={} source_table={:?}>",
+            self.invoice_id, value, self.source_table
         )
     }
 }
@@ -500,13 +520,13 @@ impl Reader {
 
     /// The `SYSTABLE` catalog, as a `ScanReport` of `Table`.
     fn tables(&self, py: Python<'_>) -> PyResult<ScanReport> {
-        report(py, self.inner.catalog(), Table::new)
+        report(py, self.inner.catalog(), |t| Ok(Table::new(t)))
     }
 
     /// The `SYSINDEX` catalog, as a `ScanReport` of `Index`.
     fn indexes(&self, py: Python<'_>) -> PyResult<ScanReport> {
         let scan = self.inner.indexes().map_err(|e| to_py_err(py, &e, None))?;
-        report(py, &scan, Index::new)
+        report(py, &scan, |i| Ok(Index::new(i)))
     }
 
     /// Every line item, as a `ScanReport` of `LineItem`.
@@ -528,7 +548,7 @@ impl Reader {
             .inner
             .transactions()
             .map_err(|e| to_py_err(py, &e, None))?;
-        report(py, &scan, Transaction::new)
+        report(py, &scan, |h| Ok(Transaction::new(h)))
     }
 }
 
