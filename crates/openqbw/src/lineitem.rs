@@ -534,11 +534,14 @@ fn scan_page(body: &[u8], pn: u64, out: &mut Vec<Result<LineItem, Error>>) -> Pa
     }
 }
 
-/// Offsets where an anchor would start in the last 25 bytes before a sector
-/// boundary (in-sector offsets 488 to 507): the 5-byte prefix and every ID
-/// character up to the boundary match, so only the boundary hides the rest.
-/// The bytes after the boundary are not examined; the ID characters and
-/// the quantity there are what a boundary spoils. Such an anchor is not read.
+/// Offsets where an anchor would start in the last 24 bytes before a sector
+/// boundary (in-sector offsets 488 to 507): the 5-byte prefix matches and so
+/// does every ID character that lies before the boundary (all 16 from 488 to
+/// 491, fewer after), so only the boundary hides the rest. The bytes after
+/// the boundary are not examined, and neither are quantity bytes before it.
+/// Such an anchor is not read. A prefix the boundary itself cuts (offsets
+/// 508 to 511) shows one to four zero bytes and no ID character, which
+/// matches too much padding to count, so those anchors are not counted.
 ///
 /// The boundary inside the page body counts; the page's last sector ends
 /// at the trailer, past the body, so it has none.
@@ -546,7 +549,10 @@ fn cut_anchors(body: &[u8]) -> Vec<usize> {
     let mut found = Vec::new();
     for boundary in (SECTOR_SIZE..body.len()).step_by(SECTOR_SIZE) {
         for pos in boundary - ANCHOR_LEN + 1..=boundary - 5 {
-            if body[pos..pos + 5] == PARENT_PREFIX && is_base62(&body[pos + 5..boundary]) {
+            // The ID characters end at pos + 21; the quantity bytes after
+            // them are not examined.
+            let id_end = boundary.min(pos + 5 + QB_ID_LEN);
+            if body[pos..pos + 5] == PARENT_PREFIX && is_base62(&body[pos + 5..id_end]) {
                 found.push(pos);
             }
         }
@@ -1245,6 +1251,39 @@ mod tests {
         let found = scan_page(&body, 7, &mut out);
         assert!(out.is_empty());
         assert_eq!(found.sector_boundary, [490, 1524]);
+    }
+
+    #[test]
+    fn anchor_whose_id_is_whole_but_quantity_is_cut_is_counted() {
+        // At in-sector offsets 488 to 490 the 16 ID characters end before
+        // the boundary and the quantity bytes that follow them are not ID
+        // characters.
+        let mut body = vec![0xAAu8; PAGE_DATA_END];
+        for start in [488usize, 1024 + 489, 2048 + 490] {
+            body[start..start + 5].copy_from_slice(&PARENT_PREFIX);
+            for b in &mut body[start + 5..start + 21] {
+                *b = b'Q';
+            }
+        }
+        let mut out = Vec::new();
+        let found = scan_page(&body, 7, &mut out);
+        assert!(out.is_empty());
+        assert_eq!(found.sector_boundary, [488, 1513, 2538]);
+    }
+
+    #[test]
+    fn prefix_cut_by_the_boundary_is_not_counted() {
+        // From offset 508 on, the boundary hides the end of the prefix and
+        // every ID character; zero bytes alone are not an anchor.
+        let mut body = vec![0xAAu8; PAGE_DATA_END];
+        for start in [508usize, 1024 + 509, 2048 + 510, 3072 + 511] {
+            let boundary = (start / 512 + 1) * 512;
+            let visible = boundary - start;
+            body[start..boundary].copy_from_slice(&PARENT_PREFIX[..visible]);
+        }
+        let mut out = Vec::new();
+        let found = scan_page(&body, 7, &mut out);
+        assert!(found.sector_boundary.is_empty());
     }
 
     #[test]
