@@ -192,7 +192,7 @@ fn numeric_value(ctrl: u8, digits: &[u8]) -> Result<Decimal, UndecodedReason> {
 #[non_exhaustive]
 pub struct LineItem {
     /// Parent transaction QB-ID (16 base62 characters).
-    pub invoice_id: String,
+    pub qb_id_parent: String,
     /// Source page number in the QBW file.
     pub page_number: u64,
     /// Byte offset within the decoded page body where the anchor starts.
@@ -231,9 +231,13 @@ impl LineItem {
     /// other fields empty. For tests and tools that need to synthesize
     /// records; scans never call it.
     #[doc(hidden)]
-    pub fn synthetic(invoice_id: &str, source_table: Option<&str>, value: Option<Decimal>) -> Self {
+    pub fn synthetic(
+        qb_id_parent: &str,
+        source_table: Option<&str>,
+        value: Option<Decimal>,
+    ) -> Self {
         Self {
-            invoice_id: invoice_id.to_owned(),
+            qb_id_parent: qb_id_parent.to_owned(),
             page_number: 0,
             page_offset: 0,
             item_qb_id: None,
@@ -567,7 +571,7 @@ fn parse_anchor(
     ceil: usize,
 ) -> Result<LineItem, Error> {
     let id_start = anchor_start + 5;
-    let invoice_id = std::str::from_utf8(&body[id_start..id_start + QB_ID_LEN])
+    let qb_id_parent = std::str::from_utf8(&body[id_start..id_start + QB_ID_LEN])
         .expect("anchor guarded by is_base62")
         .to_owned();
 
@@ -598,7 +602,7 @@ fn parse_anchor(
     let item_qb_id = find_item_id_nearest(&body[back_start..anchor_start]);
 
     let mut li = LineItem {
-        invoice_id,
+        qb_id_parent,
         page_number: pn,
         page_offset: anchor_start,
         item_qb_id,
@@ -810,7 +814,7 @@ mod tests {
         body[p + 12..p + 16].copy_from_slice(&12671u32.to_le_bytes());
 
         let li = scan_one(&body).unwrap();
-        assert_eq!(li.invoice_id, "0000000000001QBm");
+        assert_eq!(li.qb_id_parent, "0000000000001QBm");
         assert_eq!(li.value_raw, [0x02, 0x40, 0x0F, 0x04]);
         assert_eq!(li.value.unwrap().to_string(), "415");
         assert_eq!(li.value_undecoded, None);

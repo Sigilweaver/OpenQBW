@@ -1164,9 +1164,9 @@ fn insert_synthesized_transactions(
     let mut groups: HashMap<String, Vec<&LineItem>> = HashMap::new();
     for li in items {
         groups
-            .entry(li.invoice_id.clone())
+            .entry(li.qb_id_parent.clone())
             .or_insert_with(|| {
-                order.push(li.invoice_id.clone());
+                order.push(li.qb_id_parent.clone());
                 Vec::new()
             })
             .push(li);
@@ -1229,11 +1229,11 @@ fn insert_transaction_line_items(tx: &Transaction<'_>, items: &[LineItem]) -> Re
     let mut line_no: BTreeMap<(String, Option<String>), i64> = BTreeMap::new();
     for li in items {
         let src = li.source_table.clone();
-        let key = (li.invoice_id.clone(), src.clone());
+        let key = (li.qb_id_parent.clone(), src.clone());
         let n = line_no.entry(key).or_insert(0);
         *n += 1;
         stmt.execute(params![
-            li.invoice_id,
+            li.qb_id_parent,
             *n,
             li.item_qb_id,
             li.value.map(|v| v.to_string()),
@@ -1359,7 +1359,7 @@ fn balance(items: &[LineItem]) -> Balance {
     let mut by_parent: HashMap<&str, Vec<Option<Decimal>>> = HashMap::new();
     for li in items {
         by_parent
-            .entry(li.invoice_id.as_str())
+            .entry(li.qb_id_parent.as_str())
             .or_default()
             .push(li.value);
     }
@@ -1744,7 +1744,7 @@ fn run_migrate_csv(input: PathBuf, out: PathBuf, lenient: bool) -> Result<()> {
         writeln!(
             lif,
             "{},{},{},{},{},{},{},{},{},{},{},{}",
-            csv_field(&li.invoice_id),
+            csv_field(&li.qb_id_parent),
             csv_field(li.item_qb_id.as_deref().unwrap_or("")),
             value,
             li.value_undecoded.map_or("", |r| r.as_str()),
@@ -1906,7 +1906,7 @@ fn render_iif(items: &[LineItem], headers: &[TransactionHeader]) -> (String, Iif
     let mut by_parent: HashMap<&str, Vec<&LineItem>> = HashMap::new();
     for li in items {
         by_parent
-            .entry(li.invoice_id.as_str())
+            .entry(li.qb_id_parent.as_str())
             .or_default()
             .push(li);
     }
@@ -2028,7 +2028,7 @@ fn run_forensics(input: PathBuf, lenient: bool) -> Result<()> {
     // deleted parents.
     use std::collections::HashSet;
     let header_ids: HashSet<&str> = headers.iter().map(|h| h.qb_id.as_str()).collect();
-    let parent_ids: HashSet<&str> = items.iter().map(|li| li.invoice_id.as_str()).collect();
+    let parent_ids: HashSet<&str> = items.iter().map(|li| li.qb_id_parent.as_str()).collect();
     let orphan_parents = parent_ids.difference(&header_ids).count();
     let childless_headers = header_ids.difference(&parent_ids).count();
     let decoded_sum = Decimal::checked_sum(items.iter().filter_map(|li| li.value));

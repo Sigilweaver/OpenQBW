@@ -282,7 +282,7 @@ impl LineItem {
             None => None,
         };
         Ok(Self {
-            qb_id_parent: li.invoice_id.clone(),
+            qb_id_parent: li.qb_id_parent.clone(),
             item_qb_id: li.item_qb_id.clone(),
             value,
             value_undecoded: li.value_undecoded.map(|r| r.as_str().to_owned()),
