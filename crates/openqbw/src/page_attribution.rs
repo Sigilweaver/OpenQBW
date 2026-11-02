@@ -1,8 +1,8 @@
 //! Page-to-table attribution driven by the `SYSTABLE` catalog.
 //!
 //! The SA17 page-store stores each table as a B-tree, but we have not yet
-//! reverse-engineered the prev/next sibling pointers between leaves
-//! (see `re/NOTES.md` §C.45). Until B-tree traversal is available we
+//! reverse-engineered the prev/next sibling pointers between leaves.
+//! Until B-tree traversal is available we
 //! attribute pages to tables by a position heuristic:
 //!
 //! 1. Collect every `SysTableEntry` whose `data_root_page` is known and

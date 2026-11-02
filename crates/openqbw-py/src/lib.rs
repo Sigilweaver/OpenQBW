@@ -506,8 +506,9 @@ impl Reader {
         self.inner.file_size()
     }
 
-    /// Database creation time as Unix seconds (UTC), or `None` when the
-    /// stamp at superblock offset 0x2A is outside 1990..2100.
+    /// Database creation time as Unix seconds (the stored count taken as
+    /// UTC), or `None` when the stamp at superblock offset 0x2A is outside
+    /// 1990..2100.
     #[getter]
     fn created_unix_seconds(&self) -> Option<i64> {
         self.inner.created_unix_seconds()

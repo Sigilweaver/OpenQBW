@@ -14,10 +14,10 @@
 //! files by row, so we accept any 4 bytes there and rely on the surrounding
 //! zero markers, the name-length sanity check, and the ASCII validity of the
 //! table name to disambiguate. [`SysTableEntry::stamp_unix_seconds`] decodes
-//! it. See also `re/NOTES.md` §C.18 and §C.20.
+//! it.
 //!
 //! Beyond the row tag, the trailer that follows the name encodes per-table
-//! metadata; see §C.33. We extract three fields:
+//! metadata. We extract three fields:
 //!
 //! * `col_count` at trailer offset +6  (1 byte)
 //! * `data_root_page` at +34  (u32 LE) - first/leftmost leaf of the table B-tree
@@ -30,7 +30,7 @@
 //! `scan_page` anchors purely on the tag above and never assumes it marks
 //! the start of the underlying SA slotted-page row - which matters, because
 //! on at least one file it isn't: the row is length-prefixed and begins 34
-//! bytes before the tag (issue #16). See `SPECIFICATION.md` §5.
+//! bytes before the tag (issue #16). See `SPECIFICATION.md` section 5.
 
 use std::collections::BTreeMap;
 

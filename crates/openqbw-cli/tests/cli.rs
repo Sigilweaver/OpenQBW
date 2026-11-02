@@ -222,7 +222,10 @@ fn not_a_company_file_fails_with_exit_1() {
     std::fs::write(&p, vec![0u8; 8192]).unwrap();
     let out = openqbw(&["catalog".as_ref(), os(&p)]);
     assert_eq!(out.status.code(), Some(1), "{out:?}");
-    assert!(String::from_utf8_lossy(&out.stderr).contains("bad superblock magic"));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("bad superblock magic"), "{err}");
+    // --lenient cannot make a non-QuickBooks file readable.
+    assert!(!err.contains("--lenient"), "{err}");
 }
 
 #[test]
@@ -615,4 +618,42 @@ fn verify_without_output_leaves_nothing_in_the_temp_directory() {
             assert!(stdout.contains("line_items         ok"), "{stdout}");
         }
     }
+}
+
+#[test]
+fn catalog_does_not_show_an_invalid_root_page_as_a_page() {
+    let out = openqbw(&["catalog".as_ref(), os(&fixture("synthetic-counts.qbw"))]);
+    assert!(out.status.success(), "{out:?}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let header = stdout.lines().nth(1).unwrap();
+    assert!(header.contains("flags"), "{stdout}");
+    let bogus = stdout.lines().find(|l| l.contains("abmc_bogus")).unwrap();
+    assert!(bogus.contains("root_page_invalid"), "{bogus}");
+    // The root column is blank-marked, not the number the row claims.
+    let cols: Vec<&str> = bogus.split_whitespace().collect();
+    assert_eq!(cols[2], "-", "{bogus}");
+    let ok = stdout
+        .lines()
+        .find(|l| l.contains("abmc_invoice_header"))
+        .unwrap();
+    assert_eq!(ok.split_whitespace().nth(2), Some("4"), "{ok}");
+
+    // CSV keeps the raw value and says it is invalid.
+    let dir = tmp("catalog-csv");
+    let out = openqbw(&[
+        "migrate".as_ref(),
+        os(&fixture("synthetic-counts.qbw")),
+        "--format".as_ref(),
+        "csv".as_ref(),
+        "--out".as_ref(),
+        os(&dir),
+    ]);
+    assert!(out.status.success(), "{out:?}");
+    let csv = std::fs::read_to_string(dir.join("catalog.csv")).unwrap();
+    assert!(
+        csv.lines().next().unwrap().ends_with(",last_page,flags"),
+        "{csv}"
+    );
+    let bogus = csv.lines().find(|l| l.contains("abmc_bogus")).unwrap();
+    assert!(bogus.ends_with(",root_page_invalid"), "{bogus}");
 }

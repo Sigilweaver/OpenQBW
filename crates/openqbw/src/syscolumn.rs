@@ -1,7 +1,7 @@
 //! `SYSCOLUMN` catalog row parser (Phase 6, WP-6A).
 //!
 //! Each `SYSCOLUMN` row stores one column definition. On Rock Castle the
-//! body has the layout (reverse-engineered in `re/NOTES.md`):
+//! body has the layout:
 //!
 //! ```text
 //! <name_len u8> <name>
@@ -28,7 +28,7 @@
 //! scan (WP-6Z.2, [`crate::sysobject`]) for owners it does not cover.
 //! The earlier WP-6A attempt to join [`SysColumn::owner_object_id`]
 //! against [`crate::SysTableEntry::data_root_page`] was wrong: the two
-//! are independent integer namespaces (see `re/NOTES.md` C.52).
+//! are independent integer namespaces.
 
 use std::collections::{BTreeMap, BTreeSet};
 

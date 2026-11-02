@@ -31,7 +31,7 @@
 //! [`diagnostics`] holds reverse-engineering cross-checks and is outside
 //! semantic versioning.
 //!
-//! See `SPECIFICATION.md` and `re/NOTES.md` for the reverse-engineered
+//! See `SPECIFICATION.md` for the reverse-engineered
 //! record layouts and remaining gaps.
 
 #![forbid(unsafe_code)]

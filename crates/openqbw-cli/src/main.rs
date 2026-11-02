@@ -109,8 +109,7 @@ enum Cmd {
     },
     /// Print the columns of a table. SYSCOLUMN.owner_object_id is
     /// bridged to SYSTABLE.name via the table-id back-reference in the
-    /// SYSTABLE row prefix, falling back to the SYSOBJECT catalog scan
-    /// (Phase 6, WP-6Z.2 / WP-6Z.4).
+    /// SYSTABLE row prefix, falling back to the SYSOBJECT catalog scan.
     Schema {
         /// Input QBW file.
         input: PathBuf,
@@ -152,7 +151,7 @@ enum Cmd {
 #[derive(Subcommand, Debug)]
 enum DebugCmd {
     /// Print heuristic foreign-key edges inferred from column names
-    /// matching `*_id` / `*_id_h` (Phase 6, WP-6B).
+    /// matching `*_id` / `*_id_h`.
     Fkgraph {
         /// Input QBW file.
         input: PathBuf,
@@ -161,20 +160,19 @@ enum DebugCmd {
         resolved_only: bool,
     },
     /// Print a histogram of SYSCOLUMN.nulls_flag bytes with sample
-    /// columns per value (Phase 6, WP-6D).
+    /// columns per value.
     Nulls {
         /// Input QBW file.
         input: PathBuf,
     },
     /// Validate position-based page attribution against per-table
-    /// row-width bands derived from SYSCOLUMN (Phase 6, WP-6Z).
+    /// row-width bands derived from SYSCOLUMN.
     ValidateAttribution {
         /// Input QBW file.
         input: PathBuf,
     },
     /// List the SYSINDEX catalog and cross-validate the position
-    /// attribution against SYSINDEX `root_page` ground truth
-    /// (Phase 6, WP-6Z.3).
+    /// attribution against SYSINDEX `root_page` ground truth.
     Indexes {
         /// Input QBW file.
         input: PathBuf,
@@ -213,19 +211,68 @@ fn open_reader(path: &std::path::Path, lenient: bool) -> Result<Reader> {
     } else {
         ReadOptions::strict()
     };
-    let reader = Reader::open(path, &options).with_context(|| {
-        format!(
-            "opening {:?}{}",
-            path,
-            if lenient {
-                ""
-            } else {
-                " (use --lenient to skip pages that fail to decode and list them)"
-            }
-        )
+    let reader = Reader::open(path, &options).map_err(|e| {
+        let hint = if !lenient && lenient_may_help(&e) {
+            " (use --lenient to skip pages that fail to decode and list them)"
+        } else {
+            ""
+        };
+        anyhow::Error::new(e).context(format!("opening {path:?}{hint}"))
     })?;
-    report(&reader.catalog().warnings, &reader.catalog().rejected);
+    let mut printed = Vec::new();
+    report_scan(
+        "catalog",
+        &reader.catalog().warnings,
+        &reader.catalog().rejected,
+        &mut printed,
+    );
     Ok(reader)
+}
+
+/// Whether `--lenient` can get past an error from opening a file: only a
+/// page that failed to decode (a store error that names its page) is skipped
+/// by a lenient open. A bad magic, an unsupported version, a damaged page or
+/// a keystream that cannot be calibrated stay errors.
+fn lenient_may_help(e: &QbwError) -> bool {
+    matches!(
+        e,
+        QbwError::Store {
+            page_number: Some(_),
+            ..
+        }
+    )
+}
+
+/// The lines to print for one scan's `warnings`: each prefixed with the
+/// scan's `label`, and none that `printed` already holds. A scan over the
+/// same pages repeats its predecessors' page-confidence warnings; printing
+/// them again, with the denominators of another scan, reads as a second
+/// problem. Every warning returned is added to `printed`.
+fn labeled_warnings(label: &str, warnings: &[Warning], printed: &mut Vec<Warning>) -> Vec<String> {
+    let mut lines = Vec::new();
+    for w in warnings {
+        if !printed.contains(w) {
+            lines.push(format!("warning: {label}: {w}"));
+            printed.push(w.clone());
+        }
+    }
+    lines
+}
+
+/// Print one scan's warnings (see [`labeled_warnings`]) and skipped records on
+/// stderr.
+fn report_scan(
+    label: &str,
+    warnings: &[Warning],
+    rejected: &[QbwError],
+    printed: &mut Vec<Warning>,
+) {
+    for line in labeled_warnings(label, warnings, printed) {
+        eprintln!("{line}");
+    }
+    for e in rejected {
+        eprintln!("warning: skipped: {e}");
+    }
 }
 
 /// Print run-level warnings and skipped records on stderr.
@@ -354,8 +401,8 @@ fn run_catalog(input: PathBuf, user_only: bool, lenient: bool) -> Result<()> {
         user.len(),
     );
     println!(
-        "{:>6}  {:>5}  {:>6}  {:>6}  name",
-        "tid", "cols", "root", "last"
+        "{:>6}  {:>5}  {:>10}  {:>10}  {:20}  name",
+        "tid", "cols", "root", "last", "flags"
     );
     let iter: Box<dyn Iterator<Item = &SysTableEntry>> = if user_only {
         Box::new(user.into_iter())
@@ -367,17 +414,26 @@ fn run_catalog(input: PathBuf, user_only: bool, lenient: bool) -> Result<()> {
             .col_count
             .map(|c| c.to_string())
             .unwrap_or_else(|| "-".into());
-        let root = e
-            .data_root_page
-            .map(|p| p.to_string())
-            .unwrap_or_else(|| "-".into());
+        // A root past the end of the file or not on a data page is not a
+        // page number; it is shown as "-" and named in the flags column.
+        let root = if e.flags.contains(&openqbw::RecordFlag::RootPageInvalid) {
+            None
+        } else {
+            e.data_root_page
+        };
+        let root = root.map(|p| p.to_string()).unwrap_or_else(|| "-".into());
         let last = e
             .last_page
             .map(|p| p.to_string())
             .unwrap_or_else(|| "-".into());
         println!(
-            "{:>6}  {:>5}  {:>6}  {:>6}  {}",
-            e.table_id, cols, root, last, e.name
+            "{:>6}  {:>5}  {:>10}  {:>10}  {:20}  {}",
+            e.table_id,
+            cols,
+            root,
+            last,
+            flag_list(&e.flags),
+            e.name
         );
     }
     Ok(())
@@ -556,7 +612,12 @@ fn run_fkgraph(input: PathBuf, resolved_only: bool, lenient: bool) -> Result<()>
 fn run_indexes(input: PathBuf, fk_only: bool, summary_only: bool, lenient: bool) -> Result<()> {
     let reader = open_reader(&input, lenient)?;
     let scan = reader.indexes()?;
-    report(&scan.warnings, &scan.rejected);
+    report_scan(
+        "indexes",
+        &scan.warnings,
+        &scan.rejected,
+        &mut reader.catalog().warnings.clone(),
+    );
     let entries = &scan.items;
     let tables = &reader.catalog().items;
     let audit = diagnostics::sysindex_cross_validation(&reader)?;
@@ -654,7 +715,12 @@ fn run_validate_attribution(input: PathBuf, lenient: bool) -> Result<()> {
 fn run_nulls(input: PathBuf, lenient: bool) -> Result<()> {
     let reader = open_reader(&input, lenient)?;
     let scan = diagnostics::nulls_flag_histogram(&reader)?;
-    report(&scan.warnings, &scan.rejected);
+    report_scan(
+        "columns",
+        &scan.warnings,
+        &scan.rejected,
+        &mut reader.catalog().warnings.clone(),
+    );
     let buckets = &scan.items;
     let total: usize = buckets.iter().map(|b| b.count).sum();
     println!(
@@ -784,7 +850,7 @@ fn run_verify(
     println!("  line amount, so a zero sum is evidence about the encoding, not an invoice check.");
 
     println!();
-    println!("=== SYSINDEX cross-validation (WP-6Z.3) ===");
+    println!("=== SYSINDEX cross-validation ===");
     let reader = open_reader(&input, lenient)?;
     {
         let entries = reader.indexes()?.items;
@@ -1177,7 +1243,12 @@ fn insert_transaction_line_items(tx: &Transaction<'_>, items: &[LineItem]) -> Re
 }
 
 fn flags_csv(li: &LineItem) -> String {
-    li.flags
+    flag_list(&li.flags)
+}
+
+/// Record flags as a comma-separated list; empty when there are none.
+fn flag_list(flags: &[openqbw::RecordFlag]) -> String {
+    flags
         .iter()
         .map(|f| f.as_str())
         .collect::<Vec<_>>()
@@ -1505,15 +1576,12 @@ fn collect_records(reader: &Reader) -> Result<Records> {
         ],
         &heads.warnings,
     );
-    let mut warnings = lines.warnings;
-    for w in heads.warnings {
-        if !warnings.contains(&w) {
-            warnings.push(w);
-        }
-    }
+    // The catalog's warnings were printed when the file was opened.
+    let mut printed = reader.catalog().warnings.clone();
+    report_scan("line items", &lines.warnings, &lines.rejected, &mut printed);
+    report_scan("headers", &heads.warnings, &heads.rejected, &mut printed);
     let mut rejected = lines.rejected;
     rejected.extend(heads.rejected);
-    report(&warnings, &rejected);
     let mut items = lines.items;
     items.sort_by_key(|li| (li.page_number, li.page_offset));
     let mut headers = heads.items;
@@ -1618,18 +1686,22 @@ fn run_migrate_csv(input: PathBuf, out: PathBuf, lenient: bool) -> Result<()> {
     // catalog.csv
     use std::io::Write;
     let mut cat: Vec<u8> = Vec::new();
-    writeln!(cat, "table_id,name,column_count,data_root_page,last_page")?;
+    writeln!(
+        cat,
+        "table_id,name,column_count,data_root_page,last_page,flags"
+    )?;
     let mut tables: Vec<SysTableEntry> = reader.catalog().items.clone();
     tables.sort_by_key(|e| e.table_id);
     for t in &tables {
         writeln!(
             cat,
-            "{},{},{},{},{}",
+            "{},{},{},{},{},{}",
             t.table_id,
             csv_field(&t.name),
             t.col_count.map(|c| c.to_string()).unwrap_or_default(),
             t.data_root_page.map(|p| p.to_string()).unwrap_or_default(),
             t.last_page.map(|p| p.to_string()).unwrap_or_default(),
+            csv_field(&flag_list(&t.flags)),
         )?;
     }
 
@@ -2014,6 +2086,22 @@ mod tests {
             balance: Balance::default(),
             rejected_records: 0,
         }
+    }
+
+    #[test]
+    fn repeated_warnings_are_printed_once_and_labeled() {
+        let a = Warning::new(WarningKind::Other("a"));
+        let b = Warning::new(WarningKind::Other("b"));
+        let mut printed = Vec::new();
+        assert_eq!(
+            labeled_warnings("catalog", std::slice::from_ref(&a), &mut printed),
+            ["warning: catalog: a"]
+        );
+        assert_eq!(
+            labeled_warnings("line items", &[a.clone(), b], &mut printed),
+            ["warning: line items: b"]
+        );
+        assert!(labeled_warnings("headers", &[a], &mut printed).is_empty());
     }
 
     #[test]
