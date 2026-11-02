@@ -364,3 +364,222 @@ fn run_counts_are_recorded_in_the_csv_manifest() {
     }
     assert!(manifest.contains("\"format_version\": 1"), "{manifest}");
 }
+
+fn snapshot(dir: &Path) -> Vec<(String, Vec<u8>)> {
+    let mut v: Vec<_> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| {
+            let e = e.unwrap();
+            (
+                e.file_name().to_string_lossy().into_owned(),
+                std::fs::read(e.path()).unwrap_or_default(),
+            )
+        })
+        .collect();
+    v.sort();
+    v
+}
+
+fn stderr(out: &Output) -> String {
+    String::from_utf8_lossy(&out.stderr).into_owned()
+}
+
+#[test]
+fn swapped_arguments_leave_the_company_file_intact() {
+    let dir = tmp("swapped");
+    let qbw = dir.join("mybooks.qbw");
+    std::fs::copy(fixture("synthetic.qbw"), &qbw).unwrap();
+    let before = std::fs::read(&qbw).unwrap();
+    let db = dir.join("books.sqlite");
+    let out = openqbw(&["export".as_ref(), os(&qbw), os(&db)]);
+    assert!(out.status.success(), "{out:?}");
+    let db_before = std::fs::read(&db).unwrap();
+
+    // `export books.sqlite mybooks.qbw`: the company file is named as output.
+    let out = openqbw(&["export".as_ref(), os(&db), os(&qbw)]);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(
+        stderr(&out).contains("QuickBooks company file"),
+        "{}",
+        stderr(&out)
+    );
+    assert_eq!(std::fs::read(&qbw).unwrap(), before);
+    assert_eq!(std::fs::read(&db).unwrap(), db_before);
+}
+
+#[test]
+fn output_that_is_the_input_is_refused() {
+    let dir = tmp("same-file");
+    let qbw = dir.join("x.qbw");
+    std::fs::copy(fixture("synthetic.qbw"), &qbw).unwrap();
+    let before = std::fs::read(&qbw).unwrap();
+    let out = openqbw(&["export".as_ref(), os(&qbw), os(&qbw)]);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert_eq!(std::fs::read(&qbw).unwrap(), before);
+
+    // A different spelling of the same path.
+    let alias = dir.join(".").join("x.qbw");
+    let out = openqbw(&["export".as_ref(), os(&qbw), os(&alias)]);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert_eq!(std::fs::read(&qbw).unwrap(), before);
+}
+
+#[cfg(unix)]
+#[test]
+fn output_that_links_to_the_input_is_refused() {
+    let dir = tmp("link");
+    let qbw = dir.join("x.qbw");
+    std::fs::copy(fixture("synthetic.qbw"), &qbw).unwrap();
+    let before = std::fs::read(&qbw).unwrap();
+    let sym = dir.join("sym.sqlite");
+    std::os::unix::fs::symlink(&qbw, &sym).unwrap();
+    let hard = dir.join("hard.sqlite");
+    std::fs::hard_link(&qbw, &hard).unwrap();
+    for link in [&sym, &hard] {
+        let out = openqbw(&["export".as_ref(), os(&qbw), os(link)]);
+        assert_eq!(out.status.code(), Some(1), "{link:?}: {out:?}");
+        assert_eq!(std::fs::read(&qbw).unwrap(), before);
+    }
+}
+
+#[test]
+fn failed_export_leaves_an_earlier_export_intact() {
+    let dir = tmp("failed");
+    let db = dir.join("out.sqlite");
+    let out = openqbw(&["export".as_ref(), os(&fixture("synthetic.qbw")), os(&db)]);
+    assert!(out.status.success(), "{out:?}");
+    let before = snapshot(&dir);
+
+    // Strict export of a file with an undecodable record fails.
+    let out = openqbw(&[
+        "export".as_ref(),
+        os(&fixture("synthetic-bad-record.qbw")),
+        os(&db),
+    ]);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert_eq!(snapshot(&dir), before);
+
+    // So does an input that is not a company file, and a missing one.
+    let junk = dir.join("junk.bin");
+    std::fs::write(&junk, b"not a company file").unwrap();
+    let before = snapshot(&dir);
+    for input in [junk.clone(), dir.join("missing.qbw")] {
+        let out = openqbw(&["export".as_ref(), os(&input), os(&db)]);
+        assert_eq!(out.status.code(), Some(1), "{out:?}");
+    }
+    assert_eq!(snapshot(&dir), before);
+}
+
+#[test]
+fn successful_export_replaces_the_earlier_one_and_leaves_no_temp_file() {
+    let dir = tmp("replace");
+    let db = dir.join("out.sqlite");
+    std::fs::write(&db, b"old export").unwrap();
+    let out = openqbw(&["export".as_ref(), os(&fixture("synthetic.qbw")), os(&db)]);
+    assert!(out.status.success(), "{out:?}");
+    let names: Vec<String> = snapshot(&dir).into_iter().map(|(n, _)| n).collect();
+    assert_eq!(names, ["out.sqlite"]);
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM transaction_line_items", [], |r| {
+            r.get::<_, i64>(0)
+        })
+        .unwrap();
+}
+
+#[test]
+fn migrate_never_writes_over_a_company_file_or_creates_a_directory_on_failure() {
+    let dir = tmp("migrate-safe");
+    let qbw = dir.join("mybooks.qbw");
+    std::fs::copy(fixture("synthetic.qbw"), &qbw).unwrap();
+    let before = std::fs::read(&qbw).unwrap();
+
+    let good = fixture("synthetic.qbw");
+    for format in ["iif", "sqlite", "csv"] {
+        let mut args: Vec<&std::ffi::OsStr> = vec![
+            "migrate".as_ref(),
+            os(&good),
+            "--format".as_ref(),
+            format.as_ref(),
+            "--out".as_ref(),
+            os(&qbw),
+        ];
+        if format == "iif" {
+            args.push("--placeholder-accounts".as_ref());
+        }
+        let out = openqbw(&args);
+        assert_eq!(out.status.code(), Some(1), "{format}: {out:?}");
+        assert_eq!(std::fs::read(&qbw).unwrap(), before, "{format}");
+    }
+
+    // A company file inside the CSV directory under an output name.
+    let csv = dir.join("csv");
+    std::fs::create_dir(&csv).unwrap();
+    std::fs::copy(fixture("synthetic.qbw"), csv.join("catalog.csv")).unwrap();
+    let before_csv = snapshot(&csv);
+    let out = openqbw(&[
+        "migrate".as_ref(),
+        os(&fixture("synthetic.qbw")),
+        "--format".as_ref(),
+        "csv".as_ref(),
+        "--out".as_ref(),
+        os(&csv),
+    ]);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert_eq!(snapshot(&csv), before_csv);
+
+    // A failed read creates no output directory.
+    let fresh = dir.join("never");
+    let out = openqbw(&[
+        "migrate".as_ref(),
+        os(&fixture("synthetic-bad-record.qbw")),
+        "--format".as_ref(),
+        "csv".as_ref(),
+        "--out".as_ref(),
+        os(&fresh),
+    ]);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(!fresh.exists());
+}
+
+#[test]
+fn failed_csv_migrate_leaves_an_earlier_export_intact() {
+    let dir = tmp("csv-failed");
+    let csv = dir.join("csv");
+    let out = openqbw(&[
+        "migrate".as_ref(),
+        os(&fixture("synthetic.qbw")),
+        "--format".as_ref(),
+        "csv".as_ref(),
+        "--out".as_ref(),
+        os(&csv),
+    ]);
+    assert!(out.status.success(), "{out:?}");
+    let before = snapshot(&csv);
+    let out = openqbw(&[
+        "migrate".as_ref(),
+        os(&fixture("synthetic-bad-record.qbw")),
+        "--format".as_ref(),
+        "csv".as_ref(),
+        "--out".as_ref(),
+        os(&csv),
+    ]);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert_eq!(snapshot(&csv), before);
+}
+
+#[test]
+fn verify_output_is_refused_over_a_company_file() {
+    let dir = tmp("verify-safe");
+    let qbw = dir.join("mybooks.qbw");
+    std::fs::copy(fixture("synthetic.qbw"), &qbw).unwrap();
+    let before = std::fs::read(&qbw).unwrap();
+    let out = openqbw(&[
+        "verify".as_ref(),
+        os(&fixture("synthetic.qbw")),
+        "--output".as_ref(),
+        os(&qbw),
+    ]);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert_eq!(std::fs::read(&qbw).unwrap(), before);
+}

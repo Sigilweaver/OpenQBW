@@ -14,6 +14,8 @@
 //! The `debug` commands print heuristic cross-checks for people studying
 //! the format. Their names, flags and output may change in any release.
 
+mod outfile;
+
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -25,6 +27,7 @@ use openqbw::{
     Decimal, Error as QbwError, LineItem, ReadOptions, Reader, SysTableEntry, TransactionHeader,
     Warning, WarningKind,
 };
+use outfile::{Staged, StagedSet};
 use rusqlite::{Connection, Transaction, params};
 
 /// Version of the SQLite export layout, stored in `PRAGMA user_version` and
@@ -287,11 +290,11 @@ fn run(cli: Cli) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
+/// Export to SQLite. Nothing at `output` is touched until the input has
+/// opened and scanned and the new database is complete: it is built in a
+/// temporary file next to `output` and renamed over it.
 fn run_export(input: PathBuf, output: PathBuf, lenient: bool) -> Result<ExportStats> {
-    if output.exists() {
-        std::fs::remove_file(&output).with_context(|| format!("removing existing {:?}", output))?;
-    }
-
+    outfile::check_output(&input, &output)?;
     let reader = open_reader(&input, lenient)?;
     let Records {
         items,
@@ -301,7 +304,11 @@ fn run_export(input: PathBuf, output: PathBuf, lenient: bool) -> Result<ExportSt
         ..
     } = collect_records(&reader)?;
 
-    let mut conn = Connection::open(&output).with_context(|| format!("opening {:?}", output))?;
+    let staged = Staged::new(&output);
+    // A leftover from a crashed run with the same process id.
+    let _ = std::fs::remove_file(staged.path());
+    let mut conn =
+        Connection::open(staged.path()).with_context(|| format!("creating {:?}", output))?;
     create_schema(&conn)?;
 
     {
@@ -315,6 +322,10 @@ fn run_export(input: PathBuf, output: PathBuf, lenient: bool) -> Result<ExportSt
     }
 
     let stats = collect_export_stats(&conn, &reader, &items, &headers, rejected.len())?;
+    conn.close()
+        .map_err(|(_, e)| e)
+        .with_context(|| format!("closing {:?}", output))?;
+    staged.commit()?;
     println!("{}", stats.summary());
     Ok(stats)
 }
@@ -1514,8 +1525,26 @@ fn lineitem_date(li: &LineItem) -> String {
         .unwrap_or_default()
 }
 
+/// Files `migrate --format csv` writes into its output directory.
+const CSV_FILES: [&str; 5] = [
+    "catalog.csv",
+    "transactions.csv",
+    "lineitems.csv",
+    "rejected.csv",
+    "manifest.json",
+];
+
 fn run_migrate_csv(input: PathBuf, out: PathBuf, lenient: bool) -> Result<()> {
-    std::fs::create_dir_all(&out).with_context(|| format!("creating {:?}", out))?;
+    if out.exists() && !out.is_dir() {
+        anyhow::bail!(
+            "{:?} exists and is not a directory; nothing was changed",
+            out
+        );
+    }
+    outfile::check_output(&input, &out)?;
+    for name in CSV_FILES {
+        outfile::check_output(&input, &out.join(name))?;
+    }
     let reader = open_reader(&input, lenient)?;
     let Records {
         items,
@@ -1526,8 +1555,8 @@ fn run_migrate_csv(input: PathBuf, out: PathBuf, lenient: bool) -> Result<()> {
     } = collect_records(&reader)?;
 
     // catalog.csv
-    let mut cat = std::fs::File::create(out.join("catalog.csv"))?;
     use std::io::Write;
+    let mut cat: Vec<u8> = Vec::new();
     writeln!(cat, "table_id,name,column_count,data_root_page,last_page")?;
     let mut tables: Vec<SysTableEntry> = reader.catalog().items.clone();
     tables.sort_by_key(|e| e.table_id);
@@ -1544,7 +1573,7 @@ fn run_migrate_csv(input: PathBuf, out: PathBuf, lenient: bool) -> Result<()> {
     }
 
     // transactions.csv
-    let mut txf = std::fs::File::create(out.join("transactions.csv"))?;
+    let mut txf: Vec<u8> = Vec::new();
     writeln!(
         txf,
         "qb_id,txn_type,source_table,txn_date_raw,counter,date_source,page_number,page_offset"
@@ -1565,7 +1594,7 @@ fn run_migrate_csv(input: PathBuf, out: PathBuf, lenient: bool) -> Result<()> {
     }
 
     // lineitems.csv
-    let mut lif = std::fs::File::create(out.join("lineitems.csv"))?;
+    let mut lif: Vec<u8> = Vec::new();
     writeln!(
         lif,
         "invoice_id,item_qb_id,value,value_undecoded,value_raw_hex,txn_date,date_source,flags,source_table,page_number,page_offset"
@@ -1590,7 +1619,7 @@ fn run_migrate_csv(input: PathBuf, out: PathBuf, lenient: bool) -> Result<()> {
     }
 
     // Always written, so an empty list is distinguishable from a missing file.
-    let mut rf = std::fs::File::create(out.join("rejected.csv"))?;
+    let mut rf: Vec<u8> = Vec::new();
     writeln!(rf, "page_number,page_offset,kind,message")?;
     for e in &rejected {
         writeln!(
@@ -1602,18 +1631,29 @@ fn run_migrate_csv(input: PathBuf, out: PathBuf, lenient: bool) -> Result<()> {
             csv_field(&e.to_string()),
         )?;
     }
-    std::fs::write(
-        out.join("manifest.json"),
-        csv_manifest(
-            &[
-                ("catalog.csv", tables.len()),
-                ("transactions.csv", headers.len()),
-                ("lineitems.csv", items.len()),
-                ("rejected.csv", rejected.len()),
-            ],
-            &counts,
-        ),
-    )?;
+    let manifest = csv_manifest(
+        &[
+            ("catalog.csv", tables.len()),
+            ("transactions.csv", headers.len()),
+            ("lineitems.csv", items.len()),
+            ("rejected.csv", rejected.len()),
+        ],
+        &counts,
+    );
+
+    // Everything is staged before anything is replaced.
+    std::fs::create_dir_all(&out).with_context(|| format!("creating {:?}", out))?;
+    let mut set = StagedSet::default();
+    for (name, bytes) in [
+        ("catalog.csv", cat.as_slice()),
+        ("transactions.csv", txf.as_slice()),
+        ("lineitems.csv", lif.as_slice()),
+        ("rejected.csv", rf.as_slice()),
+        ("manifest.json", manifest.as_bytes()),
+    ] {
+        set.add(&out.join(name), bytes)?;
+    }
+    set.commit()?;
 
     println!(
         "openqbw migrate csv: out={:?} tables={} transactions={} lineitems={} undecoded_values={} skipped_records={} duplicate_headers={}",
@@ -1665,6 +1705,7 @@ fn run_migrate_iif(
              value field; it is not established as the line amount."
         );
     }
+    outfile::check_output(&input, &out)?;
     let reader = open_reader(&input, lenient)?;
     let Records {
         items,
@@ -1674,7 +1715,9 @@ fn run_migrate_iif(
         ..
     } = collect_records(&reader)?;
     let (text, stats) = render_iif(&items, &headers);
-    std::fs::write(&out, text).with_context(|| format!("writing {:?}", out))?;
+    let staged = Staged::new(&out);
+    staged.write(text.as_bytes())?;
+    staged.commit()?;
     println!(
         "openqbw migrate iif: out={:?} transactions={} lineitems={} skipped_transactions={} \
          omitted_lineitems={} (undecoded values) skipped_records={} duplicate_headers={}",
