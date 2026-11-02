@@ -1612,19 +1612,20 @@ fn run_migrate_csv(input: PathBuf, out: PathBuf, lenient: bool) -> Result<()> {
     let mut lif: Vec<u8> = Vec::new();
     writeln!(
         lif,
-        "invoice_id,item_qb_id,value,value_undecoded,value_raw_hex,txn_date,date_source,flags,source_table,page_number,page_offset"
+        "qb_id_parent,item_qb_id,value,value_undecoded,value_raw_hex,txn_date_raw,counter,date_source,flags,source_table,page_number,page_offset"
     )?;
     for li in &items {
         let value = li.value.map(|v| v.to_string()).unwrap_or_default();
         writeln!(
             lif,
-            "{},{},{},{},{},{},{},{},{},{},{}",
+            "{},{},{},{},{},{},{},{},{},{},{},{}",
             csv_field(&li.invoice_id),
             csv_field(li.item_qb_id.as_deref().unwrap_or("")),
             value,
             li.value_undecoded.map_or("", |r| r.as_str()),
             hex(&li.value_raw),
-            lineitem_date(li),
+            li.txn_date_raw.map(|d| d.to_string()).unwrap_or_default(),
+            li.counter.map(|c| c.to_string()).unwrap_or_default(),
             li.date_source.as_str(),
             csv_field(&flags_csv(li)),
             csv_field(li.source_table.as_deref().unwrap_or("")),

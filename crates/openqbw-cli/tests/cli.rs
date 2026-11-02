@@ -180,14 +180,18 @@ fn csv_export_writes_exact_values_and_the_attribution_note() {
     assert!(
         it.next()
             .unwrap()
-            .starts_with("invoice_id,item_qb_id,value,value_undecoded,value_raw_hex,"),
+            .starts_with("qb_id_parent,item_qb_id,value,value_undecoded,value_raw_hex,txn_date_raw,counter,date_source,flags,source_table,page_number,page_offset"),
         "{lines}"
     );
+    assert!(!lines.contains("txn_date,"), "{lines}");
     let second = it.nth(1).unwrap();
     assert!(
         second.starts_with("0000000000001QBm,ITEM000000000002,-34.45,,02bf2d22,"),
         "{second}"
     );
+    // The raw date value and its provenance, as in SQLite; no guessed date.
+    let cols: Vec<&str> = second.split(',').collect();
+    assert_eq!(&cols[5..8], ["23817", "7", "window_scan"], "{second}");
     let manifest = std::fs::read_to_string(dir.join("manifest.json")).unwrap();
     assert!(
         manifest.contains("\"source_table_attribution\": \"position-based, unverified\""),

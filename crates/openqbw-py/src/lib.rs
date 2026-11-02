@@ -13,7 +13,7 @@ use openqbw_rs::{
     TransactionHeader,
 };
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyDict, PyList};
+use pyo3::types::{PyBytes, PyDict, PyList, PyString};
 
 /// Look up a class defined in `openqbw._errors`.
 fn errors_attr<'py>(py: Python<'py>, name: &str) -> PyResult<Bound<'py, PyAny>> {
@@ -233,13 +233,15 @@ fn flag_names(flags: &[openqbw_rs::RecordFlag]) -> Vec<String> {
 /// A line item.
 #[pyclass(module = "openqbw", frozen, get_all)]
 struct LineItem {
-    invoice_id: String,
+    /// Parent transaction QB-ID (16 characters); the SQLite and CSV exports
+    /// call it `qb_id_parent`.
+    qb_id_parent: String,
     item_qb_id: Option<String>,
     /// The numeric value field as a `decimal.Decimal`, exact; `None` means
     /// not decoded, not zero. Not established as the line's amount.
     value: Option<Py<PyAny>>,
-    /// Why `value` is `None` (`zero_length`, `digit_over_99` or
-    /// `exponent_out_of_range`); `None` when it is decoded.
+    /// Why `value` is `None` (`zero_length`, `digit_over_99`,
+    /// `exponent_out_of_range` or `sector_boundary`); `None` when it is decoded.
     value_undecoded: Option<String>,
     value_raw: Py<PyBytes>,
     txn_date_raw: Option<u32>,
@@ -264,7 +266,7 @@ impl LineItem {
             None => None,
         };
         Ok(Self {
-            invoice_id: li.invoice_id.clone(),
+            qb_id_parent: li.invoice_id.clone(),
             item_qb_id: li.item_qb_id.clone(),
             value,
             value_undecoded: li.value_undecoded.map(|r| r.as_str().to_owned()),
@@ -285,7 +287,7 @@ impl LineItem {
 impl LineItem {
     fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let d = PyDict::new(py);
-        d.set_item("invoice_id", &self.invoice_id)?;
+        d.set_item("qb_id_parent", &self.qb_id_parent)?;
         d.set_item("item_qb_id", &self.item_qb_id)?;
         d.set_item("value", self.value.as_ref().map(|v| v.bind(py)))?;
         d.set_item("value_undecoded", &self.value_undecoded)?;
@@ -301,18 +303,19 @@ impl LineItem {
         Ok(d)
     }
 
-    fn __repr__(&self, py: Python<'_>) -> String {
+    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
         let value = match &self.value {
-            Some(v) => v
-                .bind(py)
-                .str()
-                .map_or_else(|_| "?".to_owned(), |s| s.to_string()),
+            Some(v) => v.bind(py).str()?.to_string(),
             None => "None".to_owned(),
         };
-        format!(
-            "<openqbw.LineItem invoice_id={} value={} source_table={:?}>",
-            self.invoice_id, value, self.source_table
-        )
+        let source_table = match &self.source_table {
+            Some(t) => PyString::new(py, t).repr()?.to_string(),
+            None => "None".to_owned(),
+        };
+        Ok(format!(
+            "<openqbw.LineItem qb_id_parent={} value={} source_table={}>",
+            self.qb_id_parent, value, source_table
+        ))
     }
 }
 

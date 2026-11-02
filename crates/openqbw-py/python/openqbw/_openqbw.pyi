@@ -41,7 +41,7 @@ class LineItem:
     decoded, never zero. It is not established as the line's amount, and
     `source_table` is a position-based, unverified attribution."""
 
-    invoice_id: str
+    qb_id_parent: str
     item_qb_id: Optional[str]
     value: Optional[Decimal]
     value_undecoded: Optional[str]
