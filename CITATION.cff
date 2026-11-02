@@ -18,7 +18,7 @@ abstract: >
   table, and record structures without requiring an Intuit runtime.
 license: "Apache-2.0"
 license-url: "https://github.com/Sigilweaver/OpenQBW/blob/main/LICENSE"
-date-released: "2026-05-31"
+date-released: "2026-11-01"
 version: "0.2.0"
 keywords:
   - QBW

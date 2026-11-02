@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-01
+
 Built on opensqlany 0.3.0, fetched from crates.io. `Cargo.lock` is committed.
 The minimum Rust version stays 1.95; Python 3.10 or later is now required.
 
@@ -532,7 +534,8 @@ First publication-ready release.
 - `CHANGELOG.md`, `CONTRIBUTING.md`, `SECURITY.md`, `NOTICE`.
 - Documentation site at <https://sigilweaver.app/openqbw/docs/>.
 
-[Unreleased]: https://github.com/Sigilweaver/OpenQBW/compare/v0.1.6...HEAD
+[Unreleased]: https://github.com/Sigilweaver/OpenQBW/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/Sigilweaver/OpenQBW/compare/v0.1.6...v0.2.0
 [0.1.6]: https://github.com/Sigilweaver/OpenQBW/releases/tag/v0.1.6
 [0.1.5]: https://github.com/Sigilweaver/OpenQBW/releases/tag/v0.1.5
 [0.1.4]: https://github.com/Sigilweaver/OpenQBW/releases/tag/v0.1.4
