@@ -587,3 +587,32 @@ fn verify_output_is_refused_over_a_company_file() {
     assert_eq!(out.status.code(), Some(1), "{out:?}");
     assert_eq!(std::fs::read(&qbw).unwrap(), before);
 }
+
+#[test]
+fn verify_without_output_leaves_nothing_in_the_temp_directory() {
+    for (name, input, ok) in [
+        ("ok", "synthetic.qbw", true),
+        ("fail", "synthetic-bad-record.qbw", false),
+    ] {
+        let tmpdir = tmp(&format!("verify-tmp-{name}"));
+        let out = Command::new(env!("CARGO_BIN_EXE_openqbw"))
+            .args(["verify".as_ref(), os(&fixture(input))])
+            .env("TMPDIR", &tmpdir)
+            .env("TEMP", &tmpdir)
+            .env("TMP", &tmpdir)
+            .output()
+            .unwrap();
+        assert_eq!(out.status.success(), ok, "{name}: {out:?}");
+        assert_eq!(
+            std::fs::read_dir(&tmpdir).unwrap().count(),
+            0,
+            "{name}: {:?}",
+            snapshot(&tmpdir)
+        );
+        if ok {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            assert!(stdout.contains("Export read-back"), "{stdout}");
+            assert!(stdout.contains("line_items         ok"), "{stdout}");
+        }
+    }
+}

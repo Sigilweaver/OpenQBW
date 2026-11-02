@@ -90,11 +90,15 @@ enum Cmd {
     /// Export, then report per-table coverage, decoded and undecoded values,
     /// and how many parent groups of three or more lines sum to exactly zero.
     /// The value is not established as the line amount and source_table is an
-    /// unverified, position-based attribution.
+    /// unverified, position-based attribution. Exits 3 when the exported
+    /// SQLite file's line-item, undecoded-value or rejection counts differ
+    /// from the scan; the other sections are reports and never change the
+    /// exit status.
     Verify {
         /// Input QBW file.
         input: PathBuf,
-        /// Optional output SQLite path. Defaults to a temp file.
+        /// Keep the exported SQLite file at this path. Without it the export
+        /// goes to a temporary file that is removed when verify ends.
         #[arg(long)]
         output: Option<PathBuf>,
         /// Also build a content-signature attribution map and report
@@ -673,9 +677,14 @@ fn run_verify(
     strict_attribution: bool,
     lenient: bool,
 ) -> Result<bool> {
-    let out = match output {
-        Some(p) => p,
-        None => std::env::temp_dir().join(format!("openqbw-verify-{}.sqlite", std::process::id())),
+    // Without --output the export goes to a private temporary directory that
+    // is removed when this function returns, on success or error.
+    let (out, _temp) = match output {
+        Some(p) => (p, None),
+        None => {
+            let dir = outfile::TempDir::new("openqbw-verify")?;
+            (dir.path().join("verify.sqlite"), Some(dir))
+        }
     };
     let stats = run_export(input.clone(), out.clone(), lenient)?;
     println!();
@@ -683,7 +692,16 @@ fn run_verify(
 
     let conn = Connection::open(&out)?;
     check_export_format(&conn).with_context(|| format!("reading {:?}", out))?;
-    let diffs: Vec<&str> = Vec::new();
+    let diffs = readback_diffs(&conn, &stats)?;
+    println!();
+    println!("Export read-back (the SQLite file against the scan):");
+    for check in READBACK_CHECKS {
+        println!(
+            "  {:18} {}",
+            check,
+            if diffs.contains(&check) { "DIFF" } else { "ok" }
+        );
+    }
     println!();
     println!("Per source_table line-item counts (source_table is position-based and unverified):");
     println!(
@@ -825,6 +843,34 @@ fn run_verify(
         eprintln!("verify: checks that differ: {}", diffs.join(", "));
         Ok(false)
     }
+}
+
+/// Names of the checks [`readback_diffs`] runs, in report order.
+const READBACK_CHECKS: [&str; 3] = ["line_items", "undecoded_values", "scan_rejections"];
+
+/// Compare what is on disk in `conn` with what the scan found: line-item
+/// rows, rows with no decoded value, and stored rejections. Returns the names
+/// of the checks that differ, which `verify` reports and answers with exit
+/// status 3. A difference means the export lost or changed records on the way
+/// to the file.
+fn readback_diffs(conn: &Connection, stats: &ExportStats) -> Result<Vec<&'static str>> {
+    let count = |sql: &str| -> Result<i64> { Ok(conn.query_row(sql, [], |r| r.get(0))?) };
+    let on_disk = [
+        count("SELECT COUNT(*) FROM transaction_line_items")?,
+        count("SELECT COUNT(*) FROM transaction_line_items WHERE value IS NULL")?,
+        count("SELECT COUNT(*) FROM scan_rejections")?,
+    ];
+    let scanned = [
+        stats.line_items,
+        stats.undecoded.total() as i64,
+        stats.rejected_records as i64,
+    ];
+    Ok(READBACK_CHECKS
+        .into_iter()
+        .zip(on_disk.into_iter().zip(scanned))
+        .filter(|(_, (disk, scan))| disk != scan)
+        .map(|(name, _)| name)
+        .collect())
 }
 
 /// Label for rows without a source table in human-readable output.
@@ -1955,6 +2001,48 @@ mod tests {
     }
 
     use super::*;
+
+    fn stats_for(items: &[LineItem]) -> ExportStats {
+        ExportStats {
+            pages: 0,
+            transactions: 0,
+            headers: 0,
+            line_items: items.len() as i64,
+            value_sum: None,
+            undecoded: UndecodedCounts::of(items),
+            per_table: BTreeMap::new(),
+            balance: Balance::default(),
+            rejected_records: 0,
+        }
+    }
+
+    #[test]
+    fn readback_agrees_with_the_scan_and_reports_a_difference() {
+        let mut undecoded = item("A", None);
+        undecoded.value_undecoded = Some(openqbw::UndecodedReason::ZeroLength);
+        undecoded.page_offset = 8;
+        let items = [item("A", Some((1, 0))), undecoded];
+        let conn = Connection::open_in_memory().unwrap();
+        create_schema(&conn).unwrap();
+        let tx = conn.unchecked_transaction().unwrap();
+        insert_transaction_line_items(&tx, &items).unwrap();
+        tx.commit().unwrap();
+        let stats = stats_for(&items);
+        assert_eq!(readback_diffs(&conn, &stats).unwrap(), Vec::<&str>::new());
+
+        // A row lost on the way to disk.
+        conn.execute("DELETE FROM transaction_line_items WHERE value IS NULL", [])
+            .unwrap();
+        assert_eq!(
+            readback_diffs(&conn, &stats).unwrap(),
+            ["line_items", "undecoded_values"]
+        );
+
+        // A rejection that was not stored.
+        let mut stats = stats_for(&items[..1]);
+        stats.rejected_records = 1;
+        assert_eq!(readback_diffs(&conn, &stats).unwrap(), ["scan_rejections"]);
+    }
 
     /// A line of `parent` whose value is `mantissa / 10^scale`, or undecoded.
     fn item(parent: &str, value: Option<(i128, u32)>) -> LineItem {

@@ -151,6 +151,42 @@ impl StagedSet {
     }
 }
 
+/// A private temporary directory, removed with its contents when dropped,
+/// on success and on every error path.
+pub struct TempDir(PathBuf);
+
+impl TempDir {
+    /// Create a new directory under the system temp directory. It fails
+    /// when the name is taken, so an existing path is never reused.
+    pub fn new(prefix: &str) -> Result<Self> {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let path = std::env::temp_dir().join(format!("{prefix}-{}-{nanos}", std::process::id()));
+        let mut builder = fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        builder
+            .create(&path)
+            .with_context(|| format!("creating temporary directory {path:?}"))?;
+        Ok(Self(path))
+    }
+
+    /// The directory.
+    pub fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -172,6 +208,17 @@ mod tests {
             assert!(s.path().exists());
         }
         assert_eq!(fs::read_dir(&d).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn temp_dir_is_removed_on_drop() {
+        let path = {
+            let t = TempDir::new("openqbw-test").unwrap();
+            fs::write(t.path().join("a"), b"x").unwrap();
+            assert!(t.path().is_dir());
+            t.path().to_owned()
+        };
+        assert!(!path.exists());
     }
 
     #[test]
