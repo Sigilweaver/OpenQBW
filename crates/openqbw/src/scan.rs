@@ -121,6 +121,10 @@ pub enum RecordFlag {
     /// not a data (`E`) page, so it cannot be the table's root. The row is
     /// not used for page-to-table attribution.
     RootPageInvalid,
+    /// A `SYSTABLE` row's `last_page` is past the end of the file or not a
+    /// data (`E`) page, so it cannot be the table's rightmost leaf. The value
+    /// is kept as read.
+    LastPageInvalid,
 }
 
 impl RecordFlag {
@@ -132,6 +136,7 @@ impl RecordFlag {
             Self::KeystreamUnverified => "keystream_unverified",
             Self::LowConfidenceSector => "low_confidence_sector",
             Self::RootPageInvalid => "root_page_invalid",
+            Self::LastPageInvalid => "last_page_invalid",
         }
     }
 }

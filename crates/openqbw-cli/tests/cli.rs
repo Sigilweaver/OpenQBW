@@ -662,5 +662,79 @@ fn catalog_does_not_show_an_invalid_root_page_as_a_page() {
         "{csv}"
     );
     let bogus = csv.lines().find(|l| l.contains("abmc_bogus")).unwrap();
-    assert!(bogus.ends_with(",root_page_invalid"), "{bogus}");
+    assert!(bogus.contains("root_page_invalid"), "{bogus}");
+}
+
+#[test]
+fn verify_prints_each_catalog_warning_once() {
+    let out = openqbw(&["verify".as_ref(), os(&fixture("synthetic-counts.qbw"))]);
+    let err = stderr(&out);
+    assert_eq!(
+        err.matches("warning: catalog: 1 SYSTABLE rows").count(),
+        1,
+        "{err}"
+    );
+}
+
+#[test]
+fn migrate_to_sqlite_prints_the_summary_once() {
+    let dir = tmp("migrate-summary");
+    let db = dir.join("out.sqlite");
+    let out = openqbw(&[
+        "migrate".as_ref(),
+        os(&fixture("synthetic.qbw")),
+        "--format".as_ref(),
+        "sqlite".as_ref(),
+        "--out".as_ref(),
+        os(&db),
+    ]);
+    assert!(out.status.success(), "{out:?}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(stdout.matches("openqbw: pages=").count(), 1, "{stdout}");
+}
+
+#[test]
+fn export_removes_stale_sqlite_sidecars_next_to_the_output() {
+    let dir = tmp("sidecars");
+    let db = dir.join("out.sqlite");
+    std::fs::write(&db, b"old export").unwrap();
+    for suffix in ["-journal", "-wal", "-shm"] {
+        std::fs::write(dir.join(format!("out.sqlite{suffix}")), b"stale").unwrap();
+    }
+    let out = openqbw(&["export".as_ref(), os(&fixture("synthetic.qbw")), os(&db)]);
+    assert!(out.status.success(), "{out:?}");
+    let names: Vec<String> = snapshot(&dir).into_iter().map(|(n, _)| n).collect();
+    assert_eq!(names, ["out.sqlite"]);
+}
+
+#[test]
+fn catalog_does_not_show_an_invalid_last_page_as_a_page() {
+    let out = openqbw(&["catalog".as_ref(), os(&fixture("synthetic-counts.qbw"))]);
+    assert!(out.status.success(), "{out:?}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let bogus = stdout.lines().find(|l| l.contains("abmc_bogus")).unwrap();
+    assert!(bogus.contains("last_page_invalid"), "{bogus}");
+    let cols: Vec<&str> = bogus.split_whitespace().collect();
+    assert_eq!(cols[3], "-", "{bogus}");
+    let ok = stdout
+        .lines()
+        .find(|l| l.contains("abmc_invoice_header"))
+        .unwrap();
+    assert_eq!(ok.split_whitespace().nth(3), Some("4"), "{ok}");
+    assert!(!ok.contains("last_page_invalid"), "{ok}");
+
+    let dir = tmp("catalog-last-csv");
+    let out = openqbw(&[
+        "migrate".as_ref(),
+        os(&fixture("synthetic-counts.qbw")),
+        "--format".as_ref(),
+        "csv".as_ref(),
+        "--out".as_ref(),
+        os(&dir),
+    ]);
+    assert!(out.status.success(), "{out:?}");
+    let csv = std::fs::read_to_string(dir.join("catalog.csv")).unwrap();
+    let bogus = csv.lines().find(|l| l.contains("abmc_bogus")).unwrap();
+    assert!(bogus.contains(",1,1,"), "{bogus}");
+    assert!(bogus.contains("last_page_invalid"), "{bogus}");
 }

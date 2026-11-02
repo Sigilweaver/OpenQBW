@@ -206,13 +206,7 @@ enum MigrateFormat {
 /// Open a company file. Opening checks the magic, version and every page
 /// CRC and reads the catalog; its warnings and skipped pages are printed.
 fn open_reader(path: &std::path::Path, lenient: bool) -> Result<Reader> {
-    let options = if lenient {
-        ReadOptions::lenient()
-    } else {
-        ReadOptions::strict()
-    };
-    let reader = Reader::open(path, &options)
-        .map_err(|e| anyhow::Error::new(e).context(format!("opening {path:?}")))?;
+    let reader = open_reader_quiet(path, lenient)?;
     let mut printed = Vec::new();
     report_scan(
         "catalog",
@@ -221,6 +215,18 @@ fn open_reader(path: &std::path::Path, lenient: bool) -> Result<Reader> {
         &mut printed,
     );
     Ok(reader)
+}
+
+/// [`open_reader`] without printing the catalog's warnings, for a command
+/// that already printed them when it opened the same file.
+fn open_reader_quiet(path: &std::path::Path, lenient: bool) -> Result<Reader> {
+    let options = if lenient {
+        ReadOptions::lenient()
+    } else {
+        ReadOptions::strict()
+    };
+    Reader::open(path, &options)
+        .map_err(|e| anyhow::Error::new(e).context(format!("opening {path:?}")))
 }
 
 /// Whether `--lenient` can get past an error: a lenient read skips a page
@@ -385,7 +391,7 @@ fn run_export(input: PathBuf, output: PathBuf, lenient: bool) -> Result<ExportSt
     conn.close()
         .map_err(|(_, e)| e)
         .with_context(|| format!("closing {:?}", output))?;
-    staged.commit()?;
+    staged.commit_sqlite()?;
     println!("{}", stats.summary());
     Ok(stats)
 }
@@ -423,16 +429,18 @@ fn run_catalog(input: PathBuf, user_only: bool, lenient: bool) -> Result<()> {
             .col_count
             .map(|c| c.to_string())
             .unwrap_or_else(|| "-".into());
-        // A root past the end of the file or not on a data page is not a
-        // page number; it is shown as "-" and named in the flags column.
+        // A root or last page past the end of the file or not on a data page
+        // is not a page number; it is shown as "-" and named in the flags
+        // column.
         let root = if e.flags.contains(&openqbw::RecordFlag::RootPageInvalid) {
             None
         } else {
             e.data_root_page
         };
         let root = root.map(|p| p.to_string()).unwrap_or_else(|| "-".into());
-        let last = e
-            .last_page
+        let last = (!e.flags.contains(&openqbw::RecordFlag::LastPageInvalid))
+            .then_some(e.last_page)
+            .flatten()
             .map(|p| p.to_string())
             .unwrap_or_else(|| "-".into());
         println!(
@@ -860,7 +868,8 @@ fn run_verify(
 
     println!();
     println!("=== SYSINDEX cross-validation ===");
-    let reader = open_reader(&input, lenient)?;
+    // run_export printed the catalog's warnings when it opened the file.
+    let reader = open_reader_quiet(&input, lenient)?;
     {
         let entries = reader.indexes()?.items;
         let audit = diagnostics::sysindex_cross_validation(&reader)?;
@@ -1446,9 +1455,8 @@ fn run_migrate(
         anyhow::bail!("--placeholder-accounts applies only to --format iif");
     }
     match format {
-        MigrateFormat::Sqlite => {
-            run_export(input, out, lenient).map(|s| println!("{}", s.summary()))
-        }
+        // run_export prints the summary.
+        MigrateFormat::Sqlite => run_export(input, out, lenient).map(|_| ()),
         MigrateFormat::Csv => run_migrate_csv(input, out, lenient),
         MigrateFormat::Iif => run_migrate_iif(input, out, placeholder_accounts, lenient),
     }

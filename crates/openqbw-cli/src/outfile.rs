@@ -105,6 +105,24 @@ impl Staged {
             .with_context(|| format!("writing {:?}", self.temp))
     }
 
+    /// Replace the destination, a SQLite database, with the staged file. A
+    /// `-journal`, `-wal` or `-shm` left next to the destination by an
+    /// earlier database is removed first: SQLite would replay it onto the
+    /// new file.
+    pub fn commit_sqlite(self) -> Result<()> {
+        for suffix in ["-journal", "-wal", "-shm"] {
+            let mut side = self.dest.clone().into_os_string();
+            side.push(suffix);
+            let side = PathBuf::from(side);
+            match fs::remove_file(&side) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e).with_context(|| format!("removing {side:?}")),
+            }
+        }
+        self.commit()
+    }
+
     /// Replace the destination with the staged file.
     pub fn commit(mut self) -> Result<()> {
         fs::rename(&self.temp, &self.dest)
