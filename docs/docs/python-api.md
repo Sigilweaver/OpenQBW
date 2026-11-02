@@ -61,6 +61,10 @@ a `flags` list naming the reasons it deserves less trust.
 `page_number`, `stamp_unix_seconds` (Unix seconds, taken as UTC, or `None`
 when the row stamp is outside 1990..2100), `flags`.
 
+`flags` includes `root_page_invalid` or `last_page_invalid` when that page
+number is past the end of the file or not a data page; the number is kept as
+read.
+
 ```python
 for t in r.tables()[:5]:
     print(t.table_id, t.name)

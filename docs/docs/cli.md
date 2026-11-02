@@ -52,8 +52,12 @@ $ openqbw catalog mybooks.qbw
 
 Prints one line per table from SYSTABLE. With `--user-only`, skips
 `SYS*`, `ISYS*`, `RS_*` and `dbo*` tables. Useful as a first look at any
-file. A root page past the end of the file, or not on a data page, is shown as
-`-` and the `flags` column reads `root_page_invalid`.
+file. The columns are `tid` (table id), `cols` (column count), `root` (the
+table's first data page), `last` (its rightmost leaf page), `flags` and
+`name`. A root or last page past the end of the file, or not on a data page,
+is shown as `-` and the `flags` column reads `root_page_invalid` or
+`last_page_invalid`. `catalog.csv` from `migrate --format csv` keeps the raw
+number and carries the same flags.
 
 ### `schema <input> <table>`
 

@@ -33,8 +33,8 @@ OpenQBW is in active development. The current code can:
   invoices.
 - Attribute pages to tables by position. The attribution is unverified; see
   below.
-- Export the parsed catalog, transactions and line items to SQLite, CSV or
-  IIF.
+- Export transactions and line items to SQLite, CSV or IIF. The catalog is
+  exported in CSV only (`catalog.csv`); SQLite does not carry it.
 
 Each line item carries its numeric value field, decoded by structure (the
 SQL Anywhere NUMERIC layout) as an exact decimal. A field that does not fit
@@ -177,7 +177,7 @@ the names are the warning codes (`records_outside_live_rows`,
 `line_items_not_read`, `unattributed_records`, `header_rows_without_id`,
 `invalid_root_pages`, `keystream_unverified_pages`,
 `low_confidence_sector_pages`, `unconfirmed_directory_pages`, `opaque_pages`,
-`undecoded_values`, `attribution_gap`) plus `headers.duplicate_header_ids` and
+`undecoded_values`, `sector_boundary_anchors`, `attribution_gap`) plus `headers.duplicate_header_ids` and
 `headers.duplicate_header_ids_conflicting_types`. Each scan's usual counts
 are written even when zero. The totals a count is out of (`..._decoded`,
 `..._extent`, `..._total`) and the `undecoded_values_*` breakdown appear

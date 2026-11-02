@@ -20,9 +20,10 @@ version its export layout (`format_version` 1).
   significant first, the sign in `ctrl & 0x80` and the exponent
   `(ctrl & 0x7F) - 64`, so `02 3f 2f 4b` is 75.47 and `02 c0 3c 09` is -960.
   `Decimal` (checked addition, lossless `Display`) is the type of
-  `LineItem::value`. On the Rock Castle sample, 1586 of 4260 parent groups of
-  three or more lines sum to exactly zero under this reading, against 5 of
-  4260 for shuffled digits. A field is decoded when `1 <= k <= 10`, every
+  `LineItem::value`. On the Rock Castle sample, `verify` reports 1238 of 2107
+  parent groups of three or more fully decoded lines summing to exactly zero
+  (58.8%); shuffling the decoded values among those groups' lines leaves 0
+  to 2. A field is decoded when `1 <= k <= 10`, every
   digit is at most 99, the field lies inside the page and the exponent is in
   -1..=2. Any other field keeps its raw bytes with `value` `None` and a
   reason (`zero_length`, `digit_over_99`, `exponent_out_of_range`,
@@ -30,9 +31,10 @@ version its export layout (`format_version` 1).
   reason. That the value is the line's amount is not established.
 - A value field whose length byte sits on, or whose bytes cross, a 512-byte
   sector boundary is undecoded with reason `sector_boundary`, with its raw
-  bytes kept. It is not a record error (101 such records on the Rock Castle
-  sample). Strict mode still stops on that sample: 55 other "value length
-  byte above 10" record errors remain, not related to sector boundaries and
+  bytes kept. It is not a record error: 429 values on the Rock Castle
+  sample carry `sector_boundary`, and the 101 records that used to fail with a
+  record error for this reason no longer do. Strict mode still stops on that
+  sample: 55 other "value length byte above 10" record errors remain, not related to sector boundaries and
   under investigation, and `--lenient` skips them. Strict stays the default.
 - `Reader`, the single entry point: `Reader::open(path, &ReadOptions)` (and
   `Reader::from_bytes`) owns the page store, the keystream model, the catalog
@@ -61,10 +63,12 @@ version its export layout (`format_version` 1).
   `records_outside_live_rows`, `line_items_not_read`, `unattributed_records`,
   `header_rows_without_id`, `invalid_root_pages`, `keystream_unverified_pages`,
   `low_confidence_sector_pages`, `unconfirmed_directory_pages`, `opaque_pages`,
-  `undecoded_values` and `attribution_gap`, plus duplicate header ID counts.
+  `undecoded_values`, `sector_boundary_anchors` and `attribution_gap`, plus
+  duplicate header ID counts.
   The `sector_boundary_anchors` warning counts line-item anchors cut by a
-  sector boundary that were not read; the count is approximate (about 2,450 on
-  the Rock Castle sample, roughly 4.5% of its line items). It is also written
+  sector boundary that were not read; the count is approximate (about 2,880 on
+  the Rock Castle sample, where the line items lost are roughly 4.5% of the
+  total). It is also written
   to the exports as `line_items.sector_boundary_anchors`.
 - Export layout version. SQLite exports have a `meta` table
   (`format_version`, `openqbw_version`, `source_table_attribution`) and
@@ -208,12 +212,17 @@ version its export layout (`format_version` 1).
   bad magic, version or checksum. A bad-magic or unsupported-file error no
   longer suggests `--lenient`. Python `RecordError` and page-store errors say
   to open the file with `lenient=True`.
+- Replacing an existing SQLite export also removes a `-journal`, `-wal` or
+  `-shm` file left next to it, which SQLite would otherwise replay onto the
+  new file.
 - Warnings are labeled by scan (`catalog:`, `line items:`, `headers:`), and a
   warning an earlier scan already printed is not repeated, so one run no
   longer prints the keystream and low-confidence warnings three times with
   different denominators. `openqbw catalog` shows a root page past the end of
   the file or not on a data page as `-`, with a `flags` column
-  (`root_page_invalid`). `--help` and the verify report no longer use
+  (`root_page_invalid`). A `last_page` that fails the same test carries
+  `last_page_invalid` and is shown the same way (`catalog.csv` keeps the raw
+  value). `--help` and the verify report no longer use
   internal phase names.
 - Every page is decoded through one path. A page whose keystream opensqlany
   confirms is read as before. A page where exactly one `bv` decodes the

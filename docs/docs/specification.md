@@ -450,7 +450,7 @@ Evidence, over the six TLR 2021/2022 practice files tested
   distinct `(name, owner)` pairs) picks it by a factor of ten over
   the runner-up;
 - it resolves 401-420 of the ~650 table names per file, against
-  115-144 for the `SYSOBJECT` name scan of §WP-6Z.2;
+  115-144 for the `SYSOBJECT` name scan;
 - the map is near-injective (e.g. 421 distinct owners for 420 names on
   `B22_Sample.qbw`) and near-monotone against the row's `<tid>`
   (11-17 inversions per file);
@@ -499,11 +499,14 @@ length byte is unreadable the raw bytes are only `[k][ctrl]`, the field
 width is unknown and no date is searched for after it. A length byte above 10
 anywhere else, or a field cut off by the page end, is a record error.
 
-Evidence for this layout is in the file itself. On the Rock Castle sample, 1586
-of 4260 parent groups of three or more lines sum to exactly zero under this
-reading, against 5 of 4260 when the digit bytes are shuffled, and every group
-that balanced under the earlier readings (unsigned u24; sign-bit u23) still
-balances. Those two readings are contradicted by the data and are not used.
+Evidence for this layout is in the file itself. `openqbw --lenient verify`
+on the Rock Castle sample reports 1238 of 2107 parent groups of three or more
+lines, all of whose values decode, summing to exactly zero under this reading
+(58.8%). Shuffling the decoded values among the lines of those 2107 groups
+(group sizes kept, 20 shuffles) left 0 to 2 groups summing to zero. Every
+group that balanced under the earlier readings (unsigned u24; sign-bit u23)
+still balances. Those two readings are contradicted by the data and are not
+used.
 
 The exponent range is the one the balanced groups use: on the Rock Castle
 sample every line of a group that sums to zero has `e` in -1..=2. Outside it
@@ -512,17 +515,23 @@ with `e` = -3, neither plausible as a stored value, so wider exponents are
 not read.
 
 Known limit: an anchor that itself straddles a 512-byte sector boundary may
-not be found, so its line item is not read. Anchors that start in the last 25
-bytes before a sector boundary (in-sector offsets 488..511) are mostly not
-found. On the Rock Castle sample, anchors starting 488 to 507 bytes into a
-sector are found about 16 times each, against about 110 for every other
-offset, which puts the loss near 4.5% of line items. The reader counts them
-but does not read them: it looks for the 5-byte prefix `00 00 00 00 10` at
-in-sector offsets 488..507 followed by base62 characters up to the boundary,
-where the whole 25-byte anchor does not match, and reports the count (about,
-because it cannot tell a cut line item from other data that starts the same
-way) in the `sector_boundary_anchors` warning. Reading across the boundary is
-not implemented.
+not be found, so its line item is not read. On the Rock Castle sample, anchors
+that start in the last 24 bytes before a sector boundary (in-sector offsets
+488..511) are mostly not found: offsets 488..491 never, offsets 492..507 0 to
+3 times each (16 in all), and offsets 508..511 11, 10, 20 and 30 times,
+against about 111 for each of the other offsets. That puts the loss near 4.5%
+of line items. The reader counts the anchors that start at in-sector offsets
+488..507 but does not read them: it looks for the 5-byte prefix
+`00 00 00 00 10` followed by the base62 ID characters that lie before the
+boundary (all 16 from offset 488 to 491, fewer after, and none of the
+quantity bytes), where the whole 25-byte anchor does not match. On the sample
+that finds 123 to 170 candidates at each of those 20 offsets and about 2,880
+in all, reported in the `sector_boundary_anchors` warning as "about" because
+it cannot tell a cut line item from other data that starts the same way (the
+few ID characters checked near offset 507 match easily). Anchors that start
+at offsets 508..511 are not counted: the boundary cuts the prefix itself, and
+one to four zero bytes at the end of a sector are not distinguishable from
+padding. Reading across the boundary is not implemented.
 
 What is not established:
 
@@ -763,7 +772,7 @@ at the cost of large values being silently absent from its output.
   `VerifyPriceRulesOrphanItems`, `VerifySiteItemIdMatches`,
   `emp_Pay_Item_Id_Num`). This corroborates C.14 at corpus scale
   and confirms the payload is a genuine SA 17 database with an
-  Intuit schema overlaid. Tool: `re/strings_plain.py`.
+  Intuit schema overlaid.
 - **2026-04-19 · C.16** - Catalog + UI pages located. On Rock
   Castle, page 2 (type `A`) is the SA **index catalog** (ISYS*
   names); page 340 (type `E`) holds the SA **system-table list**
@@ -772,9 +781,9 @@ at the cost of large values being silently absent from its output.
   Company Center, Customer Center, Create Invoices, Pay Bills,
   Chart of Accounts etc., with references to `qbwin32.dll` and
   `qbw:centers?...` URLs. Row-data pages for QB entities begin at
-  pn ≈ 1289. Tool: `re/find_string.py`.
+  pn ≈ 1289.
 - **2026-04-19 · C.17** - Slotted-page directories parsed.
-  `re/page_layout.py` now locates the descending u16 row-offset array
+  The descending u16 row-offset array is located
   on deobfuscated SAP catalog pages even when the array is odd-aligned
   and preceded by a zero sentinel. Verified on Rock Castle:
   page 2 (`A`) has 39 slots, page 11 (`E`) has 124 slots, and page
@@ -782,7 +791,7 @@ at the cost of large values being silently absent from its output.
   immediately before the array contain the minimum row offset and the
   slot count, but other fields remain unidentified.
 - **2026-04-19 · C.18** - SYSTABLE row tag identified and catalog
-  scanned. `re/systable_scan.py` extracts `(table_id, name)` pairs
+  scanned. A scan extracts `(table_id, name)` pairs
   from every deobfuscated `E` page matching the invariant tag
   `b1 0d 19 0d 00 00 00 00` preceded by `05 00 00 00` and the row
   `table_id u32_LE`. On `B22_Sample.qbw` the scan recovers 114

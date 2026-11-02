@@ -35,7 +35,7 @@ OpenQBW ships these export targets (`openqbw export` and
 |--------|------------------------------------------------------|
 | SQLite | You want to query the data, or import to BI tools    |
 | CSV    | You want a lowest-common-denominator handoff         |
-| IIF    | You want to import to another QB-compatible product  |
+| IIF    | Only if your target reads IIF and you accept placeholder accounts (below) |
 
 ## Step 4: Export
 
@@ -43,7 +43,8 @@ OpenQBW ships these export targets (`openqbw export` and
 # Strict is the default and stops at the first record it cannot decode.
 # Real files often need --lenient, which skips and lists those records.
 
-# SQLite (one file, all tables)
+# SQLite (one file with four tables: transactions,
+# transaction_line_items, scan_rejections, meta)
 $ openqbw --lenient export mybooks.qbw books.sqlite
 
 # CSV (a directory of files)
@@ -53,6 +54,11 @@ $ openqbw --lenient migrate mybooks.qbw --format csv --out csv-out/
 # file uses placeholder accounts
 $ openqbw --lenient migrate mybooks.qbw --format iif --placeholder-accounts --out books.iif
 ```
+
+The IIF file has only placeholder accounts: every transaction posts to
+`Accounts Receivable` and every split line to a source-table name, and the
+values are not established as line amounts. Expect to remap accounts after an
+import; do not treat it as a finished migration.
 
 The output is built in a temporary file and replaces the destination only on
 success. The commands refuse to write over the input file or a QuickBooks
@@ -90,8 +96,7 @@ before relying on it.
 - Password-protected files: structural metadata only; row content
   remains obfuscated until QuickBooks decrypts it on open.
 - Multi-user (.QBX, .QBA) files: not yet supported.
-- Custom user-defined fields are exported as-is (raw bytes) when
-  the encoding cannot be determined from the catalog.
+- Custom user-defined fields are not exported.
 
 If you hit a limitation, please open an issue with the file
 size, QB version, and the failing command. **Do not attach the
