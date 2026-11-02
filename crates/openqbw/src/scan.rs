@@ -216,6 +216,19 @@ pub enum WarningKind {
         digit_over_99: u64,
         /// Fields with an exponent outside -1..=2.
         exponent_out_of_range: u64,
+        /// Fields whose length byte or bytes sit on a 512-byte sector
+        /// boundary.
+        sector_boundary: u64,
+    },
+    /// Line-item anchors cut by a 512-byte sector boundary: the prefix and
+    /// the ID characters before the boundary match an anchor but the anchor
+    /// as a whole does not, so the line is missing from the results and
+    /// from every total. Counted from the part of the anchor before the
+    /// boundary, so the count is approximate.
+    #[non_exhaustive]
+    SectorBoundaryAnchors {
+        /// Anchor starts seen.
+        anchors: u64,
     },
     /// Line-item anchors whose quantity field is a plausible value other than
     /// 1.0. The decoder reads only lines with quantity 1.0, so these lines are
@@ -252,6 +265,7 @@ impl WarningKind {
             Self::HeaderRowsWithoutId { .. } => "header_rows_without_id",
             Self::UnattributedRecords { .. } => "unattributed_records",
             Self::UndecodedValues { .. } => "undecoded_values",
+            Self::SectorBoundaryAnchors { .. } => "sector_boundary_anchors",
             Self::LineItemsNotRead { .. } => "line_items_not_read",
             Self::InvalidRootPages { .. } => "invalid_root_pages",
             Self::AttributionGap(_) => "attribution_gap",
@@ -314,12 +328,19 @@ impl fmt::Display for Warning {
                 zero_length,
                 digit_over_99,
                 exponent_out_of_range,
+                sector_boundary,
             } => write!(
                 f,
                 "{} line-item values were not decoded and keep their raw bytes ({zero_length} \
                  with a digit count of 0, {digit_over_99} with a digit above 99, \
-                 {exponent_out_of_range} with an exponent outside -1..=2)",
-                zero_length + digit_over_99 + exponent_out_of_range
+                 {exponent_out_of_range} with an exponent outside -1..=2, {sector_boundary} at \
+                 a 512-byte sector boundary)",
+                zero_length + digit_over_99 + exponent_out_of_range + sector_boundary
+            ),
+            WarningKind::SectorBoundaryAnchors { anchors } => write!(
+                f,
+                "about {anchors} line-item anchors are cut by a 512-byte sector boundary and \
+                 were not read; they are missing from the results and totals"
             ),
             WarningKind::LineItemsNotRead { anchors } => write!(
                 f,

@@ -749,11 +749,12 @@ fn run_verify(
     println!();
     println!("Parent-group balance (informational; not a pass/fail check):");
     println!(
-        "  {} undecoded values: {} zero-length, {} digit above 99, {} exponent out of range",
+        "  {} undecoded values: {} zero-length, {} digit above 99, {} exponent out of range, {} at a sector boundary",
         stats.undecoded.total(),
         stats.undecoded.zero_length,
         stats.undecoded.digit_over_99,
         stats.undecoded.exponent_out_of_range,
+        stats.undecoded.sector_boundary,
     );
     println!(
         "  parent groups of 3+ lines, all decoded: {}; summing to exactly zero: {} ({:.1}%)",
@@ -904,8 +905,8 @@ fn create_schema(conn: &Connection) -> Result<()> {
             -- not decoded (see value_undecoded). Not established as the
             -- line's amount.
             value               TEXT,
-            -- zero_length, digit_over_99 or exponent_out_of_range; NULL when
-            -- the value is decoded.
+            -- zero_length, digit_over_99, exponent_out_of_range or
+            -- sector_boundary; NULL when the value is decoded.
             value_undecoded     TEXT,
             -- The field's bytes, lowercase hex: [k][ctrl][k digit bytes].
             value_raw_hex       TEXT NOT NULL,
@@ -1163,6 +1164,9 @@ struct UndecodedCounts {
     zero_length: u64,
     digit_over_99: u64,
     exponent_out_of_range: u64,
+    sector_boundary: u64,
+    /// A reason this build does not name.
+    other: u64,
 }
 
 impl UndecodedCounts {
@@ -1173,14 +1177,21 @@ impl UndecodedCounts {
                 openqbw::UndecodedReason::ZeroLength => c.zero_length += 1,
                 openqbw::UndecodedReason::DigitOver99 => c.digit_over_99 += 1,
                 openqbw::UndecodedReason::ExponentOutOfRange => c.exponent_out_of_range += 1,
-                _ => {}
+                openqbw::UndecodedReason::SectorBoundary => c.sector_boundary += 1,
+                // A reason added after this build is counted in the total
+                // below only through the lines themselves.
+                _ => c.other += 1,
             }
         }
         c
     }
 
     fn total(&self) -> u64 {
-        self.zero_length + self.digit_over_99 + self.exponent_out_of_range
+        self.zero_length
+            + self.digit_over_99
+            + self.exponent_out_of_range
+            + self.sector_boundary
+            + self.other
     }
 }
 
@@ -1388,11 +1399,12 @@ fn warning_values(kind: &WarningKind) -> Vec<(String, u64)> {
             zero_length,
             digit_over_99,
             exponent_out_of_range,
+            sector_boundary,
             ..
         } => vec![
             (
                 code.into(),
-                zero_length + digit_over_99 + exponent_out_of_range,
+                zero_length + digit_over_99 + exponent_out_of_range + sector_boundary,
             ),
             (format!("{code}_zero_length"), *zero_length),
             (format!("{code}_digit_over_99"), *digit_over_99),
@@ -1400,7 +1412,9 @@ fn warning_values(kind: &WarningKind) -> Vec<(String, u64)> {
                 format!("{code}_exponent_out_of_range"),
                 *exponent_out_of_range,
             ),
+            (format!("{code}_sector_boundary"), *sector_boundary),
         ],
+        WarningKind::SectorBoundaryAnchors { anchors, .. } => vec![(code.into(), *anchors)],
         WarningKind::LineItemsNotRead { anchors, .. } => vec![(code.into(), *anchors)],
         WarningKind::InvalidRootPages { tables, .. } => vec![(code.into(), *tables)],
         // A condition without a count: 1 when present.
@@ -1430,6 +1444,7 @@ fn collect_records(reader: &Reader) -> Result<Records> {
             "records_outside_live_rows",
             "line_items_not_read",
             "undecoded_values",
+            "sector_boundary_anchors",
             "unattributed_records",
             "attribution_gap",
         ],
@@ -2084,7 +2099,9 @@ mod tests {
             UndecodedCounts {
                 zero_length: 1,
                 digit_over_99: 1,
-                exponent_out_of_range: 0
+                exponent_out_of_range: 0,
+                sector_boundary: 0,
+                other: 0
             }
         );
         assert_eq!(c.total(), 2);
