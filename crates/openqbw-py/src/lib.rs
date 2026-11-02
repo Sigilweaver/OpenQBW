@@ -13,7 +13,7 @@ use openqbw_rs::{
     TransactionHeader,
 };
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyDict, PyList};
+use pyo3::types::{PyBytes, PyDict, PyList, PyString};
 
 /// Look up a class defined in `openqbw._errors`.
 fn errors_attr<'py>(py: Python<'py>, name: &str) -> PyResult<Bound<'py, PyAny>> {
@@ -47,7 +47,23 @@ fn build_py_err(py: Python<'_>, e: &openqbw_rs::Error, path: Option<&PathBuf>) -
         (openqbw_rs::Error::Io(io), Some(p)) if io.raw_os_error().is_some() => {
             cls.call1((io.raw_os_error(), io.to_string(), p.display().to_string()))?
         }
-        _ => cls.call1((e.to_string(),))?,
+        _ => {
+            // A lenient open skips a page that failed to decode and a record
+            // whose value field cannot be read; say so on those errors only.
+            let lenient_helps = matches!(
+                e.kind(),
+                ErrorKind::InvalidValueLength | ErrorKind::TruncatedValue
+            ) || (e.kind() == ErrorKind::Store && e.page_number().is_some());
+            let msg = if lenient_helps {
+                format!(
+                    "{e} (open the file with lenient=True to skip undecodable records \
+                     and pages; they are listed in `rejected`)"
+                )
+            } else {
+                e.to_string()
+            };
+            cls.call1((msg,))?
+        }
     };
     value.setattr("kind", e.kind().as_str())?;
     value.setattr("page_number", e.page_number())?;
@@ -233,13 +249,15 @@ fn flag_names(flags: &[openqbw_rs::RecordFlag]) -> Vec<String> {
 /// A line item.
 #[pyclass(module = "openqbw", frozen, get_all)]
 struct LineItem {
-    invoice_id: String,
+    /// Parent transaction QB-ID (16 characters); the SQLite and CSV exports
+    /// call it `qb_id_parent`.
+    qb_id_parent: String,
     item_qb_id: Option<String>,
     /// The numeric value field as a `decimal.Decimal`, exact; `None` means
     /// not decoded, not zero. Not established as the line's amount.
     value: Option<Py<PyAny>>,
-    /// Why `value` is `None` (`zero_length`, `digit_over_99` or
-    /// `exponent_out_of_range`); `None` when it is decoded.
+    /// Why `value` is `None` (`zero_length`, `digit_over_99`,
+    /// `exponent_out_of_range` or `sector_boundary`); `None` when it is decoded.
     value_undecoded: Option<String>,
     value_raw: Py<PyBytes>,
     txn_date_raw: Option<u32>,
@@ -264,7 +282,7 @@ impl LineItem {
             None => None,
         };
         Ok(Self {
-            invoice_id: li.invoice_id.clone(),
+            qb_id_parent: li.qb_id_parent.clone(),
             item_qb_id: li.item_qb_id.clone(),
             value,
             value_undecoded: li.value_undecoded.map(|r| r.as_str().to_owned()),
@@ -285,7 +303,7 @@ impl LineItem {
 impl LineItem {
     fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let d = PyDict::new(py);
-        d.set_item("invoice_id", &self.invoice_id)?;
+        d.set_item("qb_id_parent", &self.qb_id_parent)?;
         d.set_item("item_qb_id", &self.item_qb_id)?;
         d.set_item("value", self.value.as_ref().map(|v| v.bind(py)))?;
         d.set_item("value_undecoded", &self.value_undecoded)?;
@@ -301,18 +319,19 @@ impl LineItem {
         Ok(d)
     }
 
-    fn __repr__(&self, py: Python<'_>) -> String {
+    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
         let value = match &self.value {
-            Some(v) => v
-                .bind(py)
-                .str()
-                .map_or_else(|_| "?".to_owned(), |s| s.to_string()),
+            Some(v) => v.bind(py).str()?.to_string(),
             None => "None".to_owned(),
         };
-        format!(
-            "<openqbw.LineItem invoice_id={} value={} source_table={:?}>",
-            self.invoice_id, value, self.source_table
-        )
+        let source_table = match &self.source_table {
+            Some(t) => PyString::new(py, t).repr()?.to_string(),
+            None => "None".to_owned(),
+        };
+        Ok(format!(
+            "<openqbw.LineItem qb_id_parent={} value={} source_table={}>",
+            self.qb_id_parent, value, source_table
+        ))
     }
 }
 
@@ -503,8 +522,9 @@ impl Reader {
         self.inner.file_size()
     }
 
-    /// Database creation time as Unix seconds (UTC), or `None` when the
-    /// stamp at superblock offset 0x2A is outside 1990..2100.
+    /// Database creation time as Unix seconds (the stored count taken as
+    /// UTC), or `None` when the stamp at superblock offset 0x2A is outside
+    /// 1990..2100.
     #[getter]
     fn created_unix_seconds(&self) -> Option<i64> {
         self.inner.created_unix_seconds()

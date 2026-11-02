@@ -1,4 +1,4 @@
-//! SA17 date and counter utilities (Phase 6, WP-6C).
+//! SA17 date and counter utilities.
 //!
 //! SA17 stores calendar dates as `u32` "SA-days". This crate converts them
 //! with
@@ -7,11 +7,14 @@
 //!     unix_day = sa_day - DATE_EPOCH_DAYS_BEFORE_UNIX   (4017)
 //! ```
 //!
-//! which places SA-day 0 at 1959-01-02. The offset was fitted so that the
-//! Rock Castle Construction sample's dates (SA-days 13000..19790) land
-//! between 1994-08-06 and 2013-03-09. It has not been checked against a
-//! date known from another source, so a converted date is only as reliable
-//! as that fit. Callers that need the raw value use `txn_date_raw`.
+//! which places SA-day 0 at 1959-01-02. The offset was fitted to one
+//! sample, Rock Castle Construction, whose dates (SA-days
+//! 13000..19790) land between 1994-08-06 and 2013-03-09 under it. It has not
+//! been checked against a date known from another source. The accepted
+//! SA-day window is 10000..=40000, which converts to 1986-05-20 through
+//! 2068-07-08; that range is a plausibility bound, not evidence that the
+//! offset holds across it. Callers that need the raw value use
+//! `txn_date_raw`.
 //!
 //! Line items and headers carry no date column that this crate can locate
 //! by schema. The date is found by scanning a short window after the record

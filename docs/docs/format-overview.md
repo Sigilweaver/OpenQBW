@@ -1,8 +1,7 @@
 # Format overview
 
 This is a high-level orientation map. The detailed specification
-is in [SPECIFICATION.md](./specification.md), and the empirical
-notebook is in [re/NOTES.md](https://github.com/Sigilweaver/OpenQBW/blob/main/re/NOTES.md).
+is in [SPECIFICATION.md](./specification.md).
 
 ## Three layers
 
@@ -42,10 +41,10 @@ SQL Anywhere uses on-page system tables (SYSTABLE, SYSCOLUMN,
 SYSINDEX, SYSOBJECT) instead of a separate metadata file. OpenQBW
 parses these to enumerate user tables and their columns.
 
-Empirical finding (C.57): all index root pages cluster in a
-separate dbspace extent at file end, not adjacent to their owning
-tables. This means SYSINDEX can validate index ownership at the
-row level but **not** page-to-table attribution at the page level.
+All index root pages cluster in a separate dbspace extent at file
+end, not adjacent to their owning tables. This means SYSINDEX can
+validate index ownership at the row level but **not** page-to-table
+attribution at the page level.
 
 ## Layer 3: QuickBooks business layer
 
@@ -55,15 +54,14 @@ as a row in an `abmc_*` table. OpenQBW's `lineitem.rs` and
 key tables.
 
 Page-to-table attribution is handled by `page_attribution.rs`
-(SYSTABLE-driven) with `attribution_schema.rs` and
-`attribution_content.rs` as schema-driven and content-signature
-validators respectively. The combined width-band attribution is
-the production answer (see WP-6Z.2).
+(SYSTABLE-driven, by page position). It is unverified: the
+content-signature cross-check in `attribution_content.rs` agrees with
+it on 0.3% of pages on the Rock Castle sample.
 
 ## Where to read the code
 
 - `crates/openqbw/src/lib.rs` -- top-level re-exports
-- `crates/openqbw/src/lineitem.rs` -- invoice line-item record
+- `crates/openqbw/src/lineitem.rs` -- line-item record
 - `crates/openqbw/src/transaction_header.rs` -- transaction header
 - `crates/openqbw/src/page_attribution.rs` -- page-to-table map
 - `crates/openqbw/src/sysindex.rs` -- index catalog

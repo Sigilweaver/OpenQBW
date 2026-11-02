@@ -1,6 +1,5 @@
 //! Bridge [`SysColumn::owner_object_id`] to [`SysTableEntry::name`] using
-//! the table-id back-reference carried by the `SYSTABLE` row itself
-//! (Phase 6, WP-6Z.4).
+//! the table-id back-reference carried by the `SYSTABLE` row itself.
 //!
 //! [`crate::sysobject`] bridges owners to table names by looking for a
 //! `SYSOBJECT`-style `<object_id><20 bytes><name_len><name>` row whose

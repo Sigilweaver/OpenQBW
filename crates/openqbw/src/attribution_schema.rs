@@ -1,8 +1,8 @@
-//! Schema-aware page attribution validator (Phase 6, WP-6Z).
+//! Schema-aware page attribution validator.
 //!
-//! Prior phases established that there is no on-disk per-table tag in
-//! SA17 page headers (WP-3A, WP-4C refuted) and no walkable per-table
-//! B-tree of interior nodes (WP-4B refuted: I-pages are empty in QBW).
+//! There is no on-disk per-table tag in SA17 page headers and no
+//! walkable per-table B-tree of interior nodes (the I-pages are empty in
+//! QBW).
 //! The position-based [`crate::page_attribution::PageAttribution`]
 //! (C.47 nearest-lower-`data_root` heuristic) therefore remains the
 //! only available attribution signal, and is known to be noisy
@@ -10,7 +10,7 @@
 //! Rock Castle).
 //!
 //! This module adds an orthogonal *validation* signal derived from the
-//! SYSCOLUMN catalog (Phase 6 WP-6A). For each table we precompute a
+//! SYSCOLUMN catalog. For each table we precompute a
 //! plausible **row-width band** from the declared column widths and
 //! domain codes, then check each candidate page against that band
 //! using the median row body length from its slot directory.
@@ -111,7 +111,7 @@ impl SchemaAttribution {
         let columns: Vec<SysColumn> = columns.items;
 
         // Bridge SYSCOLUMN.owner_object_id -> SYSTABLE.name via the
-        // SYSOBJECT catalog (Phase 6, WP-6Z.2). The prior
+        // SYSOBJECT catalog. The earlier
         // assumption that owner_object_id == data_root_page was wrong;
         // it matched coincidentally on a small subset.
         let (owner_to_table, _) =

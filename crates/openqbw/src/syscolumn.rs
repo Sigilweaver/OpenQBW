@@ -1,7 +1,7 @@
-//! `SYSCOLUMN` catalog row parser (Phase 6, WP-6A).
+//! `SYSCOLUMN` catalog row parser.
 //!
 //! Each `SYSCOLUMN` row stores one column definition. On Rock Castle the
-//! body has the layout (reverse-engineered in `re/NOTES.md`):
+//! body has the layout:
 //!
 //! ```text
 //! <name_len u8> <name>
@@ -23,12 +23,12 @@
 //! immediately before a printable identifier wins.
 //!
 //! Owners are bridged to user-visible table names through the table-id
-//! back-reference in the `SYSTABLE` row prefix (Phase 6, WP-6Z.4; see
+//! back-reference in the `SYSTABLE` row prefix (see
 //! [`crate::owner_bridge`]), falling back to the `SYSOBJECT` catalog
-//! scan (WP-6Z.2, [`crate::sysobject`]) for owners it does not cover.
-//! The earlier WP-6A attempt to join [`SysColumn::owner_object_id`]
+//! scan ([`crate::sysobject`]) for owners it does not cover.
+//! The earlier attempt to join [`SysColumn::owner_object_id`]
 //! against [`crate::SysTableEntry::data_root_page`] was wrong: the two
-//! are independent integer namespaces (see `re/NOTES.md` C.52).
+//! are independent integer namespaces.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -82,7 +82,7 @@ pub struct SysColumn {
     pub owner_object_id: u32,
     /// Ordinal position of this column inside its owning table.
     pub column_id: u32,
-    /// Nullability/flags byte (semantics RE-pending; see WP-6D).
+    /// Nullability/flags byte (semantics not yet established).
     pub nulls_flag: u8,
     /// Single-character SA17 domain code (e.g. `N` = unsigned int, `Y` =
     /// signed/varchar). Other codes are surfaced verbatim for diagnostics.

@@ -7,3 +7,4 @@ re/
 # Python
 __pycache__/
 *.pyc
+*.so

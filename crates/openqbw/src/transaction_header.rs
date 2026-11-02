@@ -1,7 +1,7 @@
 //! Minimal transaction-header record scanner.
 //!
 //! QB transaction-header tables (`abmc_*_header`) store one row per
-//! transaction. Per `re/NOTES.md` §C.38 a header record contains the
+//! transaction. A header record contains the
 //! row's own QB-ID as a string field with type code `0x000E` and a
 //! fixed length of `0x10` (16) base-62 characters, followed elsewhere
 //! in the slot by `TxnDate` (u32 LE days since 1981-01-01) and an
@@ -9,7 +9,7 @@
 //!
 //! This scanner is deliberately conservative: it extracts only the
 //! QB-ID and a candidate date/counter pair. Richer field maps (memo,
-//! customer, total, etc.) are deferred (Phase 2.1 full).
+//! customer, total, etc.) are not read.
 //!
 //! ## Anchor
 //!

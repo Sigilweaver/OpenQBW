@@ -11,6 +11,8 @@ authors.workspace = true
 keywords = ["quickbooks", "qbw", "python", "accounting"]
 categories = ["api-bindings"]
 description = "Python bindings for openqbw"
+# Shipped to PyPI as a wheel built by maturin, never to crates.io.
+publish = false
 # No workspace lints inheritance: pyo3 macros generate unsafe code,
 # which conflicts with workspace `unsafe_code = forbid`.
 

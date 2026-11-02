@@ -184,17 +184,23 @@ fn creation_stamp(store: &PageStore) -> Result<u32> {
 }
 
 /// Flag catalog rows whose `data_root_page` is past the end of the store or
-/// not an `E` page. Returns how many were flagged.
+/// not an `E` page (`root_page_invalid`), and rows whose `last_page` fails
+/// the same test (`last_page_invalid`). Returns how many roots were flagged.
 fn flag_invalid_roots(store: &PageStore, entries: &mut [SysTableEntry]) -> u64 {
+    let is_extent = |p: u32| {
+        store
+            .page(u64::from(p))
+            .is_ok_and(|p| p.trailer().page_type() == PageType::Extent)
+    };
     let mut flagged = 0;
     for e in entries {
+        if e.last_page.is_some_and(|p| p > 0 && !is_extent(p)) {
+            e.flags.push(RecordFlag::LastPageInvalid);
+        }
         let Some(root) = e.data_root_page.filter(|&p| p > 0) else {
             continue;
         };
-        let is_extent = store
-            .page(u64::from(root))
-            .is_ok_and(|p| p.trailer().page_type() == PageType::Extent);
-        if !is_extent {
+        if !is_extent(root) {
             e.flags.push(RecordFlag::RootPageInvalid);
             flagged += 1;
         }

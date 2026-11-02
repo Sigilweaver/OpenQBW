@@ -1,4 +1,4 @@
-//! Nullability / default-marker byte from `SYSCOLUMN` (Phase 6, WP-6D).
+//! Nullability / default-marker byte from `SYSCOLUMN`.
 //!
 //! Each `SYSCOLUMN` row exposes a single byte (`nulls_flag` on
 //! [`crate::SysColumn`]) that conflates SA17's nullability, default

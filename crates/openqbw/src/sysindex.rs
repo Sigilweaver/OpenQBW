@@ -1,9 +1,9 @@
-//! `SYSINDEX` catalog row parser and attribution cross-validator (Phase 6, WP-6Z.3).
+//! `SYSINDEX` catalog row parser and attribution cross-validator.
 //!
 //! The SA17 `SYSINDEX` system catalog stores one row per index in the
 //! database. Each row identifies the index's owning table and the page
-//! that holds the root of the index B-tree. The Python prototype in
-//! `re/sysindex_scan.py` (C.30) reverse-engineered the layout:
+//! that holds the root of the index B-tree. The layout, worked
+//! out from the file bytes:
 //!
 //! ```text
 //! [2B flags] [2B creator = 01 46] [4B root u32_LE]

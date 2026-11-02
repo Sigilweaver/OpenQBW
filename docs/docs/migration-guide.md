@@ -16,7 +16,7 @@ $ cp mybooks.qbw mybooks.qbw.bak
 ## Step 2: Inventory what is in the file
 
 ```console
-$ openqbw catalog mybooks.qbw
+$ openqbw --lenient catalog mybooks.qbw
 ```
 
 This prints every user table. Look for the ones you care about:
@@ -28,28 +28,41 @@ This prints every user table. Look for the ones you care about:
 
 ## Step 3: Pick an output format
 
-OpenQBW today ships these export targets via the `openqbw migrate`
-subcommand (when available -- see `openqbw --help` for the version
-you have installed):
+OpenQBW ships these export targets (`openqbw export` and
+`openqbw migrate`; see `openqbw --help`):
 
 | Format | Use when                                            |
 |--------|------------------------------------------------------|
 | SQLite | You want to query the data, or import to BI tools    |
 | CSV    | You want a lowest-common-denominator handoff         |
-| IIF    | You want to import to another QB-compatible product  |
+| IIF    | Only if your target reads IIF and you accept placeholder accounts (below) |
 
 ## Step 4: Export
 
 ```console
-# SQLite (one file, all tables)
-$ openqbw export mybooks.qbw --out books.sqlite
+# Strict is the default and stops at the first record it cannot decode.
+# Real files often need --lenient, which skips and lists those records.
 
-# CSV (one file per table; see migrate subcommand)
-$ openqbw migrate mybooks.qbw --format csv --out csv-out/
+# SQLite (one file with four tables: transactions,
+# transaction_line_items, scan_rejections, meta)
+$ openqbw --lenient export mybooks.qbw books.sqlite
 
-# IIF (Intuit Interchange Format, importable by many tools)
-$ openqbw migrate mybooks.qbw --format iif --out books.iif
+# CSV (a directory of files)
+$ openqbw --lenient migrate mybooks.qbw --format csv --out csv-out/
+
+# IIF (Intuit Interchange Format). Account names are not decoded, so the
+# file uses placeholder accounts
+$ openqbw --lenient migrate mybooks.qbw --format iif --placeholder-accounts --out books.iif
 ```
+
+The IIF file has only placeholder accounts: every transaction posts to
+`Accounts Receivable` and every split line to a source-table name, and the
+values are not established as line amounts. Expect to remap accounts after an
+import; do not treat it as a finished migration.
+
+The output is built in a temporary file and replaces the destination only on
+success. The commands refuse to write over the input file or a QuickBooks
+file.
 
 ## Step 5: Verify
 
@@ -65,13 +78,16 @@ before relying on it.
 
 ## Mapping notes
 
-- **Dates** are stored as SA-days (days since 1900-01-01 minus an
-  offset) in the on-disk format. OpenQBW emits them as ISO-8601
-  date strings.
+- **Dates** are stored as SA-day numbers in the on-disk format. Exports
+  write the raw number as `txn_date_raw` with a `date_source` column
+  recording how it was found (a record with no date, or two candidate
+  dates, has none). They are not converted to calendar dates, because the
+  conversion offset is fitted to one sample and not checked against a date
+  known from another source. IIF needs a `DATE` column, so IIF files carry a
+  converted date (the first dated line of each transaction) using that
+  unverified offset, or an empty date when no line has one.
 - **Values** are exact decimals (`+/- coef * 100^e`). Exports write
   them as decimal text, with the raw bytes in hex beside them.
-- **Foreign keys** are surfaced from the SA17 SYSINDEX catalog
-  where present, and via a name-heuristic fallback otherwise.
 - **Deleted records** are not recoverable in general. OpenQBW
   parses pages that the page-store currently considers live.
 
@@ -80,8 +96,7 @@ before relying on it.
 - Password-protected files: structural metadata only; row content
   remains obfuscated until QuickBooks decrypts it on open.
 - Multi-user (.QBX, .QBA) files: not yet supported.
-- Custom user-defined fields are exported as-is (raw bytes) when
-  the encoding cannot be determined from the catalog.
+- Custom user-defined fields are not exported.
 
 If you hit a limitation, please open an issue with the file
 size, QB version, and the failing command. **Do not attach the

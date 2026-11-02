@@ -1,4 +1,4 @@
-//! Heuristic foreign-key graph (Phase 6, WP-6B).
+//! Heuristic foreign-key graph.
 //!
 //! SA17 does not surface explicit FK declarations in any easily-parsed
 //! row anchor we have recovered so far. As a stopgap, this module

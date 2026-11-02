@@ -8,35 +8,66 @@ $ openqbw --help
 |-----------------------|----------------------------------------------------------------|
 | `catalog`             | Print the SYSTABLE catalog (table_id, name, root page).        |
 | `schema`              | Print the columns of a table (via SYSCOLUMN bridged to SYSTABLE).|
-| `nulls`               | Histogram of SYSCOLUMN nulls_flag bytes with sample columns.   |
-| `indexes`             | List SYSINDEX and cross-validate position attribution.         |
-| `fkgraph`             | Print heuristic foreign-key edges (name-based fallback).       |
-| `validate-attribution`| Validate position attribution against SYSCOLUMN width bands.   |
 | `export`              | Export transactions and line items to SQLite.                  |
 | `migrate`             | Export to CSV, SQLite, or IIF for data liberation.             |
-| `forensics`           | File-level discovery report (pages, ap coverage, anomalies).   |
-| `verify`              | Validate an export against known invariants.                   |
+| `verify`              | Export, then report coverage and undecoded values.             |
+| `debug`               | Reverse-engineering diagnostics (`fkgraph`, `nulls`, `validate-attribution`, `indexes`, `forensics`). |
+
+## Global option
+
+`--lenient` is accepted by every subcommand. By default a read is strict: a
+record or page that cannot be decoded is an error and the command exits with
+status 1 at the first one. With `--lenient`, each such record is skipped,
+printed on stderr, and listed in the export (`scan_rejections` table in
+SQLite, `rejected.csv` in CSV). Real files often need `--lenient`; the Rock
+Castle sample skips 55 records.
+
+When a strict read stops on a record or page that `--lenient` can get past,
+the command prints a separate line after the error:
+
+```text
+hint: this file has records or pages the reader cannot decode. Rerun with --lenient to skip them; each skipped one is printed and listed in the export.
+```
+
+The hint is not printed for a bad magic, an unsupported version or a bad
+checksum, which `--lenient` does not get past.
+
+Warnings on stderr are labeled by scan (`catalog:`, `line items:`,
+`headers:`), and a warning an earlier scan of the same run already printed is
+not repeated.
+
+## Exit status
+
+0 on success; 1 on an error, including a file that is not a supported company
+file or an undecodable record without `--lenient`; 2 on a usage error; 3 when
+`verify` finds that the export read-back differs from the scan.
 
 ## Subcommand details
 
-### `catalog`
+### `catalog [--user-only]`
 
 ```console
 $ openqbw catalog mybooks.qbw
 ```
 
-Prints one line per user table from SYSTABLE. Useful as a first
-look at any file.
+Prints one line per table from SYSTABLE. With `--user-only`, skips
+`SYS*`, `ISYS*`, `RS_*` and `dbo*` tables. Useful as a first look at any
+file. The columns are `tid` (table id), `cols` (column count), `root` (the
+table's first data page), `last` (its rightmost leaf page), `flags` and
+`name`. A root or last page past the end of the file, or not on a data page,
+is shown as `-` and the `flags` column reads `root_page_invalid` or
+`last_page_invalid`. `catalog.csv` from `migrate --format csv` keeps the raw
+number and carries the same flags.
 
-### `schema <table>`
+### `schema <input> <table>`
 
 ```console
-$ openqbw schema mybooks.qbw abmc_invoice_lineitem
+$ openqbw schema mybooks.qbw abmc_invoice_header
 ```
 
 Lists the columns for the named table, bridging `SYSCOLUMN` to
 `SYSTABLE` via the table-id back-reference in the `SYSTABLE` row
-prefix (`SPECIFICATION.md` §5.1), and falling back to the `SYSOBJECT`
+prefix (`SPECIFICATION.md` section 5.1), and falling back to the `SYSOBJECT`
 catalog scan for owners that does not cover. The header line names the
 owner and the bridge that resolved it:
 
@@ -50,59 +81,123 @@ owner can be bridged to the table it reports which stage came up
 empty - catalog presence, `SYSCOLUMN` recovery, or the bridge -
 rather than a bare "not found".
 
-### `indexes [--fk-only] [--summary-only]`
+### `export <input> <output>`
 
 ```console
-$ openqbw indexes mybooks.qbw
-$ openqbw indexes mybooks.qbw --fk-only
-$ openqbw indexes mybooks.qbw --summary-only
+$ openqbw export mybooks.qbw books.sqlite
 ```
 
-Lists every index from SYSINDEX (creator 0x01 0x46). With
-`--fk-only`, restricts to indexes whose name suggests a foreign
-key. With `--summary-only`, prints only the cross-validation
-result (agree / disagree / missing / orphan counts).
+Writes a SQLite database containing the transactions and line items, plus
+`scan_rejections` and `meta` tables. The input and output are positional.
+The export is written to a temporary file and replaces `<output>` only when it
+succeeds, so a failed run leaves an earlier export untouched. Nothing is
+deleted or truncated before the input has opened and scanned.
 
-### `export --out <PATH>`
+The command refuses, touching nothing, to write to the input file (the same
+path, a symlink or a hard link to it):
 
-```console
-$ openqbw export mybooks.qbw --out books.sqlite
+```text
+refusing to write ...: it is the input file.
 ```
 
-Writes a SQLite database containing the catalog, lineitems, and
-transaction headers. The output is deterministic for the same
-input.
+It also refuses to overwrite an existing file that starts with the SQL
+Anywhere superblock magic, which is a QuickBooks company file, as happens when
+the arguments are swapped:
 
-### `migrate --out <PATH> [--format csv|sqlite|iif]`
+```text
+refusing to overwrite ...: it is a QuickBooks company file (or another SQL Anywhere database). Check the argument order: the input comes first, the output second. Nothing was changed.
+```
+
+`migrate --format sqlite|csv|iif` and `verify --output` build their output the
+same way and apply the same refusals.
+
+### `migrate <input> --out <PATH> [--format csv|sqlite|iif]`
 
 ```console
 $ openqbw migrate mybooks.qbw --out books.sqlite --format sqlite
 $ openqbw migrate mybooks.qbw --out out_csv     --format csv
-$ openqbw migrate mybooks.qbw --out books.iif   --format iif
+$ openqbw migrate mybooks.qbw --out books.iif   --format iif --placeholder-accounts
 ```
 
 Data-liberation export with three target formats:
 
 - `csv` (default): writes `catalog.csv`, `transactions.csv`,
-  and `lineitems.csv` into the directory given by `--out`
-  (created if missing). Fields are RFC 4180 quoted only when
-  needed.
-- `sqlite`: alias for `export --out <PATH>`. Single
-  deterministic SQLite database.
-- `iif`: writes a single Intuit Interchange Format file with
-  CRLF line endings. Line items are grouped by their parent
-  invoice id; each group becomes one `TRNS` followed by `SPL`
-  rows and an `ENDTRNS`. When a matching transaction header is
-  available the header's transaction type is used, otherwise the
-  group is emitted as `GENERAL JOURNAL`. SPL amounts are the negated
-  line values per IIF's double-entry convention. A line whose value is
-  not decoded is left out and counted. The value is not established as
-  the line amount.
+  `lineitems.csv`, `rejected.csv` and `manifest.json` into the directory
+  given by `--out` (created if missing). Fields are RFC 4180 quoted only when
+  needed. Dates are the raw `txn_date_raw` value with a `date_source` column,
+  not a converted calendar date. Columns:
+  - `lineitems.csv`: `qb_id_parent`, `item_qb_id`, `value`, `value_undecoded`,
+    `value_raw_hex`, `txn_date_raw`, `counter`, `date_source`, `flags`,
+    `source_table`, `page_number`, `page_offset`
+  - `transactions.csv`: `qb_id`, `txn_type`, `source_table`, `txn_date_raw`,
+    `counter`, `date_source`, `page_number`, `page_offset`
+  - `catalog.csv`: `table_id`, `name`, `column_count`, `data_root_page`,
+    `last_page`, `flags`
+  - `rejected.csv`: `page_number`, `page_offset`, `kind`, `message`
+- `sqlite`: equivalent to `export <input> <PATH>`.
+- `iif`: account names and transaction types are not decoded, so the
+  command exits with an error unless `--placeholder-accounts` is given. With
+  it, the file has CRLF line endings. Line items are grouped by their parent
+  transaction id; each group becomes one `TRNS` followed by `SPL` rows and an
+  `ENDTRNS`. Every `TRNS` posts to the placeholder account `Accounts
+  Receivable` and every `SPL` uses the internal source-table name as its
+  account. A line whose value is not decoded is left out and counted, and a
+  transaction with no decoded line is left out. The value is not established
+  as the line amount. IIF requires a `DATE` column, so unlike CSV and SQLite
+  the IIF file carries a converted date: the first dated line of the parent,
+  converted with an offset fitted to one sample and not checked against a
+  date known from another source, or empty when no line has a date.
 
-### `forensics`
+### `verify <input> [--output <PATH>] [--strict-attribution]`
 
 ```console
-$ openqbw forensics mybooks.qbw
+$ openqbw verify mybooks.qbw
+```
+
+Exports the file to `--output`, or to a private temporary directory that is
+removed when the command ends, including on error. It then reads the SQLite
+file back and compares its line-item rows, rows with no decoded value and
+stored rejections with the scan (the "Export read-back" section: `line_items`,
+`undecoded_values` and `scan_rejections`, each `ok` or `DIFF`). Everything
+else it prints is a report:
+
+- Per-table line-item counts and the sum of decoded values
+  (`source_table` is position-based and unverified)
+- Undecoded values by reason
+- How many parent groups of three or more decoded lines sum to
+  exactly zero (informational)
+- With `--strict-attribution`, per-page agreement between the position-based
+  attribution and a content-signature attribution
+
+Exit code is 3 when the export read-back differs from the scan. The other
+sections are informational and never change the exit status.
+
+## `debug`
+
+```console
+$ openqbw debug --help
+```
+
+Reverse-engineering diagnostics. Names, flags and output of these commands
+may change in any release.
+
+### `debug indexes [--fk-only] [--summary-only]`
+
+```console
+$ openqbw debug indexes mybooks.qbw
+$ openqbw debug indexes mybooks.qbw --fk-only
+$ openqbw debug indexes mybooks.qbw --summary-only
+```
+
+Lists every index from SYSINDEX (creator 0x01 0x46) and cross-validates
+position attribution against index root pages. With `--fk-only`, restricts to
+indexes whose name starts with `fkey_`. With `--summary-only`, prints only
+the cross-validation result (agree / disagree / missing / orphan counts).
+
+### `debug forensics`
+
+```console
+$ openqbw debug forensics mybooks.qbw
 ```
 
 File-level discovery report covering:
@@ -119,46 +214,28 @@ A non-zero orphan-parent count is a discovery signal: the file
 may contain partially purged records or a header table this
 build does not parse yet.
 
-### `verify`
+### `debug validate-attribution`
 
 ```console
-$ openqbw verify mybooks.qbw
-```
-
-Exports the file, then reports:
-
-- Per-table line-item counts and the sum of decoded values
-  (`source_table` is position-based and unverified)
-- Undecoded values by reason
-- How many parent groups of three or more decoded lines sum to
-  exactly zero (informational)
-- SYSINDEX cross-validation summary (WP-6Z.3)
-
-Exit code is 3 if a check differs.
-
-### `validate-attribution`
-
-```console
-$ openqbw validate-attribution mybooks.qbw
+$ openqbw debug validate-attribution mybooks.qbw
 ```
 
 Cross-checks the SYSTABLE-driven page->table map against the
 width-band attribution derived from SYSCOLUMN.
 
-### `fkgraph`
+### `debug fkgraph [--resolved-only]`
 
 ```console
-$ openqbw fkgraph mybooks.qbw
+$ openqbw debug fkgraph mybooks.qbw
 ```
 
-Falls back to a name-heuristic FK graph (`*_id`, `*_id_h`) for
-files where SYSINDEX is unparseable. Superseded by `indexes`
-when SYSINDEX is available.
+Prints a name-heuristic foreign-key graph (`*_id`, `*_id_h`). With
+`--resolved-only`, prints only edges that resolved to a target table.
 
-### `nulls`
+### `debug nulls`
 
 ```console
-$ openqbw nulls mybooks.qbw
+$ openqbw debug nulls mybooks.qbw
 ```
 
 Histogram of `SYSCOLUMN.nulls_flag` byte values with sample
