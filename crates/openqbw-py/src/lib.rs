@@ -47,7 +47,23 @@ fn build_py_err(py: Python<'_>, e: &openqbw_rs::Error, path: Option<&PathBuf>) -
         (openqbw_rs::Error::Io(io), Some(p)) if io.raw_os_error().is_some() => {
             cls.call1((io.raw_os_error(), io.to_string(), p.display().to_string()))?
         }
-        _ => cls.call1((e.to_string(),))?,
+        _ => {
+            // A lenient open skips a page that failed to decode and a record
+            // whose value field cannot be read; say so on those errors only.
+            let lenient_helps = matches!(
+                e.kind(),
+                ErrorKind::InvalidValueLength | ErrorKind::TruncatedValue
+            ) || (e.kind() == ErrorKind::Store && e.page_number().is_some());
+            let msg = if lenient_helps {
+                format!(
+                    "{e} (open the file with lenient=True to skip undecodable records \
+                     and pages; they are listed in `rejected`)"
+                )
+            } else {
+                e.to_string()
+            };
+            cls.call1((msg,))?
+        }
     };
     value.setattr("kind", e.kind().as_str())?;
     value.setattr("page_number", e.page_number())?;

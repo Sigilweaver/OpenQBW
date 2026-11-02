@@ -206,6 +206,13 @@ fn undecodable_record_fails_unless_lenient() {
     let bad = fixture("synthetic-bad-record.qbw");
     let out = openqbw(&["export".as_ref(), os(&bad), os(&db)]);
     assert_eq!(out.status.code(), Some(1), "{out:?}");
+    // A strict failure that --lenient can get past says so on its own line.
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.lines()
+            .any(|l| l.starts_with("hint: ") && l.contains("--lenient")),
+        "{err}"
+    );
     let out = openqbw(&["--lenient".as_ref(), "export".as_ref(), os(&bad), os(&db)]);
     assert!(out.status.success(), "{out:?}");
     let conn = rusqlite::Connection::open(&db).unwrap();

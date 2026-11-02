@@ -77,6 +77,7 @@ def test_undecodable_record_raises_unless_lenient():
         r.line_items()
     assert exc.value.kind == "invalid_value_length"
     assert exc.value.page_number == 7
+    assert "lenient=True" in str(exc.value)
 
     r = openqbw.open(BAD, lenient=True)
     with pytest.warns(openqbw.OpenQBWWarning):

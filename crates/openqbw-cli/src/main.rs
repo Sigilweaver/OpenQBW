@@ -24,8 +24,8 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use openqbw::diagnostics::{self, CrossValidation};
 use openqbw::{
-    Decimal, Error as QbwError, LineItem, ReadOptions, Reader, SysTableEntry, TransactionHeader,
-    Warning, WarningKind,
+    Decimal, Error as QbwError, ErrorKind, LineItem, ReadOptions, Reader, SysTableEntry,
+    TransactionHeader, Warning, WarningKind,
 };
 use outfile::{Staged, StagedSet};
 use rusqlite::{Connection, Transaction, params};
@@ -211,14 +211,8 @@ fn open_reader(path: &std::path::Path, lenient: bool) -> Result<Reader> {
     } else {
         ReadOptions::strict()
     };
-    let reader = Reader::open(path, &options).map_err(|e| {
-        let hint = if !lenient && lenient_may_help(&e) {
-            " (use --lenient to skip pages that fail to decode and list them)"
-        } else {
-            ""
-        };
-        anyhow::Error::new(e).context(format!("opening {path:?}{hint}"))
-    })?;
+    let reader = Reader::open(path, &options)
+        .map_err(|e| anyhow::Error::new(e).context(format!("opening {path:?}")))?;
     let mut printed = Vec::new();
     report_scan(
         "catalog",
@@ -229,10 +223,10 @@ fn open_reader(path: &std::path::Path, lenient: bool) -> Result<Reader> {
     Ok(reader)
 }
 
-/// Whether `--lenient` can get past an error from opening a file: only a
-/// page that failed to decode (a store error that names its page) is skipped
-/// by a lenient open. A bad magic, an unsupported version, a damaged page or
-/// a keystream that cannot be calibrated stay errors.
+/// Whether `--lenient` can get past an error: a lenient read skips a page
+/// that failed to decode (a store error that names its page) and a record
+/// whose value field cannot be read. A bad magic, an unsupported version, a
+/// damaged page or a keystream that cannot be calibrated stay errors.
 fn lenient_may_help(e: &QbwError) -> bool {
     matches!(
         e,
@@ -240,8 +234,15 @@ fn lenient_may_help(e: &QbwError) -> bool {
             page_number: Some(_),
             ..
         }
+    ) || matches!(
+        e.kind(),
+        ErrorKind::InvalidValueLength | ErrorKind::TruncatedValue
     )
 }
+
+/// The line printed after a strict failure that `--lenient` can get past.
+const LENIENT_HINT: &str = "hint: this file has records or pages the reader cannot decode. \
+Rerun with --lenient to skip them; each skipped one is printed and listed in the export.";
 
 /// The lines to print for one scan's `warnings`: each prefixed with the
 /// scan's `label`, and none that `printed` already holds. A scan over the
@@ -288,10 +289,18 @@ fn report(warnings: &[Warning], rejected: &[QbwError]) {
 /// Exit status: 0 success, 1 error, 2 usage error (from the argument
 /// parser), 3 `verify` found a check that differs.
 fn main() -> ExitCode {
-    match run(Cli::parse()) {
+    let cli = Cli::parse();
+    let lenient = cli.lenient;
+    match run(cli) {
         Ok(code) => code,
         Err(e) => {
             eprintln!("Error: {e:?}");
+            let helps = e
+                .chain()
+                .any(|c| c.downcast_ref::<QbwError>().is_some_and(lenient_may_help));
+            if !lenient && helps {
+                eprintln!("{LENIENT_HINT}");
+            }
             ExitCode::FAILURE
         }
     }
@@ -1542,12 +1551,10 @@ fn warning_values(kind: &WarningKind) -> Vec<(String, u64)> {
 /// Scan line items and headers. Strict mode stops at the first undecodable
 /// record; lenient mode returns the skipped ones and prints each on stderr.
 fn collect_records(reader: &Reader) -> Result<Records> {
-    let lines = reader
-        .line_items()
-        .context("scanning line items (use --lenient to skip undecodable records and list them)")?;
-    let heads = reader.transactions().context(
-        "scanning transaction headers (use --lenient to skip failing pages and list them)",
-    )?;
+    let lines = reader.line_items().context("scanning line items")?;
+    let heads = reader
+        .transactions()
+        .context("scanning transaction headers")?;
     let mut counts = RunCounts::default();
     counts.add_scan(
         "catalog",
