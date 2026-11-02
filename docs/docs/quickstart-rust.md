@@ -14,7 +14,10 @@ openqbw = "0.2"
 use openqbw::{Decimal, ReadOptions, Reader};
 
 fn main() -> Result<(), openqbw::Error> {
-    let reader = Reader::open("Company.QBW", &ReadOptions::default())?;
+    // Strict is the default (`ReadOptions::default()`) and stops at the first
+    // record it cannot decode. Real files often need `ReadOptions::lenient()`,
+    // which skips those records and lists them in `rejected`.
+    let reader = Reader::open("Company.QBW", &ReadOptions::lenient())?;
 
     for table in &reader.catalog().items {
         println!("{:>6}  {}", table.table_id, table.name);
@@ -23,6 +26,9 @@ fn main() -> Result<(), openqbw::Error> {
     let lines = reader.line_items()?;
     for w in &lines.warnings {
         eprintln!("warning: {w}");
+    }
+    for e in &lines.rejected {
+        eprintln!("skipped: {e}");
     }
 
     // `value` is an exact `Decimal`; `None` means it was not decoded, not zero.
@@ -39,21 +45,9 @@ the pages (opensqlany removes the additive-progression obfuscation), and reads
 the `SYSTABLE` catalog. `line_items()`, `transactions()`, `indexes()`,
 `columns()` and `schema(table)` read from it.
 
-Reads are strict: a record the decoder cannot read with confidence is an
-error. To skip such records and list them in `rejected`:
-
-```rust,no_run
-use openqbw::{ReadOptions, Reader};
-
-fn main() -> Result<(), openqbw::Error> {
-    let reader = Reader::open("Company.QBW", &ReadOptions::lenient())?;
-    let lines = reader.line_items()?;
-    for e in &lines.rejected {
-        eprintln!("skipped: {e}");
-    }
-    Ok(())
-}
-```
+Reads are strict with `ReadOptions::default()`: a record the decoder cannot
+read with confidence is an error. `ReadOptions::lenient()` skips such records
+and lists them in `rejected`.
 
 `value` is the line's numeric value field. That it is the line's amount is
 not established, and `source_table` is a position-based, unverified

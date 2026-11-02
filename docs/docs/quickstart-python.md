@@ -12,7 +12,9 @@ pip install openqbw
 ```python
 import openqbw
 
-r = openqbw.open("Company.QBW")
+# Strict is the default and raises at the first record it cannot decode.
+# Real files often need lenient mode, which skips and lists those records.
+r = openqbw.open("Company.QBW", lenient=True)
 print(r.page_count, "pages,", r.file_size, "bytes")
 
 for t in r.tables():
@@ -28,6 +30,8 @@ print(f"{len(lines)} line items, {undecoded} with an undecoded value")
 
 for w in lines.warnings:
     print("warning:", w.kind, w.message)
+for rej in lines.rejected:
+    print("skipped:", rej.kind, rej.page_number, rej.page_offset, rej.message)
 ```
 
 `value` is the line's numeric value field. That it is the line's amount is
@@ -36,17 +40,10 @@ attribution.
 
 ## Skip records that cannot be decoded
 
-Reads are strict by default. With `lenient=True`, a record that cannot be
-decoded is skipped and listed instead of raising:
-
-```python
-import openqbw
-
-r = openqbw.open("Company.QBW", lenient=True)
-report = r.line_items()
-for rej in report.rejected:
-    print(rej.kind, rej.page_number, rej.page_offset, rej.message)
-```
+Reads are strict by default: `openqbw.open("Company.QBW")` raises
+`RecordError` at the first record that cannot be decoded, and the message says
+to open the file with `lenient=True`. With `lenient=True`, such records are
+skipped and listed in `rejected` instead of raising.
 
 ## Export to SQLite
 

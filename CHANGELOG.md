@@ -30,8 +30,10 @@ version its export layout (`format_version` 1).
   reason. That the value is the line's amount is not established.
 - A value field whose length byte sits on, or whose bytes cross, a 512-byte
   sector boundary is undecoded with reason `sector_boundary`, with its raw
-  bytes kept. It is not a record error, so a strict read of the Rock Castle
-  sample completes.
+  bytes kept. It is not a record error (101 such records on the Rock Castle
+  sample). Strict mode still stops on that sample: 55 other "value length
+  byte above 10" record errors remain, not related to sector boundaries and
+  under investigation, and `--lenient` skips them. Strict stays the default.
 - `Reader`, the single entry point: `Reader::open(path, &ReadOptions)` (and
   `Reader::from_bytes`) owns the page store, the keystream model, the catalog
   and the page attribution. `line_items()`, `transactions()`, `indexes()`,
@@ -60,8 +62,10 @@ version its export layout (`format_version` 1).
   `header_rows_without_id`, `invalid_root_pages`, `keystream_unverified_pages`,
   `low_confidence_sector_pages`, `unconfirmed_directory_pages`, `opaque_pages`,
   `undecoded_values` and `attribution_gap`, plus duplicate header ID counts.
-  A line-item scan also reports line items it may have lost where an anchor
-  straddles a sector boundary, when they can be detected.
+  The `sector_boundary_anchors` warning counts line-item anchors cut by a
+  sector boundary that were not read; the count is approximate (about 2,450 on
+  the Rock Castle sample, roughly 4.5% of its line items). It is also written
+  to the exports as `line_items.sector_boundary_anchors`.
 - Export layout version. SQLite exports have a `meta` table
   (`format_version`, `openqbw_version`, `source_table_attribution`) and
   `PRAGMA user_version`. CSV exports write `manifest.json` with
@@ -119,12 +123,18 @@ version its export layout (`format_version` 1).
 - **Breaking:** CSV export. `lineitems.csv` has `value`, `value_undecoded`
   and `value_raw_hex` in place of `amount_cents`, `amount_signed_cents` and
   `amount_decimal`, and `qb_id_parent` in place of `invoice_id`. It carries
-  the raw date value and its provenance (`txn_date_raw`, `date_source` and
-  `flags`, like SQLite) in place of `txn_date`, which was a calendar date
-  converted from a fitted offset. `transactions.csv` gains `txn_date_raw`,
-  `counter` and `date_source`.
-- **Breaking:** Python `LineItem.invoice_id` is `qb_id_parent`, the name
-  SQLite and CSV use.
+  the raw date value and its provenance (`txn_date_raw`, `counter`,
+  `date_source` and `flags`, like SQLite) in place of `txn_date`, which was a
+  calendar date converted from a fitted offset. `transactions.csv` gains
+  `txn_date_raw`, `counter` and `date_source`, and `catalog.csv` gains
+  `flags`. IIF keeps a `DATE` column because the format requires one: it
+  holds the converted date of the parent's first dated line (offset fitted to
+  one sample, unverified), or is empty.
+- **Breaking:** Python `LineItem.invoice_id` is `qb_id_parent` (also the
+  `to_dict()` key), the name SQLite and CSV use. `LineItem.__repr__` shows
+  `source_table='...'` or `None` instead of Rust `Some("...")`.
+- **Breaking:** the Rust field `LineItem::invoice_id` is renamed
+  `qb_id_parent`.
 - **Breaking:** Python `openqbw.open(path, *, lenient=False)` returns a
   `Reader` whose `tables()`, `indexes()`, `line_items()` and
   `transactions()` return a `ScanReport` of frozen record objects in place
@@ -175,14 +185,36 @@ version its export layout (`format_version` 1).
   journal pair check built on the sign-bit reading. It reports the sum of
   decoded values, undecoded values by reason, and how many parent groups of
   three or more decoded lines sum to exactly zero (informational). It exits
-  with status 3 when a check differs (it exited 0). After writing its SQLite
-  export it checks that file for a `meta.format_version` equal to `PRAGMA
-  user_version` and no newer than the build writes, and fails on any
-  database error while reading it.
-- `openqbw export` writes to a temporary file next to the output and
-  replaces the output only when the export succeeds, so a failed run no
-  longer deletes an earlier export. It refuses an output that is the input
-  file or a QuickBooks file.
+  with status 3 when the export read-back differs from the scan (it exited
+  0): it reads the exported SQLite file back and compares its line-item rows,
+  rows with no decoded value and stored rejections with the scan, and
+  prints DIFF in an "Export read-back" section. Everything else it prints is
+  a report. It also checks the file for a `meta.format_version` equal to
+  `PRAGMA user_version` and no newer than the build writes, and fails on any
+  database error while reading it. Without `--output` it exports to a private
+  temporary directory that is removed on exit, including on error (0.1.6 left
+  `/tmp/openqbw-verify-<pid>.sqlite` behind).
+- `openqbw export`, `migrate` (sqlite, csv, iif) and `verify --output` never
+  delete or truncate anything before the input has opened and scanned. The
+  output is built in a temporary file beside the destination and renamed over
+  it on success; on failure the temporary file is removed and an earlier
+  export is untouched. The same commands refuse, touching nothing, to write
+  to the input file (same path, symlink or hard link) or over an existing
+  file that starts with the SQL Anywhere superblock magic (a QuickBooks
+  company file), for example when the arguments are swapped.
+- After a strict failure that `--lenient` can get past (a page that failed to
+  decode, or a record whose value field cannot be read), the CLI prints a
+  separate `hint:` line that points to `--lenient`. It is not printed for a
+  bad magic, version or checksum. A bad-magic or unsupported-file error no
+  longer suggests `--lenient`. Python `RecordError` and page-store errors say
+  to open the file with `lenient=True`.
+- Warnings are labeled by scan (`catalog:`, `line items:`, `headers:`), and a
+  warning an earlier scan already printed is not repeated, so one run no
+  longer prints the keystream and low-confidence warnings three times with
+  different denominators. `openqbw catalog` shows a root page past the end of
+  the file or not on a data page as `-`, with a `flags` column
+  (`root_page_invalid`). `--help` and the verify report no longer use
+  internal phase names.
 - Every page is decoded through one path. A page whose keystream opensqlany
   confirms is read as before. A page where exactly one `bv` decodes the
   QuickBooks C.36 anchor is read with that key (earlier versions took the
@@ -215,7 +247,8 @@ version its export layout (`format_version` 1).
   `TruncatedValue`) in strict mode, and is listed in `rejected` in lenient
   mode, instead of a line item with a zero or unknown amount.
 - Known limit: a line-item anchor that straddles a 512-byte sector boundary
-  may not be found, so that line item is not read. On the Rock Castle sample
+  may not be found, so that line item is not read; the
+  `sector_boundary_anchors` warning counts them. On the Rock Castle sample
   this is about 4.5% of line items. Reading across the boundary is planned
   for a later release.
 - Line items take the nearest `04 00 10 <id>` item ID instead of the
@@ -272,6 +305,11 @@ version its export layout (`format_version` 1).
   carry `RecordFlag::HeaderIdAmbiguous`.
 - `openqbw forensics` reports the size of the opened store instead of 0 when
   file metadata cannot be read.
+
+- Packaging: `openqbw-py` has `publish = false`. The release workflow fails
+  unless it runs on a tag equal to `v<workspace version>` and the Cargo
+  workspace version, both `openqbw` requirements and the pyproject version
+  are equal. CI no longer checks out OpenSQLAnywhere.
 
 ### Removed
 

@@ -9,7 +9,7 @@ ship with the package.
 ```python
 import openqbw
 
-r = openqbw.open("/path/to/file.qbw")
+r = openqbw.open("/path/to/file.qbw", lenient=True)
 print(r.page_count, "pages,", r.file_size, "bytes")
 ```
 
@@ -19,10 +19,12 @@ Opens a `.qbw` file, checks its magic, version and page checksums, and
 builds the catalog and page attribution. `path` is a `str` or path-like
 object.
 
-Reads are strict: a record or page that cannot be decoded raises. With
-`lenient=True` such records are skipped and listed in each result's
-`rejected`, and an `openqbw.OpenQBWWarning` is issued. The option applies to
-every read from the returned `Reader`.
+Reads are strict by default: a record or page that cannot be decoded raises
+at the first one, and the message says to open the file with `lenient=True`.
+Real files often need lenient mode: with `lenient=True` such records are
+skipped and listed in each result's `rejected`, and an
+`openqbw.OpenQBWWarning` is issued. The option applies to every read from the
+returned `Reader`.
 
 ## `Reader`
 
@@ -78,8 +80,14 @@ for idx in r.indexes()[:5]:
 `qb_id_parent`, `item_qb_id`, `value` (a `decimal.Decimal`, or `None` when
 the field was not decoded; never zero for "unknown"), `value_undecoded` (the
 reason, or `None`), `value_raw` (bytes), `txn_date_raw`, `counter`,
-`date_source`, `txn_date_days_since_unix` (best effort), `source_table`,
-`page_number`, `page_offset`, `flags`.
+`date_source`, `txn_date_days_since_unix`, `source_table`, `page_number`,
+`page_offset`, `flags`. `to_dict()` uses the same names, so the parent id key
+is `qb_id_parent`.
+
+`txn_date_days_since_unix` is a converted date, best effort: the offset is
+fitted to one sample and not checked against a date known from another
+source. The raw value is `txn_date_raw`; CSV and SQLite exports carry only
+that.
 
 The value is not established as the line amount, and `source_table` is a
 position-based, unverified attribution. A value field that does not fit the
@@ -98,8 +106,8 @@ for w in lines.warnings:
 ### `Transaction`
 
 `qb_id`, `source_table`, `txn_type`, `txn_date_raw`, `counter`,
-`date_source`, `txn_date_days_since_unix`, `page_number`, `page_offset`,
-`flags`.
+`date_source`, `txn_date_days_since_unix` (offset-fitted and unverified, as
+above), `page_number`, `page_offset`, `flags`.
 
 ```python
 for h in r.transactions()[:3]:

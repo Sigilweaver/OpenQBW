@@ -43,7 +43,10 @@ counted. That the value is the line's amount is not established. `source_table`
 is a position-based attribution that is unverified: a content-based check
 agrees with it on 0.3% of pages on the Rock Castle sample. A line item whose
 anchor straddles a sector boundary may not be read (about 4.5% of line items
-on that sample).
+on the Rock Castle sample); the `sector_boundary_anchors` warning counts them.
+Reads are strict by default and stop at the first record the reader cannot
+decode. Real files often need lenient mode, which skips those records and
+lists them (55 on the Rock Castle sample).
 
 The format write-up is [SPECIFICATION.md](SPECIFICATION.md), including the
 line-item value layout in section 5.2 and the open questions in section 8.
@@ -112,7 +115,8 @@ the CHANGELOG.
 ```python
 import openqbw
 
-r = openqbw.open("mybooks.qbw")
+# Strict is the default; lenient=True skips and lists undecodable records.
+r = openqbw.open("mybooks.qbw", lenient=True)
 print(r.page_count, "pages")
 ```
 
@@ -122,23 +126,25 @@ full Python API and for building the extension from source.
 ## CLI quickstart
 
 ```console
+# Strict is the default and stops at the first record it cannot decode.
+# Real files often need --lenient, which skips those records; each skipped
+# one is printed on stderr and listed in the export.
+
 # Inventory the user tables in a company file
-$ openqbw catalog mybooks.qbw
+$ openqbw --lenient catalog mybooks.qbw
 
 # Columns recovered for one table
-$ openqbw schema mybooks.qbw abmc_invoice_header
+$ openqbw --lenient schema mybooks.qbw abmc_invoice_header
 
 # Export transactions and line items to SQLite for inspection in any
-# SQL tool (DB Browser, Datasette, pandas, ...). The output file is
-# replaced only when the export succeeds.
-$ openqbw export mybooks.qbw books.sqlite
+# SQL tool (DB Browser, Datasette, pandas, ...). The output is built in a
+# temporary file and replaces the destination only when the export succeeds;
+# the command refuses to write over the input file or a QuickBooks file.
+$ openqbw --lenient export mybooks.qbw books.sqlite
 
 # CSV directory, or IIF with placeholder accounts
-$ openqbw migrate mybooks.qbw --format csv --out books/
-$ openqbw migrate mybooks.qbw --format iif --placeholder-accounts --out books.iif
-
-# Skip undecodable records instead of stopping; each is listed
-$ openqbw --lenient export mybooks.qbw books.sqlite
+$ openqbw --lenient migrate mybooks.qbw --format csv --out books/
+$ openqbw --lenient migrate mybooks.qbw --format iif --placeholder-accounts --out books.iif
 
 # Reverse-engineering diagnostics (output may change in any release)
 $ openqbw debug indexes mybooks.qbw --fk-only --summary-only
@@ -150,7 +156,9 @@ See [docs/docs/cli.md](docs/docs/cli.md) for the full subcommand reference.
 
 Exit status: 0 on success, 1 on an error (including a file that is not a
 supported company file, or an undecodable record without `--lenient`), 2
-on a usage error, and 3 when `verify` finds a check that differs.
+on a usage error, and 3 when the `verify` export read-back differs from the
+scan. After a strict failure that `--lenient` can get past, the command prints
+a `hint:` line saying so.
 
 ### Output formats
 
@@ -189,8 +197,12 @@ Line items carry `value` as an exact decimal string (SQLite `TEXT`, never a
 float), `value_undecoded` (the reason, when it is not decoded: `zero_length`,
 `digit_over_99`, `exponent_out_of_range` or `sector_boundary`) and
 `value_raw_hex`. CSV and SQLite carry the raw date value (`txn_date_raw`)
-and how it was found (`date_source`), never a converted calendar date. `transactions.value_sum` is the exact sum of the decoded
-line values of one parent, not an invoice total. `source_table` is
+and how it was found (`date_source`), never a converted calendar date. IIF
+needs a `DATE` column, so its dates are converted with an offset fitted to
+one sample and not checked against a date known from another source; they
+are empty when no line has a date. Python `txn_date_days_since_unix` is
+converted the same way. `transactions.value_sum` is the exact sum of the
+decoded line values of one parent, not an invoice total. `source_table` is
 position-based and unverified; exports record that in
 `meta.source_table_attribution` and in `manifest.json`.
 
@@ -199,7 +211,7 @@ position-based and unverified; exports record that in
 ```rust,no_run
 use openqbw::{ReadOptions, Reader};
 
-let reader = Reader::open("mybooks.qbw", &ReadOptions::default())?;
+let reader = Reader::open("mybooks.qbw", &ReadOptions::lenient())?;
 let lines = reader.line_items()?;
 for w in &lines.warnings {
     eprintln!("warning: {w}");
@@ -211,8 +223,9 @@ println!("sum of decoded values: {decoded:?}; {undecoded} lines not decoded");
 # Ok::<(), openqbw::Error>(())
 ```
 
-Reads are strict: a record the decoder cannot read with confidence is an
-error. `ReadOptions::lenient()` skips such records and lists them in
+Reads are strict with `ReadOptions::default()`: a record the decoder cannot
+read with confidence is an error. Real files often need
+`ReadOptions::lenient()`, which skips such records and lists them in
 `rejected`; records that were kept but deserve less trust carry `flags`.
 
 ## Documentation

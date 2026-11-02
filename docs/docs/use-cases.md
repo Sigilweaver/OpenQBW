@@ -12,12 +12,16 @@ accounting product or just archive it.
 
 ```console
 # Get a SQL database you can query with any tool
-$ openqbw export mybooks.qbw books.sqlite
+$ openqbw --lenient export mybooks.qbw books.sqlite
 
 # Inspect from sqlite3 or DB Browser
 $ sqlite3 books.sqlite "SELECT COUNT(*) FROM transaction_line_items;"
 $ sqlite3 books.sqlite "SELECT COUNT(*) FROM transaction_line_items WHERE value IS NULL;"
 ```
+
+Strict is the default and stops at the first record the reader cannot decode.
+Real files often need `--lenient`, which skips those records and lists them in
+the export.
 
 See [migration-guide.md](migration-guide.md) for the
 target-product-specific mapping advice.
@@ -47,7 +51,7 @@ schema. OpenQBW can tell you:
 
 ```console
 # Tables present in the file
-$ openqbw catalog mybooks.qbw
+$ openqbw --lenient catalog mybooks.qbw
 
 # Index inventory (FK indexes only)
 $ openqbw debug indexes mybooks.qbw --fk-only
@@ -56,7 +60,7 @@ $ openqbw debug indexes mybooks.qbw --fk-only
 $ openqbw debug nulls mybooks.qbw
 
 # Export to a temporary file and report coverage and undecoded values
-$ openqbw verify mybooks.qbw
+$ openqbw --lenient verify mybooks.qbw
 ```
 
 ## 4. Long-term archival
@@ -67,7 +71,7 @@ gives you a deterministic, open-format snapshot you can keep
 alongside the original file:
 
 ```console
-$ openqbw export mybooks.qbw archive/books-2024.sqlite
+$ openqbw --lenient export mybooks.qbw archive/books-2024.sqlite
 $ sha256sum archive/books-2024.sqlite > archive/books-2024.sqlite.sha256
 ```
 

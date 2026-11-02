@@ -491,11 +491,13 @@ the field lies inside the page and `e` is in -1..=2. Any other field keeps
 its raw bytes and is counted by reason: `k = 0` (`00 81` is the usual
 shape, reason `zero_length`), a digit above 99 (`digit_over_99`), an
 exponent outside -1..=2 (`exponent_out_of_range`), or a field whose length
-byte sits on, or whose bytes cross, a 512-byte sector boundary
-(`sector_boundary`). Sectors are obfuscated separately (section 2.2b), so
-bytes on either side of a boundary cannot be trusted to belong to one
-value; the raw bytes are kept. A length byte above 10 elsewhere, or a field
-cut off by the page end, is a record error.
+byte is the first or last byte of a 512-byte sector, or whose bytes cross a
+sector boundary (`sector_boundary`). Each sector of a page has its own
+keystream step (section 2.2b), so a field spanning two cannot be shown to be
+read correctly; it is undecoded whatever its digits look like. When the
+length byte is unreadable the raw bytes are only `[k][ctrl]`, the field
+width is unknown and no date is searched for after it. A length byte above 10
+anywhere else, or a field cut off by the page end, is a record error.
 
 Evidence for this layout is in the file itself. On the Rock Castle sample, 1586
 of 4260 parent groups of three or more lines sum to exactly zero under this
@@ -510,10 +512,17 @@ with `e` = -3, neither plausible as a stored value, so wider exponents are
 not read.
 
 Known limit: an anchor that itself straddles a 512-byte sector boundary may
-not be found, so its line item is not read. On the Rock Castle sample, anchors
-starting 488 to 507 bytes into a sector are found about 16 times each,
-against about 110 for every other offset, which puts the loss near 4.5% of
-line items. Reading across the boundary is not implemented.
+not be found, so its line item is not read. Anchors that start in the last 25
+bytes before a sector boundary (in-sector offsets 488..511) are mostly not
+found. On the Rock Castle sample, anchors starting 488 to 507 bytes into a
+sector are found about 16 times each, against about 110 for every other
+offset, which puts the loss near 4.5% of line items. The reader counts them
+but does not read them: it looks for the 5-byte prefix `00 00 00 00 10` at
+in-sector offsets 488..507 followed by base62 characters up to the boundary,
+where the whole 25-byte anchor does not match, and reports the count (about,
+because it cannot tell a cut line item from other data that starts the same
+way) in the `sector_boundary_anchors` warning. Reading across the boundary is
+not implemented.
 
 What is not established:
 

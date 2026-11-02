@@ -16,7 +16,7 @@ $ cp mybooks.qbw mybooks.qbw.bak
 ## Step 2: Inventory what is in the file
 
 ```console
-$ openqbw catalog mybooks.qbw
+$ openqbw --lenient catalog mybooks.qbw
 ```
 
 This prints every user table. Look for the ones you care about:
@@ -40,16 +40,23 @@ OpenQBW ships these export targets (`openqbw export` and
 ## Step 4: Export
 
 ```console
+# Strict is the default and stops at the first record it cannot decode.
+# Real files often need --lenient, which skips and lists those records.
+
 # SQLite (one file, all tables)
-$ openqbw export mybooks.qbw books.sqlite
+$ openqbw --lenient export mybooks.qbw books.sqlite
 
 # CSV (a directory of files)
-$ openqbw migrate mybooks.qbw --format csv --out csv-out/
+$ openqbw --lenient migrate mybooks.qbw --format csv --out csv-out/
 
 # IIF (Intuit Interchange Format). Account names are not decoded, so the
 # file uses placeholder accounts
-$ openqbw migrate mybooks.qbw --format iif --placeholder-accounts --out books.iif
+$ openqbw --lenient migrate mybooks.qbw --format iif --placeholder-accounts --out books.iif
 ```
+
+The output is built in a temporary file and replaces the destination only on
+success. The commands refuse to write over the input file or a QuickBooks
+file.
 
 ## Step 5: Verify
 
@@ -70,7 +77,9 @@ before relying on it.
   recording how it was found (a record with no date, or two candidate
   dates, has none). They are not converted to calendar dates, because the
   conversion offset is fitted to one sample and not checked against a date
-  known from another source.
+  known from another source. IIF needs a `DATE` column, so IIF files carry a
+  converted date (the first dated line of each transaction) using that
+  unverified offset, or an empty date when no line has one.
 - **Values** are exact decimals (`+/- coef * 100^e`). Exports write
   them as decimal text, with the raw bytes in hex beside them.
 - **Deleted records** are not recoverable in general. OpenQBW

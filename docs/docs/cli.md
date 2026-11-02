@@ -17,15 +17,30 @@ $ openqbw --help
 
 `--lenient` is accepted by every subcommand. By default a read is strict: a
 record or page that cannot be decoded is an error and the command exits with
-status 1. With `--lenient`, each such record is skipped, printed on stderr, and
-listed in the export (`scan_rejections` table in SQLite, `rejected.csv` in
-CSV).
+status 1 at the first one. With `--lenient`, each such record is skipped,
+printed on stderr, and listed in the export (`scan_rejections` table in
+SQLite, `rejected.csv` in CSV). Real files often need `--lenient`; the Rock
+Castle sample skips 55 records.
+
+When a strict read stops on a record or page that `--lenient` can get past,
+the command prints a separate line after the error:
+
+```text
+hint: this file has records or pages the reader cannot decode. Rerun with --lenient to skip them; each skipped one is printed and listed in the export.
+```
+
+The hint is not printed for a bad magic, an unsupported version or a bad
+checksum, which `--lenient` does not get past.
+
+Warnings on stderr are labeled by scan (`catalog:`, `line items:`,
+`headers:`), and a warning an earlier scan of the same run already printed is
+not repeated.
 
 ## Exit status
 
 0 on success; 1 on an error, including a file that is not a supported company
 file or an undecodable record without `--lenient`; 2 on a usage error; 3 when
-`verify` finds a check that differs.
+`verify` finds that the export read-back differs from the scan.
 
 ## Subcommand details
 
@@ -37,7 +52,8 @@ $ openqbw catalog mybooks.qbw
 
 Prints one line per table from SYSTABLE. With `--user-only`, skips
 `SYS*`, `ISYS*`, `RS_*` and `dbo*` tables. Useful as a first look at any
-file.
+file. A root page past the end of the file, or not on a data page, is shown as
+`-` and the `flags` column reads `root_page_invalid`.
 
 ### `schema <input> <table>`
 
@@ -70,8 +86,26 @@ $ openqbw export mybooks.qbw books.sqlite
 Writes a SQLite database containing the transactions and line items, plus
 `scan_rejections` and `meta` tables. The input and output are positional.
 The export is written to a temporary file and replaces `<output>` only when it
-succeeds, so a failed run leaves an earlier export untouched. The command
-refuses an output that is the input file or a QuickBooks file.
+succeeds, so a failed run leaves an earlier export untouched. Nothing is
+deleted or truncated before the input has opened and scanned.
+
+The command refuses, touching nothing, to write to the input file (the same
+path, a symlink or a hard link to it):
+
+```text
+refusing to write ...: it is the input file.
+```
+
+It also refuses to overwrite an existing file that starts with the SQL
+Anywhere superblock magic, which is a QuickBooks company file, as happens when
+the arguments are swapped:
+
+```text
+refusing to overwrite ...: it is a QuickBooks company file (or another SQL Anywhere database). Check the argument order: the input comes first, the output second. Nothing was changed.
+```
+
+`migrate --format sqlite|csv|iif` and `verify --output` build their output the
+same way and apply the same refusals.
 
 ### `migrate <input> --out <PATH> [--format csv|sqlite|iif]`
 
@@ -87,7 +121,15 @@ Data-liberation export with three target formats:
   `lineitems.csv`, `rejected.csv` and `manifest.json` into the directory
   given by `--out` (created if missing). Fields are RFC 4180 quoted only when
   needed. Dates are the raw `txn_date_raw` value with a `date_source` column,
-  not a converted calendar date.
+  not a converted calendar date. Columns:
+  - `lineitems.csv`: `qb_id_parent`, `item_qb_id`, `value`, `value_undecoded`,
+    `value_raw_hex`, `txn_date_raw`, `counter`, `date_source`, `flags`,
+    `source_table`, `page_number`, `page_offset`
+  - `transactions.csv`: `qb_id`, `txn_type`, `source_table`, `txn_date_raw`,
+    `counter`, `date_source`, `page_number`, `page_offset`
+  - `catalog.csv`: `table_id`, `name`, `column_count`, `data_root_page`,
+    `last_page`, `flags`
+  - `rejected.csv`: `page_number`, `page_offset`, `kind`, `message`
 - `sqlite`: equivalent to `export <input> <PATH>`.
 - `iif`: account names and transaction types are not decoded, so the
   command exits with an error unless `--placeholder-accounts` is given. With
@@ -97,7 +139,10 @@ Data-liberation export with three target formats:
   Receivable` and every `SPL` uses the internal source-table name as its
   account. A line whose value is not decoded is left out and counted, and a
   transaction with no decoded line is left out. The value is not established
-  as the line amount.
+  as the line amount. IIF requires a `DATE` column, so unlike CSV and SQLite
+  the IIF file carries a converted date: the first dated line of the parent,
+  converted with an offset fitted to one sample and not checked against a
+  date known from another source, or empty when no line has a date.
 
 ### `verify <input> [--output <PATH>] [--strict-attribution]`
 
@@ -105,7 +150,12 @@ Data-liberation export with three target formats:
 $ openqbw verify mybooks.qbw
 ```
 
-Exports the file (to `--output`, or to a temporary file), then reports:
+Exports the file to `--output`, or to a private temporary directory that is
+removed when the command ends, including on error. It then reads the SQLite
+file back and compares its line-item rows, rows with no decoded value and
+stored rejections with the scan (the "Export read-back" section: `line_items`,
+`undecoded_values` and `scan_rejections`, each `ok` or `DIFF`). Everything
+else it prints is a report:
 
 - Per-table line-item counts and the sum of decoded values
   (`source_table` is position-based and unverified)
@@ -115,7 +165,8 @@ Exports the file (to `--output`, or to a temporary file), then reports:
 - With `--strict-attribution`, per-page agreement between the position-based
   attribution and a content-signature attribution
 
-Exit code is 3 if a check differs.
+Exit code is 3 when the export read-back differs from the scan. The other
+sections are informational and never change the exit status.
 
 ## `debug`
 

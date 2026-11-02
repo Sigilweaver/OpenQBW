@@ -32,7 +32,9 @@ environment.
 ```python
 import openqbw
 
-r = openqbw.open("/path/to/file.qbw")
+# Strict is the default and raises at the first record it cannot decode.
+# Real files often need lenient mode, which skips and lists those records.
+r = openqbw.open("/path/to/file.qbw", lenient=True)
 print(r.page_count, "pages,", r.file_size, "bytes")
 
 for t in r.tables()[:5]:
@@ -50,10 +52,8 @@ for w in lines.warnings:
 for h in r.transactions()[:3]:
     print(h.qb_id, h.txn_type)
 
-# Skip records that cannot be decoded instead of raising; each is listed.
-lenient = openqbw.open("/path/to/file.qbw", lenient=True)
-report = lenient.line_items()
-for rej in report.rejected:
+# Each skipped record is listed.
+for rej in lines.rejected:
     print(rej.kind, rej.page_number, rej.page_offset, rej.message)
 ```
 
@@ -62,11 +62,18 @@ for rej in report.rejected:
 `openqbw.open(path, *, lenient=False) -> Reader`
 
 Reads are strict: a record or page that cannot be decoded with confidence
-raises. With `lenient=True` such records are skipped, listed in each
-result's `rejected`, and an `openqbw.OpenQBWWarning` is issued.
+raises (the message says to open the file with `lenient=True`). With
+`lenient=True` such records are skipped, listed in each result's `rejected`,
+and an `openqbw.OpenQBWWarning` is issued.
 
 `Reader` attributes: `path`, `lenient`, `page_count`, `file_size`,
-`created_unix_seconds`, `attribution_gap`.
+`created_unix_seconds` (the stored count taken as UTC), `attribution_gap`.
+
+`LineItem.txn_date_days_since_unix` is a converted date, best effort: the
+offset is fitted to one sample and not checked against a date known from
+another source. The raw value is `txn_date_raw`. `LineItem.value_undecoded` is
+`None` or one of `zero_length`, `digit_over_99`, `exponent_out_of_range` or
+`sector_boundary`.
 
 `Reader` methods, each returning a `ScanReport`:
 
