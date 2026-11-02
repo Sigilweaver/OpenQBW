@@ -10,8 +10,58 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  check-version:
+    name: tag matches versions
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      # A release is a v<version> tag. The tag must equal the workspace
+      # version in Cargo.toml and the version in the Python package's
+      # pyproject.toml, and the versions the crates require of each other,
+      # or nothing is published.
+      - name: Check the tag against the package versions
+        shell: bash
+        run: |
+          if [ "$GITHUB_REF_TYPE" != "tag" ]; then
+            echo "::error::a release runs on a v<version> tag; this run is on $GITHUB_REF"
+            exit 1
+          fi
+          python3 - <<'PY'
+          import os, sys, tomllib
+
+          def load(path):
+              with open(path, "rb") as f:
+                  return tomllib.load(f)
+
+          tag = os.environ["GITHUB_REF_NAME"]
+          root = load("Cargo.toml")
+          cargo = root["workspace"]["package"]["version"]
+          found = {
+              "workspace version (Cargo.toml)": cargo,
+              "openqbw requirement (Cargo.toml workspace.dependencies)":
+                  root["workspace"]["dependencies"]["openqbw"]["version"],
+              "openqbw requirement (crates/openqbw-py/Cargo.toml)":
+                  load("crates/openqbw-py/Cargo.toml")["dependencies"]["openqbw_rs"]["version"],
+              "pyproject version (crates/openqbw-py/pyproject.toml)":
+                  load("crates/openqbw-py/pyproject.toml")["project"]["version"],
+          }
+          bad = False
+          if tag != f"v{cargo}":
+              print(f"::error::tag {tag} is not v{cargo}, the workspace version")
+              bad = True
+          for name, value in found.items():
+              if value != cargo:
+                  print(f"::error::{name} is {value}, expected {cargo}")
+                  bad = True
+          sys.exit(1 if bad else 0)
+          PY
+
   publish-crates:
     name: publish to crates.io
+    needs: check-version
     runs-on: ubuntu-latest
     environment: crates-io
     permissions:
@@ -25,9 +75,10 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      # opensqlany must already be published at the matching version
-      # on crates.io. Path dep is stripped by `cargo publish` and the
-      # version constraint in Cargo.toml is what cargo will resolve.
+      # opensqlany comes from crates.io (the version in Cargo.toml). openqbw-cli
+      # depends on openqbw by its path and version; `cargo publish` drops the
+      # path and resolves the version from the index, so openqbw is published
+      # first and the index is given time to list it before openqbw-cli.
       - name: Publish openqbw
         run: cargo publish -p openqbw --token "$CARGO_REGISTRY_TOKEN"
         env:

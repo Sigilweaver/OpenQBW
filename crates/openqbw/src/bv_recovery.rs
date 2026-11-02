@@ -5,8 +5,6 @@
 //! step is independent of `bv`, we can precompute a `C[i]` table per sector
 //! (using the oracle base to recover step) and then test every bv 0..=255 by
 //! subtracting it from C and looking for the anchor.
-//!
-//! See `OpenQBW/re/NOTES.md §C.36` for the empirical derivation.
 #![allow(clippy::needless_range_loop)] // parallel-indexed C/hist/step tables
 
 const PAGE: usize = 4096;

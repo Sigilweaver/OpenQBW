@@ -63,7 +63,10 @@ def test_reads_the_synthetic_file():
     assert lines[1].value_raw == bytes([0x02, 0xBF, 0x2D, 0x22])
     assert lines[1].to_dict()["value"] == Decimal("-34.45")
     assert lines[0].txn_date_days_since_unix == 19800
-    assert lines[0].to_dict()["invoice_id"] == "0000000000001QBm"
+    assert lines[0].qb_id_parent == "0000000000001QBm"
+    assert lines[0].to_dict()["qb_id_parent"] == "0000000000001QBm"
+    assert not hasattr(lines[0], "invoice_id")
+    assert "invoice_id" not in lines[0].to_dict()
     assert [t.txn_type for t in txns] == ["invoice"]
     assert "header_id_ambiguous" in txns[0].flags
 
@@ -74,6 +77,7 @@ def test_undecodable_record_raises_unless_lenient():
         r.line_items()
     assert exc.value.kind == "invalid_value_length"
     assert exc.value.page_number == 7
+    assert "lenient=True" in str(exc.value)
 
     r = openqbw.open(BAD, lenient=True)
     with pytest.warns(openqbw.OpenQBWWarning):
@@ -108,3 +112,13 @@ def test_public_names_have_stubs():
             continue
         assert f"class {name}" in stub or f"def {name}" in stub, name
     assert (pathlib.Path(openqbw.__file__).parent / "py.typed").exists()
+
+
+def test_line_item_repr_is_python_not_rust():
+    lines = openqbw.open(GOOD).line_items()
+    text = repr(lines[0])
+    assert "Some(" not in text and "None(" not in text, text
+    assert text == (
+        "<openqbw.LineItem qb_id_parent=0000000000001QBm value=415 "
+        "source_table='abmc_invoice_inventory_lineitem'>"
+    )

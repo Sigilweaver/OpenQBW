@@ -14,9 +14,6 @@
 //! 1. Account for them as a known sub-class rather than "decode failed";
 //! 2. Skip them in line-item / header scans, preventing spurious anchor
 //!    hits from random bytes.
-//!
-//! See `OpenQBW/re/NOTES.md` (entry C.51, WP-5C) for the empirical
-//! characterisation across the four-file corpus.
 
 use crate::decode::decode_page;
 use opensqlany::{ApModel, PageStore, PageType};

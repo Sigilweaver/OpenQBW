@@ -19,14 +19,20 @@
 //! `k = 0` (`00 81` in practice) is not decoded. A field whose digits, or
 //! whose exponent outside -1..=2, do not fit the layout is not decoded
 //! either; the item keeps its raw bytes and the reason in
-//! [`LineItem::value_undecoded`]. A length byte above 10, or a field cut off
-//! by the page end, is an [`Error`].
+//! [`LineItem::value_undecoded`]. A field whose length byte is the first or
+//! last byte of a 512-byte sector, or whose bytes cross a sector boundary, is
+//! not decoded (`sector_boundary`): each sector of a page has its own
+//! keystream step, and a field spanning two cannot be shown to be read
+//! correctly. A length byte above 10 elsewhere, or a field cut off by the
+//! page end, is an [`Error`].
+//!
+//! The NUMERIC layout was worked out in issue #22.
 //!
 //! That the value is the line's amount is not established.
 
 use std::ops::Range;
 
-use opensqlany::{ApModel, PageStore};
+use opensqlany::{ApModel, PageStore, SECTOR_SIZE};
 
 use crate::decimal::Decimal;
 use crate::decode::{DecodedPage, Directory};
@@ -35,7 +41,7 @@ use crate::opaque::count_opaque_pages;
 use crate::page_attribution::PageAttribution;
 use crate::scan::{ReadOptions, RecordFlag, Scan, Warning, WarningKind, for_each_extent_page};
 
-use crate::date::{DateSource, sa_day_to_unix_day, scan_date_counter};
+use crate::date::{DateScan, DateSource, sa_day_to_unix_day, scan_date_counter};
 
 const PAGE_DATA_END: usize = 0xFF0;
 const ANCHOR_LEN: usize = 25;
@@ -64,6 +70,10 @@ pub enum UndecodedReason {
     DigitOver99,
     /// The exponent is outside -1..=2.
     ExponentOutOfRange,
+    /// The length byte is the first or last byte of a 512-byte sector, or
+    /// the field's bytes cross a sector boundary. Each sector has its own
+    /// keystream step, so the field is not trusted; its raw bytes are kept.
+    SectorBoundary,
 }
 
 impl UndecodedReason {
@@ -73,6 +83,7 @@ impl UndecodedReason {
             Self::ZeroLength => "zero_length",
             Self::DigitOver99 => "digit_over_99",
             Self::ExponentOutOfRange => "exponent_out_of_range",
+            Self::SectorBoundary => "sector_boundary",
         }
     }
 }
@@ -90,10 +101,17 @@ struct ValueField {
     raw: Vec<u8>,
     /// The decoded value, or why it was not decoded.
     value: Result<Decimal, UndecodedReason>,
+    /// `false` when the length byte could not be read as a digit count, so
+    /// `raw` holds only `[k][ctrl]` and the field's real width is unknown.
+    width_known: bool,
 }
 
 /// Read the value field at `at` in `body`. `anchor` is the offset of the
 /// record's anchor, named in errors.
+///
+/// A field whose length byte is the first or last byte of a sector, or whose
+/// bytes cross a sector boundary, is [`UndecodedReason::SectorBoundary`] and
+/// not an error, whatever its length byte says.
 fn read_value(body: &[u8], at: usize, pn: u64, anchor: usize) -> Result<ValueField, Error> {
     let truncated = || Error::TruncatedValue {
         page_number: pn,
@@ -104,6 +122,14 @@ fn read_value(body: &[u8], at: usize, pn: u64, anchor: usize) -> Result<ValueFie
         _ => return Err(truncated()),
     };
     let k = k as usize;
+    let at_sector_edge = at.is_multiple_of(SECTOR_SIZE) || (at + 1).is_multiple_of(SECTOR_SIZE);
+    if k > MAX_DIGITS && at_sector_edge {
+        return Ok(ValueField {
+            raw: vec![k as u8, ctrl],
+            value: Err(UndecodedReason::SectorBoundary),
+            width_known: false,
+        });
+    }
     if k > MAX_DIGITS {
         return Err(Error::InvalidValueLength {
             page_number: pn,
@@ -115,14 +141,26 @@ fn read_value(body: &[u8], at: usize, pn: u64, anchor: usize) -> Result<ValueFie
         return Err(truncated());
     };
     let raw = raw.to_vec();
+    if at_sector_edge || at / SECTOR_SIZE != (at + 1 + k) / SECTOR_SIZE {
+        return Ok(ValueField {
+            raw,
+            value: Err(UndecodedReason::SectorBoundary),
+            width_known: true,
+        });
+    }
     if k == 0 {
         return Ok(ValueField {
             raw,
             value: Err(UndecodedReason::ZeroLength),
+            width_known: true,
         });
     }
     let value = numeric_value(ctrl, &raw[2..]);
-    Ok(ValueField { raw, value })
+    Ok(ValueField {
+        raw,
+        value,
+        width_known: true,
+    })
 }
 
 /// The value of `digits` (base 100, least significant first) under the
@@ -154,7 +192,7 @@ fn numeric_value(ctrl: u8, digits: &[u8]) -> Result<Decimal, UndecodedReason> {
 #[non_exhaustive]
 pub struct LineItem {
     /// Parent transaction QB-ID (16 base62 characters).
-    pub invoice_id: String,
+    pub qb_id_parent: String,
     /// Source page number in the QBW file.
     pub page_number: u64,
     /// Byte offset within the decoded page body where the anchor starts.
@@ -193,9 +231,13 @@ impl LineItem {
     /// other fields empty. For tests and tools that need to synthesize
     /// records; scans never call it.
     #[doc(hidden)]
-    pub fn synthetic(invoice_id: &str, source_table: Option<&str>, value: Option<Decimal>) -> Self {
+    pub fn synthetic(
+        qb_id_parent: &str,
+        source_table: Option<&str>,
+        value: Option<Decimal>,
+    ) -> Self {
         Self {
-            invoice_id: invoice_id.to_owned(),
+            qb_id_parent: qb_id_parent.to_owned(),
             page_number: 0,
             page_offset: 0,
             item_qb_id: None,
@@ -247,7 +289,8 @@ pub(crate) fn scan_lineitems(
             extent: opaque.extent,
         }));
     }
-    let (mut outside_live_rows, mut other_quantity) = (0u64, 0u64);
+    let (mut outside_live_rows, mut other_quantity, mut sector_boundary_anchors) =
+        (0u64, 0u64, 0u64);
     for_each_extent_page(
         store,
         model,
@@ -261,6 +304,7 @@ pub(crate) fn scan_lineitems(
             let found = page_lineitems(decoded, source)?;
             outside_live_rows += found.outside_live_rows;
             other_quantity += found.other_quantity;
+            sector_boundary_anchors += found.sector_boundary;
             for r in found.records {
                 match r {
                     Ok(li) => scan.items.push(li),
@@ -282,12 +326,19 @@ pub(crate) fn scan_lineitems(
                 anchors: other_quantity,
             }));
     }
-    let mut undecoded = [0u64; 3];
+    if sector_boundary_anchors > 0 {
+        scan.warnings
+            .push(Warning::new(WarningKind::SectorBoundaryAnchors {
+                anchors: sector_boundary_anchors,
+            }));
+    }
+    let mut undecoded = [0u64; 4];
     for reason in scan.items.iter().filter_map(|li| li.value_undecoded) {
         match reason {
             UndecodedReason::ZeroLength => undecoded[0] += 1,
             UndecodedReason::DigitOver99 => undecoded[1] += 1,
             UndecodedReason::ExponentOutOfRange => undecoded[2] += 1,
+            UndecodedReason::SectorBoundary => undecoded[3] += 1,
         }
     }
     if undecoded.iter().any(|&n| n > 0) {
@@ -296,6 +347,7 @@ pub(crate) fn scan_lineitems(
                 zero_length: undecoded[0],
                 digit_over_99: undecoded[1],
                 exponent_out_of_range: undecoded[2],
+                sector_boundary: undecoded[3],
             }));
     }
     let unattributed = scan
@@ -321,6 +373,19 @@ struct PageLineItems {
     outside_live_rows: u64,
     /// Anchor-shaped records with a quantity other than 1.0, not parsed.
     other_quantity: u64,
+    /// Anchors cut by a sector boundary that could not be read.
+    sector_boundary: u64,
+}
+
+/// What a page scan found besides the parsed records.
+#[derive(Debug, Default)]
+struct PageScan {
+    /// Offsets of anchor-shaped records whose quantity is a plausible value
+    /// other than 1.0.
+    other_quantity: Vec<usize>,
+    /// Offsets of anchors cut by a sector boundary: the prefix and ID
+    /// characters before the boundary match, but the whole anchor does not.
+    sector_boundary: Vec<usize>,
 }
 
 /// Parse the line items on `decoded`, flag them for the page's decode
@@ -351,15 +416,23 @@ fn page_lineitems(decoded: &DecodedPage, source: Option<String>) -> Result<PageL
             .is_none_or(|spans| spans.iter().any(|s| s.contains(&offset)))
     };
     let mut found = Vec::new();
-    let other_quantity = scan_page(&decoded.bytes()[..PAGE_DATA_END], decoded.pn(), &mut found);
+    let page_scan = scan_page(&decoded.bytes()[..PAGE_DATA_END], decoded.pn(), &mut found);
     let mut out = PageLineItems {
         records: Vec::with_capacity(found.len()),
         outside_live_rows: 0,
         other_quantity: 0,
+        sector_boundary: 0,
     };
-    for offset in other_quantity {
+    for offset in page_scan.other_quantity {
         if is_live(offset) {
             out.other_quantity += 1;
+        } else {
+            out.outside_live_rows += 1;
+        }
+    }
+    for offset in page_scan.sector_boundary {
+        if is_live(offset) {
+            out.sector_boundary += 1;
         } else {
             out.outside_live_rows += 1;
         }
@@ -391,14 +464,15 @@ fn page_lineitems(decoded: &DecodedPage, source: Option<String>) -> Result<PageL
 /// Scan a decoded page body for line-item anchors and append parsed records
 /// to `out` in page order.
 ///
-/// Returns the offsets of anchors whose quantity position holds a plausible
-/// quantity other than 1.0 (see [`plausible_quantity`]); they are not
-/// parsed. A candidate whose bytes overlap a parsed anchor is part of that
-/// record and is not returned.
-fn scan_page(body: &[u8], pn: u64, out: &mut Vec<Result<LineItem, Error>>) -> Vec<usize> {
+/// Also returns the offsets of anchors whose quantity position holds a
+/// plausible quantity other than 1.0 (see [`plausible_quantity`]); they are
+/// not parsed. A candidate whose bytes overlap a parsed anchor is part of
+/// that record and is not returned. The same goes for anchors cut by a
+/// sector boundary (see [`PageScan::sector_boundary`]).
+fn scan_page(body: &[u8], pn: u64, out: &mut Vec<Result<LineItem, Error>>) -> PageScan {
     let mut other_quantity = Vec::new();
     if body.len() < ANCHOR_LEN {
-        return other_quantity;
+        return PageScan::default();
     }
     let limit = body.len() - ANCHOR_LEN;
     let mut start = Vec::new();
@@ -435,6 +509,8 @@ fn scan_page(body: &[u8], pn: u64, out: &mut Vec<Result<LineItem, Error>>) -> Ve
     }
 
     other_quantity.retain(|&c| start.iter().all(|&a| c.abs_diff(a) >= ANCHOR_LEN));
+    let mut sector_boundary = cut_anchors(body);
+    sector_boundary.retain(|&c| start.iter().all(|&a| c.abs_diff(a) >= ANCHOR_LEN));
 
     // Each record's search windows stop at its neighbours' anchors, so a
     // field of the previous or next record is never read as this one's.
@@ -452,7 +528,30 @@ fn scan_page(body: &[u8], pn: u64, out: &mut Vec<Result<LineItem, Error>>) -> Ve
     for (anchor, floor, ceil) in bounds {
         out.push(parse_anchor(body, pn, anchor, floor, ceil));
     }
-    other_quantity
+    PageScan {
+        other_quantity,
+        sector_boundary,
+    }
+}
+
+/// Offsets where an anchor would start in the last 25 bytes before a sector
+/// boundary (in-sector offsets 488 to 507): the 5-byte prefix and every ID
+/// character up to the boundary match, so only the boundary hides the rest.
+/// The bytes after the boundary are not examined; the ID characters and
+/// the quantity there are what a boundary spoils. Such an anchor is not read.
+///
+/// The boundary inside the page body counts; the page's last sector ends
+/// at the trailer, past the body, so it has none.
+fn cut_anchors(body: &[u8]) -> Vec<usize> {
+    let mut found = Vec::new();
+    for boundary in (SECTOR_SIZE..body.len()).step_by(SECTOR_SIZE) {
+        for pos in boundary - ANCHOR_LEN + 1..=boundary - 5 {
+            if body[pos..pos + 5] == PARENT_PREFIX && is_base62(&body[pos + 5..boundary]) {
+                found.push(pos);
+            }
+        }
+    }
+    found
 }
 
 /// Whether `q`, read from the quantity position of an anchor-shaped record,
@@ -472,7 +571,7 @@ fn parse_anchor(
     ceil: usize,
 ) -> Result<LineItem, Error> {
     let id_start = anchor_start + 5;
-    let invoice_id = std::str::from_utf8(&body[id_start..id_start + QB_ID_LEN])
+    let qb_id_parent = std::str::from_utf8(&body[id_start..id_start + QB_ID_LEN])
         .expect("anchor guarded by is_base62")
         .to_owned();
 
@@ -480,12 +579,22 @@ fn parse_anchor(
     let field = read_value(body, payload_start, pn, anchor_start)?;
 
     // Forward search for a date+counter pair after the value field.
-    let scan = scan_date_counter(
-        body,
-        payload_start + field.raw.len().max(MIN_VALUE_SPAN),
-        (payload_start + 64).min(ceil.saturating_sub(7)),
-        1_000_000,
-    );
+    // When the length byte was unreadable the field's width is unknown, and
+    // digit bytes could pass for a date: look for none.
+    let scan = if field.width_known {
+        scan_date_counter(
+            body,
+            payload_start + field.raw.len().max(MIN_VALUE_SPAN),
+            (payload_start + 64).min(ceil.saturating_sub(7)),
+            1_000_000,
+        )
+    } else {
+        DateScan {
+            date: None,
+            counter: None,
+            source: DateSource::NotFound,
+        }
+    };
 
     // Backward search for the nearest item QB-ID prefixed by `04 00 10`,
     // not reaching into the previous record.
@@ -493,7 +602,7 @@ fn parse_anchor(
     let item_qb_id = find_item_id_nearest(&body[back_start..anchor_start]);
 
     let mut li = LineItem {
-        invoice_id,
+        qb_id_parent,
         page_number: pn,
         page_offset: anchor_start,
         item_qb_id,
@@ -705,7 +814,7 @@ mod tests {
         body[p + 12..p + 16].copy_from_slice(&12671u32.to_le_bytes());
 
         let li = scan_one(&body).unwrap();
-        assert_eq!(li.invoice_id, "0000000000001QBm");
+        assert_eq!(li.qb_id_parent, "0000000000001QBm");
         assert_eq!(li.value_raw, [0x02, 0x40, 0x0F, 0x04]);
         assert_eq!(li.value.unwrap().to_string(), "415");
         assert_eq!(li.value_undecoded, None);
@@ -1035,8 +1144,170 @@ mod tests {
             == WarningKind::UndecodedValues {
                 zero_length: 1,
                 digit_over_99: 1,
-                exponent_out_of_range: 1
+                exponent_out_of_range: 1,
+                sector_boundary: 0
             }));
+    }
+
+    /// Body of two sectors (1024 bytes) with `payload` at `at`.
+    fn two_sector_value(at: usize, payload: &[u8]) -> Result<ValueField, Error> {
+        let mut body = vec![0u8; 1024];
+        body[at..at + payload.len()].copy_from_slice(payload);
+        read_value(&body, at, 7, at - 25)
+    }
+
+    #[test]
+    fn length_byte_at_a_sector_start_is_undecoded_not_an_error() {
+        let f = two_sector_value(512, &[0x30, 0x40, 0x01]).unwrap();
+        assert_eq!(f.value, Err(UndecodedReason::SectorBoundary));
+        assert_eq!(f.raw, [0x30, 0x40]);
+        assert!(!f.width_known);
+        // A plausible length at the start of a sector is not trusted either.
+        let f = two_sector_value(512, &[0x02, 0x40, 0x08, 0x02]).unwrap();
+        assert_eq!(f.value, Err(UndecodedReason::SectorBoundary));
+        assert_eq!(f.raw, [0x02, 0x40, 0x08, 0x02]);
+        assert!(f.width_known);
+    }
+
+    #[test]
+    fn length_byte_in_a_sector_end_is_undecoded() {
+        let f = two_sector_value(511, &[0x77, 0x40]).unwrap();
+        assert_eq!(f.value, Err(UndecodedReason::SectorBoundary));
+        assert_eq!(f.raw, [0x77, 0x40]);
+    }
+
+    #[test]
+    fn value_crossing_a_sector_boundary_is_undecoded_with_its_bytes() {
+        let f = two_sector_value(509, &[0x03, 0x3F, 0x39, 0x56, 0x2F]).unwrap();
+        assert_eq!(f.value, Err(UndecodedReason::SectorBoundary));
+        assert_eq!(f.raw, [0x03, 0x3F, 0x39, 0x56, 0x2F]);
+        assert!(f.width_known);
+    }
+
+    #[test]
+    fn value_ending_at_the_sector_end_is_decoded() {
+        // 507..512 holds [k][ctrl][3 digits]: the last digit is the last byte
+        // of the sector.
+        let f = two_sector_value(507, &[0x03, 0x3F, 0x39, 0x56, 0x2F]).unwrap();
+        assert_eq!(f.value.unwrap().to_string(), "4786.57");
+    }
+
+    #[test]
+    fn bad_length_byte_away_from_a_boundary_is_still_an_error() {
+        assert!(matches!(
+            two_sector_value(600, &[0x30, 0x40]).unwrap_err(),
+            Error::InvalidValueLength { .. }
+        ));
+    }
+
+    #[test]
+    fn record_with_unreadable_length_byte_at_a_boundary_has_no_guessed_date() {
+        // Anchor ends exactly on the sector boundary; the length byte is
+        // junk. A date-like pair sits where a value this wide could not
+        // reach: nothing may be taken from it.
+        let mut body = anchor_body(1024, 487, &[0x30, 0x40, 0x01, 0x02]);
+        body[512 + 8..512 + 12].copy_from_slice(&23_817u32.to_le_bytes());
+        body[512 + 12..512 + 16].copy_from_slice(&500u32.to_le_bytes());
+        let li = scan_one(&body).unwrap();
+        assert_eq!(li.value, None);
+        assert_eq!(li.value_undecoded, Some(UndecodedReason::SectorBoundary));
+        assert_eq!(li.value_raw, [0x30, 0x40]);
+        assert_eq!(li.date_source, DateSource::NotFound);
+        assert_eq!(li.txn_date_raw, None);
+        assert_eq!(li.counter, None);
+    }
+
+    #[test]
+    fn straddling_value_with_a_known_width_still_finds_its_date() {
+        // Anchor ends at 509, so the value's last bytes are in sector 1.
+        let mut body = anchor_body(1024, 484, &[0x02, 0x40, 0x0F, 0x04]);
+        let p = 484 + ANCHOR_LEN;
+        body[p + 8..p + 12].copy_from_slice(&23_817u32.to_le_bytes());
+        body[p + 12..p + 16].copy_from_slice(&500u32.to_le_bytes());
+        let li = scan_one(&body).unwrap();
+        assert_eq!(li.value_undecoded, Some(UndecodedReason::SectorBoundary));
+        assert_eq!(li.txn_date_raw, Some(23_817));
+    }
+
+    #[test]
+    fn anchor_cut_by_a_sector_boundary_is_counted_not_read() {
+        let mut body = vec![0xAAu8; PAGE_DATA_END];
+        // Prefix and part of the ID before the boundary at 512; nothing
+        // usable after it.
+        for start in [490usize, 1024 + 500] {
+            let boundary = (start / 512 + 1) * 512;
+            body[start..start + 5].copy_from_slice(&PARENT_PREFIX);
+            for b in &mut body[start + 5..boundary] {
+                *b = b'Q';
+            }
+        }
+        let mut out = Vec::new();
+        let found = scan_page(&body, 7, &mut out);
+        assert!(out.is_empty());
+        assert_eq!(found.sector_boundary, [490, 1524]);
+    }
+
+    #[test]
+    fn whole_anchor_across_a_boundary_is_read_not_counted_as_cut() {
+        let body = anchor_body(PAGE_DATA_END, 495, &[0x02, 0x40, 0x0F, 0x04]);
+        let mut out = Vec::new();
+        let found = scan_page(&body, 7, &mut out);
+        assert_eq!(out.len(), 1);
+        assert!(found.sector_boundary.is_empty());
+    }
+
+    #[test]
+    fn sector_boundary_values_are_counted_by_reason() {
+        let mut page = vec![0u8; 4096];
+        put_anchor(&mut page, 487);
+        page[512..514].copy_from_slice(&[0x30, 0x40]);
+        put_anchor(&mut page, 0x800);
+        let found = page_lineitems(&DecodedPage::from_plain(9, page), None).unwrap();
+        assert_eq!(found.records.len(), 2);
+        assert_eq!(
+            found.records[0].as_ref().unwrap().value_undecoded,
+            Some(UndecodedReason::SectorBoundary)
+        );
+    }
+
+    #[test]
+    fn sector_boundary_values_and_cut_anchors_are_warned_about() {
+        let mut plain = vec![0u8; 4096];
+        // Value field crossing the boundary at 1024.
+        put_anchor(&mut plain, 1024 - ANCHOR_LEN - 2);
+        plain[0xF00..0xF04].copy_from_slice(&[0x00, 0x00, 0xD5, 0x0B]);
+        // Anchor cut by the boundary at 2048.
+        let cut = 2048 - 15;
+        plain[cut..cut + 5].copy_from_slice(&PARENT_PREFIX);
+        plain[cut + 5..2048].fill(b'Q');
+        plain[0xFF2] = b'E';
+        for (i, b) in plain[..PAGE_DATA_END].iter_mut().enumerate() {
+            *b = b.wrapping_add(0x5Au8.wrapping_add(1 + (i / 512) as u8));
+        }
+        let mut bytes = vec![0u8; 4096];
+        bytes.extend(plain);
+        let store = crate::testutil::sealed_store(bytes);
+        let model = crate::testutil::lenient_model(&store);
+        let attribution = PageAttribution::from_catalog(Vec::new());
+        let scan =
+            scan_lineitems(&store, &model, Some(&attribution), &ReadOptions::strict()).unwrap();
+        assert_eq!(scan.items.len(), 1);
+        assert_eq!(
+            scan.items[0].value_undecoded,
+            Some(UndecodedReason::SectorBoundary)
+        );
+        assert!(scan.warnings.iter().any(|w| w.kind
+            == WarningKind::UndecodedValues {
+                zero_length: 0,
+                digit_over_99: 0,
+                exponent_out_of_range: 0,
+                sector_boundary: 1
+            }));
+        assert!(
+            scan.warnings
+                .iter()
+                .any(|w| w.kind == WarningKind::SectorBoundaryAnchors { anchors: 1 })
+        );
     }
 
     fn random_extent_store(pages: usize, opaque: usize) -> PageStore {

@@ -14,6 +14,8 @@
 //! The `debug` commands print heuristic cross-checks for people studying
 //! the format. Their names, flags and output may change in any release.
 
+mod outfile;
+
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -22,9 +24,10 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use openqbw::diagnostics::{self, CrossValidation};
 use openqbw::{
-    Decimal, Error as QbwError, LineItem, ReadOptions, Reader, SysTableEntry, TransactionHeader,
-    Warning, WarningKind,
+    Decimal, Error as QbwError, ErrorKind, LineItem, ReadOptions, Reader, SysTableEntry,
+    TransactionHeader, Warning, WarningKind,
 };
+use outfile::{Staged, StagedSet};
 use rusqlite::{Connection, Transaction, params};
 
 /// Version of the SQLite export layout, stored in `PRAGMA user_version` and
@@ -87,11 +90,15 @@ enum Cmd {
     /// Export, then report per-table coverage, decoded and undecoded values,
     /// and how many parent groups of three or more lines sum to exactly zero.
     /// The value is not established as the line amount and source_table is an
-    /// unverified, position-based attribution.
+    /// unverified, position-based attribution. Exits 3 when the exported
+    /// SQLite file's line-item, undecoded-value or rejection counts differ
+    /// from the scan; the other sections are reports and never change the
+    /// exit status.
     Verify {
         /// Input QBW file.
         input: PathBuf,
-        /// Optional output SQLite path. Defaults to a temp file.
+        /// Keep the exported SQLite file at this path. Without it the export
+        /// goes to a temporary file that is removed when verify ends.
         #[arg(long)]
         output: Option<PathBuf>,
         /// Also build a content-signature attribution map and report
@@ -102,8 +109,7 @@ enum Cmd {
     },
     /// Print the columns of a table. SYSCOLUMN.owner_object_id is
     /// bridged to SYSTABLE.name via the table-id back-reference in the
-    /// SYSTABLE row prefix, falling back to the SYSOBJECT catalog scan
-    /// (Phase 6, WP-6Z.2 / WP-6Z.4).
+    /// SYSTABLE row prefix, falling back to the SYSOBJECT catalog scan.
     Schema {
         /// Input QBW file.
         input: PathBuf,
@@ -145,7 +151,7 @@ enum Cmd {
 #[derive(Subcommand, Debug)]
 enum DebugCmd {
     /// Print heuristic foreign-key edges inferred from column names
-    /// matching `*_id` / `*_id_h` (Phase 6, WP-6B).
+    /// matching `*_id` / `*_id_h`.
     Fkgraph {
         /// Input QBW file.
         input: PathBuf,
@@ -154,20 +160,19 @@ enum DebugCmd {
         resolved_only: bool,
     },
     /// Print a histogram of SYSCOLUMN.nulls_flag bytes with sample
-    /// columns per value (Phase 6, WP-6D).
+    /// columns per value.
     Nulls {
         /// Input QBW file.
         input: PathBuf,
     },
     /// Validate position-based page attribution against per-table
-    /// row-width bands derived from SYSCOLUMN (Phase 6, WP-6Z).
+    /// row-width bands derived from SYSCOLUMN.
     ValidateAttribution {
         /// Input QBW file.
         input: PathBuf,
     },
     /// List the SYSINDEX catalog and cross-validate the position
-    /// attribution against SYSINDEX `root_page` ground truth
-    /// (Phase 6, WP-6Z.3).
+    /// attribution against SYSINDEX `root_page` ground truth.
     Indexes {
         /// Input QBW file.
         input: PathBuf,
@@ -206,19 +211,69 @@ fn open_reader(path: &std::path::Path, lenient: bool) -> Result<Reader> {
     } else {
         ReadOptions::strict()
     };
-    let reader = Reader::open(path, &options).with_context(|| {
-        format!(
-            "opening {:?}{}",
-            path,
-            if lenient {
-                ""
-            } else {
-                " (use --lenient to skip pages that fail to decode and list them)"
-            }
-        )
-    })?;
-    report(&reader.catalog().warnings, &reader.catalog().rejected);
+    let reader = Reader::open(path, &options)
+        .map_err(|e| anyhow::Error::new(e).context(format!("opening {path:?}")))?;
+    let mut printed = Vec::new();
+    report_scan(
+        "catalog",
+        &reader.catalog().warnings,
+        &reader.catalog().rejected,
+        &mut printed,
+    );
     Ok(reader)
+}
+
+/// Whether `--lenient` can get past an error: a lenient read skips a page
+/// that failed to decode (a store error that names its page) and a record
+/// whose value field cannot be read. A bad magic, an unsupported version, a
+/// damaged page or a keystream that cannot be calibrated stay errors.
+fn lenient_may_help(e: &QbwError) -> bool {
+    matches!(
+        e,
+        QbwError::Store {
+            page_number: Some(_),
+            ..
+        }
+    ) || matches!(
+        e.kind(),
+        ErrorKind::InvalidValueLength | ErrorKind::TruncatedValue
+    )
+}
+
+/// The line printed after a strict failure that `--lenient` can get past.
+const LENIENT_HINT: &str = "hint: this file has records or pages the reader cannot decode. \
+Rerun with --lenient to skip them; each skipped one is printed and listed in the export.";
+
+/// The lines to print for one scan's `warnings`: each prefixed with the
+/// scan's `label`, and none that `printed` already holds. A scan over the
+/// same pages repeats its predecessors' page-confidence warnings; printing
+/// them again, with the denominators of another scan, reads as a second
+/// problem. Every warning returned is added to `printed`.
+fn labeled_warnings(label: &str, warnings: &[Warning], printed: &mut Vec<Warning>) -> Vec<String> {
+    let mut lines = Vec::new();
+    for w in warnings {
+        if !printed.contains(w) {
+            lines.push(format!("warning: {label}: {w}"));
+            printed.push(w.clone());
+        }
+    }
+    lines
+}
+
+/// Print one scan's warnings (see [`labeled_warnings`]) and skipped records on
+/// stderr.
+fn report_scan(
+    label: &str,
+    warnings: &[Warning],
+    rejected: &[QbwError],
+    printed: &mut Vec<Warning>,
+) {
+    for line in labeled_warnings(label, warnings, printed) {
+        eprintln!("{line}");
+    }
+    for e in rejected {
+        eprintln!("warning: skipped: {e}");
+    }
 }
 
 /// Print run-level warnings and skipped records on stderr.
@@ -234,10 +289,18 @@ fn report(warnings: &[Warning], rejected: &[QbwError]) {
 /// Exit status: 0 success, 1 error, 2 usage error (from the argument
 /// parser), 3 `verify` found a check that differs.
 fn main() -> ExitCode {
-    match run(Cli::parse()) {
+    let cli = Cli::parse();
+    let lenient = cli.lenient;
+    match run(cli) {
         Ok(code) => code,
         Err(e) => {
             eprintln!("Error: {e:?}");
+            let helps = e
+                .chain()
+                .any(|c| c.downcast_ref::<QbwError>().is_some_and(lenient_may_help));
+            if !lenient && helps {
+                eprintln!("{LENIENT_HINT}");
+            }
             ExitCode::FAILURE
         }
     }
@@ -287,11 +350,11 @@ fn run(cli: Cli) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
+/// Export to SQLite. Nothing at `output` is touched until the input has
+/// opened and scanned and the new database is complete: it is built in a
+/// temporary file next to `output` and renamed over it.
 fn run_export(input: PathBuf, output: PathBuf, lenient: bool) -> Result<ExportStats> {
-    if output.exists() {
-        std::fs::remove_file(&output).with_context(|| format!("removing existing {:?}", output))?;
-    }
-
+    outfile::check_output(&input, &output)?;
     let reader = open_reader(&input, lenient)?;
     let Records {
         items,
@@ -301,7 +364,11 @@ fn run_export(input: PathBuf, output: PathBuf, lenient: bool) -> Result<ExportSt
         ..
     } = collect_records(&reader)?;
 
-    let mut conn = Connection::open(&output).with_context(|| format!("opening {:?}", output))?;
+    let staged = Staged::new(&output);
+    // A leftover from a crashed run with the same process id.
+    let _ = std::fs::remove_file(staged.path());
+    let mut conn =
+        Connection::open(staged.path()).with_context(|| format!("creating {:?}", output))?;
     create_schema(&conn)?;
 
     {
@@ -315,6 +382,10 @@ fn run_export(input: PathBuf, output: PathBuf, lenient: bool) -> Result<ExportSt
     }
 
     let stats = collect_export_stats(&conn, &reader, &items, &headers, rejected.len())?;
+    conn.close()
+        .map_err(|(_, e)| e)
+        .with_context(|| format!("closing {:?}", output))?;
+    staged.commit()?;
     println!("{}", stats.summary());
     Ok(stats)
 }
@@ -339,8 +410,8 @@ fn run_catalog(input: PathBuf, user_only: bool, lenient: bool) -> Result<()> {
         user.len(),
     );
     println!(
-        "{:>6}  {:>5}  {:>6}  {:>6}  name",
-        "tid", "cols", "root", "last"
+        "{:>6}  {:>5}  {:>10}  {:>10}  {:20}  name",
+        "tid", "cols", "root", "last", "flags"
     );
     let iter: Box<dyn Iterator<Item = &SysTableEntry>> = if user_only {
         Box::new(user.into_iter())
@@ -352,17 +423,26 @@ fn run_catalog(input: PathBuf, user_only: bool, lenient: bool) -> Result<()> {
             .col_count
             .map(|c| c.to_string())
             .unwrap_or_else(|| "-".into());
-        let root = e
-            .data_root_page
-            .map(|p| p.to_string())
-            .unwrap_or_else(|| "-".into());
+        // A root past the end of the file or not on a data page is not a
+        // page number; it is shown as "-" and named in the flags column.
+        let root = if e.flags.contains(&openqbw::RecordFlag::RootPageInvalid) {
+            None
+        } else {
+            e.data_root_page
+        };
+        let root = root.map(|p| p.to_string()).unwrap_or_else(|| "-".into());
         let last = e
             .last_page
             .map(|p| p.to_string())
             .unwrap_or_else(|| "-".into());
         println!(
-            "{:>6}  {:>5}  {:>6}  {:>6}  {}",
-            e.table_id, cols, root, last, e.name
+            "{:>6}  {:>5}  {:>10}  {:>10}  {:20}  {}",
+            e.table_id,
+            cols,
+            root,
+            last,
+            flag_list(&e.flags),
+            e.name
         );
     }
     Ok(())
@@ -541,7 +621,12 @@ fn run_fkgraph(input: PathBuf, resolved_only: bool, lenient: bool) -> Result<()>
 fn run_indexes(input: PathBuf, fk_only: bool, summary_only: bool, lenient: bool) -> Result<()> {
     let reader = open_reader(&input, lenient)?;
     let scan = reader.indexes()?;
-    report(&scan.warnings, &scan.rejected);
+    report_scan(
+        "indexes",
+        &scan.warnings,
+        &scan.rejected,
+        &mut reader.catalog().warnings.clone(),
+    );
     let entries = &scan.items;
     let tables = &reader.catalog().items;
     let audit = diagnostics::sysindex_cross_validation(&reader)?;
@@ -639,7 +724,12 @@ fn run_validate_attribution(input: PathBuf, lenient: bool) -> Result<()> {
 fn run_nulls(input: PathBuf, lenient: bool) -> Result<()> {
     let reader = open_reader(&input, lenient)?;
     let scan = diagnostics::nulls_flag_histogram(&reader)?;
-    report(&scan.warnings, &scan.rejected);
+    report_scan(
+        "columns",
+        &scan.warnings,
+        &scan.rejected,
+        &mut reader.catalog().warnings.clone(),
+    );
     let buckets = &scan.items;
     let total: usize = buckets.iter().map(|b| b.count).sum();
     println!(
@@ -662,9 +752,14 @@ fn run_verify(
     strict_attribution: bool,
     lenient: bool,
 ) -> Result<bool> {
-    let out = match output {
-        Some(p) => p,
-        None => std::env::temp_dir().join(format!("openqbw-verify-{}.sqlite", std::process::id())),
+    // Without --output the export goes to a private temporary directory that
+    // is removed when this function returns, on success or error.
+    let (out, _temp) = match output {
+        Some(p) => (p, None),
+        None => {
+            let dir = outfile::TempDir::new("openqbw-verify")?;
+            (dir.path().join("verify.sqlite"), Some(dir))
+        }
     };
     let stats = run_export(input.clone(), out.clone(), lenient)?;
     println!();
@@ -672,7 +767,16 @@ fn run_verify(
 
     let conn = Connection::open(&out)?;
     check_export_format(&conn).with_context(|| format!("reading {:?}", out))?;
-    let diffs: Vec<&str> = Vec::new();
+    let diffs = readback_diffs(&conn, &stats)?;
+    println!();
+    println!("Export read-back (the SQLite file against the scan):");
+    for check in READBACK_CHECKS {
+        println!(
+            "  {:18} {}",
+            check,
+            if diffs.contains(&check) { "DIFF" } else { "ok" }
+        );
+    }
     println!();
     println!("Per source_table line-item counts (source_table is position-based and unverified):");
     println!(
@@ -738,11 +842,12 @@ fn run_verify(
     println!();
     println!("Parent-group balance (informational; not a pass/fail check):");
     println!(
-        "  {} undecoded values: {} zero-length, {} digit above 99, {} exponent out of range",
+        "  {} undecoded values: {} zero-length, {} digit above 99, {} exponent out of range, {} at a sector boundary",
         stats.undecoded.total(),
         stats.undecoded.zero_length,
         stats.undecoded.digit_over_99,
         stats.undecoded.exponent_out_of_range,
+        stats.undecoded.sector_boundary,
     );
     println!(
         "  parent groups of 3+ lines, all decoded: {}; summing to exactly zero: {} ({:.1}%)",
@@ -754,7 +859,7 @@ fn run_verify(
     println!("  line amount, so a zero sum is evidence about the encoding, not an invoice check.");
 
     println!();
-    println!("=== SYSINDEX cross-validation (WP-6Z.3) ===");
+    println!("=== SYSINDEX cross-validation ===");
     let reader = open_reader(&input, lenient)?;
     {
         let entries = reader.indexes()?.items;
@@ -813,6 +918,34 @@ fn run_verify(
         eprintln!("verify: checks that differ: {}", diffs.join(", "));
         Ok(false)
     }
+}
+
+/// Names of the checks [`readback_diffs`] runs, in report order.
+const READBACK_CHECKS: [&str; 3] = ["line_items", "undecoded_values", "scan_rejections"];
+
+/// Compare what is on disk in `conn` with what the scan found: line-item
+/// rows, rows with no decoded value, and stored rejections. Returns the names
+/// of the checks that differ, which `verify` reports and answers with exit
+/// status 3. A difference means the export lost or changed records on the way
+/// to the file.
+fn readback_diffs(conn: &Connection, stats: &ExportStats) -> Result<Vec<&'static str>> {
+    let count = |sql: &str| -> Result<i64> { Ok(conn.query_row(sql, [], |r| r.get(0))?) };
+    let on_disk = [
+        count("SELECT COUNT(*) FROM transaction_line_items")?,
+        count("SELECT COUNT(*) FROM transaction_line_items WHERE value IS NULL")?,
+        count("SELECT COUNT(*) FROM scan_rejections")?,
+    ];
+    let scanned = [
+        stats.line_items,
+        stats.undecoded.total() as i64,
+        stats.rejected_records as i64,
+    ];
+    Ok(READBACK_CHECKS
+        .into_iter()
+        .zip(on_disk.into_iter().zip(scanned))
+        .filter(|(_, (disk, scan))| disk != scan)
+        .map(|(name, _)| name)
+        .collect())
 }
 
 /// Label for rows without a source table in human-readable output.
@@ -893,8 +1026,8 @@ fn create_schema(conn: &Connection) -> Result<()> {
             -- not decoded (see value_undecoded). Not established as the
             -- line's amount.
             value               TEXT,
-            -- zero_length, digit_over_99 or exponent_out_of_range; NULL when
-            -- the value is decoded.
+            -- zero_length, digit_over_99, exponent_out_of_range or
+            -- sector_boundary; NULL when the value is decoded.
             value_undecoded     TEXT,
             -- The field's bytes, lowercase hex: [k][ctrl][k digit bytes].
             value_raw_hex       TEXT NOT NULL,
@@ -1031,9 +1164,9 @@ fn insert_synthesized_transactions(
     let mut groups: HashMap<String, Vec<&LineItem>> = HashMap::new();
     for li in items {
         groups
-            .entry(li.invoice_id.clone())
+            .entry(li.qb_id_parent.clone())
             .or_insert_with(|| {
-                order.push(li.invoice_id.clone());
+                order.push(li.qb_id_parent.clone());
                 Vec::new()
             })
             .push(li);
@@ -1096,11 +1229,11 @@ fn insert_transaction_line_items(tx: &Transaction<'_>, items: &[LineItem]) -> Re
     let mut line_no: BTreeMap<(String, Option<String>), i64> = BTreeMap::new();
     for li in items {
         let src = li.source_table.clone();
-        let key = (li.invoice_id.clone(), src.clone());
+        let key = (li.qb_id_parent.clone(), src.clone());
         let n = line_no.entry(key).or_insert(0);
         *n += 1;
         stmt.execute(params![
-            li.invoice_id,
+            li.qb_id_parent,
             *n,
             li.item_qb_id,
             li.value.map(|v| v.to_string()),
@@ -1119,7 +1252,12 @@ fn insert_transaction_line_items(tx: &Transaction<'_>, items: &[LineItem]) -> Re
 }
 
 fn flags_csv(li: &LineItem) -> String {
-    li.flags
+    flag_list(&li.flags)
+}
+
+/// Record flags as a comma-separated list; empty when there are none.
+fn flag_list(flags: &[openqbw::RecordFlag]) -> String {
+    flags
         .iter()
         .map(|f| f.as_str())
         .collect::<Vec<_>>()
@@ -1152,6 +1290,9 @@ struct UndecodedCounts {
     zero_length: u64,
     digit_over_99: u64,
     exponent_out_of_range: u64,
+    sector_boundary: u64,
+    /// A reason this build does not name.
+    other: u64,
 }
 
 impl UndecodedCounts {
@@ -1162,14 +1303,21 @@ impl UndecodedCounts {
                 openqbw::UndecodedReason::ZeroLength => c.zero_length += 1,
                 openqbw::UndecodedReason::DigitOver99 => c.digit_over_99 += 1,
                 openqbw::UndecodedReason::ExponentOutOfRange => c.exponent_out_of_range += 1,
-                _ => {}
+                openqbw::UndecodedReason::SectorBoundary => c.sector_boundary += 1,
+                // A reason added after this build is counted in the total
+                // below only through the lines themselves.
+                _ => c.other += 1,
             }
         }
         c
     }
 
     fn total(&self) -> u64 {
-        self.zero_length + self.digit_over_99 + self.exponent_out_of_range
+        self.zero_length
+            + self.digit_over_99
+            + self.exponent_out_of_range
+            + self.sector_boundary
+            + self.other
     }
 }
 
@@ -1211,7 +1359,7 @@ fn balance(items: &[LineItem]) -> Balance {
     let mut by_parent: HashMap<&str, Vec<Option<Decimal>>> = HashMap::new();
     for li in items {
         by_parent
-            .entry(li.invoice_id.as_str())
+            .entry(li.qb_id_parent.as_str())
             .or_default()
             .push(li.value);
     }
@@ -1377,11 +1525,12 @@ fn warning_values(kind: &WarningKind) -> Vec<(String, u64)> {
             zero_length,
             digit_over_99,
             exponent_out_of_range,
+            sector_boundary,
             ..
         } => vec![
             (
                 code.into(),
-                zero_length + digit_over_99 + exponent_out_of_range,
+                zero_length + digit_over_99 + exponent_out_of_range + sector_boundary,
             ),
             (format!("{code}_zero_length"), *zero_length),
             (format!("{code}_digit_over_99"), *digit_over_99),
@@ -1389,7 +1538,9 @@ fn warning_values(kind: &WarningKind) -> Vec<(String, u64)> {
                 format!("{code}_exponent_out_of_range"),
                 *exponent_out_of_range,
             ),
+            (format!("{code}_sector_boundary"), *sector_boundary),
         ],
+        WarningKind::SectorBoundaryAnchors { anchors, .. } => vec![(code.into(), *anchors)],
         WarningKind::LineItemsNotRead { anchors, .. } => vec![(code.into(), *anchors)],
         WarningKind::InvalidRootPages { tables, .. } => vec![(code.into(), *tables)],
         // A condition without a count: 1 when present.
@@ -1400,12 +1551,10 @@ fn warning_values(kind: &WarningKind) -> Vec<(String, u64)> {
 /// Scan line items and headers. Strict mode stops at the first undecodable
 /// record; lenient mode returns the skipped ones and prints each on stderr.
 fn collect_records(reader: &Reader) -> Result<Records> {
-    let lines = reader
-        .line_items()
-        .context("scanning line items (use --lenient to skip undecodable records and list them)")?;
-    let heads = reader.transactions().context(
-        "scanning transaction headers (use --lenient to skip failing pages and list them)",
-    )?;
+    let lines = reader.line_items().context("scanning line items")?;
+    let heads = reader
+        .transactions()
+        .context("scanning transaction headers")?;
     let mut counts = RunCounts::default();
     counts.add_scan(
         "catalog",
@@ -1419,6 +1568,7 @@ fn collect_records(reader: &Reader) -> Result<Records> {
             "records_outside_live_rows",
             "line_items_not_read",
             "undecoded_values",
+            "sector_boundary_anchors",
             "unattributed_records",
             "attribution_gap",
         ],
@@ -1433,15 +1583,12 @@ fn collect_records(reader: &Reader) -> Result<Records> {
         ],
         &heads.warnings,
     );
-    let mut warnings = lines.warnings;
-    for w in heads.warnings {
-        if !warnings.contains(&w) {
-            warnings.push(w);
-        }
-    }
+    // The catalog's warnings were printed when the file was opened.
+    let mut printed = reader.catalog().warnings.clone();
+    report_scan("line items", &lines.warnings, &lines.rejected, &mut printed);
+    report_scan("headers", &heads.warnings, &heads.rejected, &mut printed);
     let mut rejected = lines.rejected;
     rejected.extend(heads.rejected);
-    report(&warnings, &rejected);
     let mut items = lines.items;
     items.sort_by_key(|li| (li.page_number, li.page_offset));
     let mut headers = heads.items;
@@ -1514,8 +1661,26 @@ fn lineitem_date(li: &LineItem) -> String {
         .unwrap_or_default()
 }
 
+/// Files `migrate --format csv` writes into its output directory.
+const CSV_FILES: [&str; 5] = [
+    "catalog.csv",
+    "transactions.csv",
+    "lineitems.csv",
+    "rejected.csv",
+    "manifest.json",
+];
+
 fn run_migrate_csv(input: PathBuf, out: PathBuf, lenient: bool) -> Result<()> {
-    std::fs::create_dir_all(&out).with_context(|| format!("creating {:?}", out))?;
+    if out.exists() && !out.is_dir() {
+        anyhow::bail!(
+            "{:?} exists and is not a directory; nothing was changed",
+            out
+        );
+    }
+    outfile::check_output(&input, &out)?;
+    for name in CSV_FILES {
+        outfile::check_output(&input, &out.join(name))?;
+    }
     let reader = open_reader(&input, lenient)?;
     let Records {
         items,
@@ -1526,25 +1691,29 @@ fn run_migrate_csv(input: PathBuf, out: PathBuf, lenient: bool) -> Result<()> {
     } = collect_records(&reader)?;
 
     // catalog.csv
-    let mut cat = std::fs::File::create(out.join("catalog.csv"))?;
     use std::io::Write;
-    writeln!(cat, "table_id,name,column_count,data_root_page,last_page")?;
+    let mut cat: Vec<u8> = Vec::new();
+    writeln!(
+        cat,
+        "table_id,name,column_count,data_root_page,last_page,flags"
+    )?;
     let mut tables: Vec<SysTableEntry> = reader.catalog().items.clone();
     tables.sort_by_key(|e| e.table_id);
     for t in &tables {
         writeln!(
             cat,
-            "{},{},{},{},{}",
+            "{},{},{},{},{},{}",
             t.table_id,
             csv_field(&t.name),
             t.col_count.map(|c| c.to_string()).unwrap_or_default(),
             t.data_root_page.map(|p| p.to_string()).unwrap_or_default(),
             t.last_page.map(|p| p.to_string()).unwrap_or_default(),
+            csv_field(&flag_list(&t.flags)),
         )?;
     }
 
     // transactions.csv
-    let mut txf = std::fs::File::create(out.join("transactions.csv"))?;
+    let mut txf: Vec<u8> = Vec::new();
     writeln!(
         txf,
         "qb_id,txn_type,source_table,txn_date_raw,counter,date_source,page_number,page_offset"
@@ -1565,22 +1734,23 @@ fn run_migrate_csv(input: PathBuf, out: PathBuf, lenient: bool) -> Result<()> {
     }
 
     // lineitems.csv
-    let mut lif = std::fs::File::create(out.join("lineitems.csv"))?;
+    let mut lif: Vec<u8> = Vec::new();
     writeln!(
         lif,
-        "invoice_id,item_qb_id,value,value_undecoded,value_raw_hex,txn_date,date_source,flags,source_table,page_number,page_offset"
+        "qb_id_parent,item_qb_id,value,value_undecoded,value_raw_hex,txn_date_raw,counter,date_source,flags,source_table,page_number,page_offset"
     )?;
     for li in &items {
         let value = li.value.map(|v| v.to_string()).unwrap_or_default();
         writeln!(
             lif,
-            "{},{},{},{},{},{},{},{},{},{},{}",
-            csv_field(&li.invoice_id),
+            "{},{},{},{},{},{},{},{},{},{},{},{}",
+            csv_field(&li.qb_id_parent),
             csv_field(li.item_qb_id.as_deref().unwrap_or("")),
             value,
             li.value_undecoded.map_or("", |r| r.as_str()),
             hex(&li.value_raw),
-            lineitem_date(li),
+            li.txn_date_raw.map(|d| d.to_string()).unwrap_or_default(),
+            li.counter.map(|c| c.to_string()).unwrap_or_default(),
             li.date_source.as_str(),
             csv_field(&flags_csv(li)),
             csv_field(li.source_table.as_deref().unwrap_or("")),
@@ -1590,7 +1760,7 @@ fn run_migrate_csv(input: PathBuf, out: PathBuf, lenient: bool) -> Result<()> {
     }
 
     // Always written, so an empty list is distinguishable from a missing file.
-    let mut rf = std::fs::File::create(out.join("rejected.csv"))?;
+    let mut rf: Vec<u8> = Vec::new();
     writeln!(rf, "page_number,page_offset,kind,message")?;
     for e in &rejected {
         writeln!(
@@ -1602,18 +1772,29 @@ fn run_migrate_csv(input: PathBuf, out: PathBuf, lenient: bool) -> Result<()> {
             csv_field(&e.to_string()),
         )?;
     }
-    std::fs::write(
-        out.join("manifest.json"),
-        csv_manifest(
-            &[
-                ("catalog.csv", tables.len()),
-                ("transactions.csv", headers.len()),
-                ("lineitems.csv", items.len()),
-                ("rejected.csv", rejected.len()),
-            ],
-            &counts,
-        ),
-    )?;
+    let manifest = csv_manifest(
+        &[
+            ("catalog.csv", tables.len()),
+            ("transactions.csv", headers.len()),
+            ("lineitems.csv", items.len()),
+            ("rejected.csv", rejected.len()),
+        ],
+        &counts,
+    );
+
+    // Everything is staged before anything is replaced.
+    std::fs::create_dir_all(&out).with_context(|| format!("creating {:?}", out))?;
+    let mut set = StagedSet::default();
+    for (name, bytes) in [
+        ("catalog.csv", cat.as_slice()),
+        ("transactions.csv", txf.as_slice()),
+        ("lineitems.csv", lif.as_slice()),
+        ("rejected.csv", rf.as_slice()),
+        ("manifest.json", manifest.as_bytes()),
+    ] {
+        set.add(&out.join(name), bytes)?;
+    }
+    set.commit()?;
 
     println!(
         "openqbw migrate csv: out={:?} tables={} transactions={} lineitems={} undecoded_values={} skipped_records={} duplicate_headers={}",
@@ -1665,6 +1846,7 @@ fn run_migrate_iif(
              value field; it is not established as the line amount."
         );
     }
+    outfile::check_output(&input, &out)?;
     let reader = open_reader(&input, lenient)?;
     let Records {
         items,
@@ -1674,7 +1856,9 @@ fn run_migrate_iif(
         ..
     } = collect_records(&reader)?;
     let (text, stats) = render_iif(&items, &headers);
-    std::fs::write(&out, text).with_context(|| format!("writing {:?}", out))?;
+    let staged = Staged::new(&out);
+    staged.write(text.as_bytes())?;
+    staged.commit()?;
     println!(
         "openqbw migrate iif: out={:?} transactions={} lineitems={} skipped_transactions={} \
          omitted_lineitems={} (undecoded values) skipped_records={} duplicate_headers={}",
@@ -1722,7 +1906,7 @@ fn render_iif(items: &[LineItem], headers: &[TransactionHeader]) -> (String, Iif
     let mut by_parent: HashMap<&str, Vec<&LineItem>> = HashMap::new();
     for li in items {
         by_parent
-            .entry(li.invoice_id.as_str())
+            .entry(li.qb_id_parent.as_str())
             .or_default()
             .push(li);
     }
@@ -1844,7 +2028,7 @@ fn run_forensics(input: PathBuf, lenient: bool) -> Result<()> {
     // deleted parents.
     use std::collections::HashSet;
     let header_ids: HashSet<&str> = headers.iter().map(|h| h.qb_id.as_str()).collect();
-    let parent_ids: HashSet<&str> = items.iter().map(|li| li.invoice_id.as_str()).collect();
+    let parent_ids: HashSet<&str> = items.iter().map(|li| li.qb_id_parent.as_str()).collect();
     let orphan_parents = parent_ids.difference(&header_ids).count();
     let childless_headers = header_ids.difference(&parent_ids).count();
     let decoded_sum = Decimal::checked_sum(items.iter().filter_map(|li| li.value));
@@ -1896,6 +2080,64 @@ mod tests {
     }
 
     use super::*;
+
+    fn stats_for(items: &[LineItem]) -> ExportStats {
+        ExportStats {
+            pages: 0,
+            transactions: 0,
+            headers: 0,
+            line_items: items.len() as i64,
+            value_sum: None,
+            undecoded: UndecodedCounts::of(items),
+            per_table: BTreeMap::new(),
+            balance: Balance::default(),
+            rejected_records: 0,
+        }
+    }
+
+    #[test]
+    fn repeated_warnings_are_printed_once_and_labeled() {
+        let a = Warning::new(WarningKind::Other("a"));
+        let b = Warning::new(WarningKind::Other("b"));
+        let mut printed = Vec::new();
+        assert_eq!(
+            labeled_warnings("catalog", std::slice::from_ref(&a), &mut printed),
+            ["warning: catalog: a"]
+        );
+        assert_eq!(
+            labeled_warnings("line items", &[a.clone(), b], &mut printed),
+            ["warning: line items: b"]
+        );
+        assert!(labeled_warnings("headers", &[a], &mut printed).is_empty());
+    }
+
+    #[test]
+    fn readback_agrees_with_the_scan_and_reports_a_difference() {
+        let mut undecoded = item("A", None);
+        undecoded.value_undecoded = Some(openqbw::UndecodedReason::ZeroLength);
+        undecoded.page_offset = 8;
+        let items = [item("A", Some((1, 0))), undecoded];
+        let conn = Connection::open_in_memory().unwrap();
+        create_schema(&conn).unwrap();
+        let tx = conn.unchecked_transaction().unwrap();
+        insert_transaction_line_items(&tx, &items).unwrap();
+        tx.commit().unwrap();
+        let stats = stats_for(&items);
+        assert_eq!(readback_diffs(&conn, &stats).unwrap(), Vec::<&str>::new());
+
+        // A row lost on the way to disk.
+        conn.execute("DELETE FROM transaction_line_items WHERE value IS NULL", [])
+            .unwrap();
+        assert_eq!(
+            readback_diffs(&conn, &stats).unwrap(),
+            ["line_items", "undecoded_values"]
+        );
+
+        // A rejection that was not stored.
+        let mut stats = stats_for(&items[..1]);
+        stats.rejected_records = 1;
+        assert_eq!(readback_diffs(&conn, &stats).unwrap(), ["scan_rejections"]);
+    }
 
     /// A line of `parent` whose value is `mantissa / 10^scale`, or undecoded.
     fn item(parent: &str, value: Option<(i128, u32)>) -> LineItem {
@@ -2041,7 +2283,9 @@ mod tests {
             UndecodedCounts {
                 zero_length: 1,
                 digit_over_99: 1,
-                exponent_out_of_range: 0
+                exponent_out_of_range: 0,
+                sector_boundary: 0,
+                other: 0
             }
         );
         assert_eq!(c.total(), 2);
