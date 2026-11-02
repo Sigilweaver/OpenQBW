@@ -1,4 +1,4 @@
-//! SYSTABLE catalog row parser (Phase 4.3).
+//! SYSTABLE catalog row parser.
 //!
 //! The SA17 `SYSTABLE` system catalog stores one row per table in the
 //! database. On Rock Castle Construction and related QBW corpora, each row

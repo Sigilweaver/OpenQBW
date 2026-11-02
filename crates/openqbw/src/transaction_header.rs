@@ -9,7 +9,7 @@
 //!
 //! This scanner is deliberately conservative: it extracts only the
 //! QB-ID and a candidate date/counter pair. Richer field maps (memo,
-//! customer, total, etc.) are deferred (Phase 2.1 full).
+//! customer, total, etc.) are not read.
 //!
 //! ## Anchor
 //!

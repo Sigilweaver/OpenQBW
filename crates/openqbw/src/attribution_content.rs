@@ -11,9 +11,9 @@
 //! per page. The lookup is `O(log N)` over deduplicated signatures.
 //!
 //! The signature length is [`SIG_LEN`] = 12 bytes (the first 12 bytes of
-//! `row[0]`). Per WP-4A reconnaissance (`probe_rowsig.rs`) this length
-//! is sufficient to disambiguate every user table on the four-file Phase
-//! 5 corpus; longer signatures add no resolving power and reduce coverage
+//! `row[0]`). Measured with `re/archive/probe_rowsig.rs`, this length
+//! is sufficient to disambiguate every user table on the four-file test
+//! corpus; longer signatures add no resolving power and reduce coverage
 //! on short rows.
 //!
 //! ## Use as a verifier

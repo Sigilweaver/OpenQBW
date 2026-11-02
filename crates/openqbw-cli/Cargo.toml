@@ -11,6 +11,7 @@ authors.workspace = true
 keywords = ["quickbooks", "qbw", "cli", "accounting"]
 categories = ["command-line-utilities"]
 description = "Command-line exporter for QuickBooks .qbw files."
+readme.workspace = true
 
 [[bin]]
 name = "openqbw"

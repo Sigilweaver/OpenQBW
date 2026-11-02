@@ -1,4 +1,4 @@
-//! Opaque-page classification (WP-5C).
+//! Opaque-page classification.
 //!
 //! Some E-pages in QuickBooks `.qbw` files are not standard AP ciphertext:
 //! their plaintext is high-entropy (Shannon entropy >= 7.5 bits/byte) under
@@ -9,7 +9,7 @@
 //! SA17 long-data / overflow subsystem, stored verbatim alongside ordinary
 //! AP-encoded pages.
 //!
-//! WP-5C ships an explicit predicate so the verify pipeline can:
+//! This module provides an explicit predicate so the verify pipeline can:
 //!
 //! 1. Account for them as a known sub-class rather than "decode failed";
 //! 2. Skip them in line-item / header scans, preventing spurious anchor
@@ -42,7 +42,7 @@ fn shannon_entropy(bytes: &[u8]) -> f64 {
 }
 
 /// Threshold (bits/byte) above which the page body is treated as
-/// uniformly-random. Empirically every page in the four-file Phase 5 corpus
+/// uniformly-random. Empirically every page in the four-file test corpus
 /// that survives all four bv-recovery tiers scores in `[7.5, 8.0)`; pages
 /// that *do* decode have body entropy well below 7.5 once the AP cipher is
 /// removed.
