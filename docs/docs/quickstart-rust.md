@@ -5,24 +5,56 @@ sidebar_label: Rust quickstart
 
 # Rust quickstart
 
-```rust
-use openqbw::Company;
+```toml
+[dependencies]
+openqbw = "0.2"
+```
+
+```rust,no_run
+use openqbw::{Decimal, ReadOptions, Reader};
 
 fn main() -> Result<(), openqbw::Error> {
-    let company = Company::open("Company.QBW")?;
+    let reader = Reader::open("Company.QBW", &ReadOptions::default())?;
 
-    for table in company.tables()? {
-        println!("{:>4} rows  {}", table.row_count(), table.name());
+    for table in &reader.catalog().items {
+        println!("{:>6}  {}", table.table_id, table.name);
     }
 
-    for inv in company.invoices()? {
-        println!("{}  {}  ${}", inv.txn_date, inv.customer, inv.total);
+    let lines = reader.line_items()?;
+    for w in &lines.warnings {
+        eprintln!("warning: {w}");
     }
+
+    // `value` is an exact `Decimal`; `None` means it was not decoded, not zero.
+    let decoded = Decimal::checked_sum(lines.items.iter().filter_map(|li| li.value));
+    let undecoded = lines.items.iter().filter(|li| li.value.is_none()).count();
+    println!("sum of decoded values: {decoded:?}; {undecoded} lines not decoded");
 
     Ok(())
 }
 ```
 
-`Company::open` peels the additive-progression obfuscation layer
-(via `opensqlany::ApModel`), then walks the underlying SA17 page
-store, then layers the QuickBooks schema on top.
+`Reader::open` checks the file's magic, version and page checksums, decodes
+the pages (opensqlany removes the additive-progression obfuscation), and reads
+the `SYSTABLE` catalog. `line_items()`, `transactions()`, `indexes()`,
+`columns()` and `schema(table)` read from it.
+
+Reads are strict: a record the decoder cannot read with confidence is an
+error. To skip such records and list them in `rejected`:
+
+```rust,no_run
+use openqbw::{ReadOptions, Reader};
+
+fn main() -> Result<(), openqbw::Error> {
+    let reader = Reader::open("Company.QBW", &ReadOptions::lenient())?;
+    let lines = reader.line_items()?;
+    for e in &lines.rejected {
+        eprintln!("skipped: {e}");
+    }
+    Ok(())
+}
+```
+
+`value` is the line's numeric value field. That it is the line's amount is
+not established, and `source_table` is a position-based, unverified
+attribution. See [docs.rs/openqbw](https://docs.rs/openqbw) for the full API.

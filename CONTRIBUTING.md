@@ -58,10 +58,10 @@ will be acted on.
 
 ## Reverse-engineering notes
 
-If you discover new format details, append a numbered entry to
-`re/NOTES.md` (rather than rewriting prior notes). Keep evidence, sample
-byte ranges, and the file used. Treat the corpus as confidential -- never
-commit raw QBW files or extracted PII.
+If you discover new format details, record them in `SPECIFICATION.md` in
+the section they belong to, with the evidence: sample byte ranges, the file
+used, and counts. Treat the corpus as confidential -- never commit raw QBW
+files or extracted PII.
 
 ## Security
 

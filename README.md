@@ -22,25 +22,31 @@ data a business has already paid for stays accessible.
 
 OpenQBW is in active development. The current code can:
 
-- Open a `.qbw` file and decode all pages (SA17 page-store + Intuit's
-  additive-progression obfuscation).
+- Open a `.qbw` file, checking its magic, version and page checksums, and
+  read its pages (SA17 page store plus Intuit's additive-progression
+  obfuscation). Pages whose keystream cannot be confirmed are read with the
+  best candidate key and their records are flagged.
 - Enumerate user tables via the SA17 `SYSTABLE` catalog.
-- Parse `SYSCOLUMN`, `SYSINDEX`, `SYSOBJECT` system catalogs.
-- Extract invoice **line items** and **transaction headers** at row
-  granularity.
-- Attribute pages to tables using a width-band + content-signature
-  validator (Phase 6, WP-6Z).
-- Export the parsed catalog and lineitems to a SQLite database.
+- Parse the `SYSCOLUMN`, `SYSINDEX` and `SYSOBJECT` system catalogs.
+- Extract **line items** and **transaction headers** at row granularity.
+  Line items come from many tables (130 on the Rock Castle sample), not only
+  invoices.
+- Attribute pages to tables by position. The attribution is unverified; see
+  below.
+- Export the parsed catalog, transactions and line items to SQLite, CSV or
+  IIF.
 
-The line-item extractor reads line items from page bytes. Each carries its
-numeric value field, decoded by structure (the SQL Anywhere NUMERIC layout)
-as an exact decimal; a field that does not fit the layout keeps its raw
-bytes and is counted. That the value is the line's amount is not
-established, and `source_table` is a position-based attribution that is
-unverified.
+Each line item carries its numeric value field, decoded by structure (the
+SQL Anywhere NUMERIC layout) as an exact decimal. A field that does not fit
+the layout, or sits on a 512-byte sector boundary, keeps its raw bytes and is
+counted. That the value is the line's amount is not established. `source_table`
+is a position-based attribution that is unverified: a content-based check
+agrees with it on 0.3% of pages on the Rock Castle sample. A line item whose
+anchor straddles a sector boundary may not be read (about 4.5% of line items
+on that sample).
 
-A full write-up of the format work lives in [SPECIFICATION.md](SPECIFICATION.md)
-and the empirical notebook in [re/NOTES.md](re/NOTES.md).
+The format write-up is [SPECIFICATION.md](SPECIFICATION.md), including the
+line-item value layout in section 5.2 and the open questions in section 8.
 
 ## Non-goals
 
@@ -66,9 +72,28 @@ and the empirical notebook in [re/NOTES.md](re/NOTES.md).
 
 ## Install
 
-OpenQBW reads the page store through the
-[OpenSQLAnywhere](https://github.com/Sigilweaver/OpenSQLAnywhere) crate,
-which Cargo fetches. Build from a clone:
+Command-line tool:
+
+```console
+$ cargo install openqbw-cli
+$ openqbw --help
+```
+
+Python package (Python 3.10 or later; wheels for Linux, macOS and Windows):
+
+```console
+$ pip install openqbw
+```
+
+Rust library:
+
+```toml
+[dependencies]
+openqbw = "0.2"
+```
+
+Or build from a clone; `Cargo.lock` is committed, so `--locked` builds the CLI
+and the Python wheel from the dependency versions CI tested:
 
 ```console
 $ git clone https://github.com/Sigilweaver/OpenQBW.git
@@ -77,9 +102,6 @@ $ cargo build --release --locked
 $ ./target/release/openqbw --help
 ```
 
-`Cargo.lock` is committed, so `--locked` builds the CLI and the Python
-wheel from the dependency versions CI tested.
-
 Supported toolchains: Rust 1.95 or later (the `rust-version` in
 `Cargo.toml`, checked in CI) and Python 3.10 or later (abi3 wheels built
 against the 3.10 stable ABI). A release that raises either floor says so in
@@ -87,19 +109,15 @@ the CHANGELOG.
 
 ### Python bindings
 
-A PyO3-based extension lives in `crates/openqbw-py` and ships as a
-package named `openqbw`. To build and install into the active Python
-environment:
+```python
+import openqbw
 
-```console
-$ pip install maturin
-$ cd crates/openqbw-py
-$ maturin develop --release
-$ python -c "import openqbw; r = openqbw.open('mybooks.qbw'); print(r.page_count, 'pages')"
+r = openqbw.open("mybooks.qbw")
+print(r.page_count, "pages")
 ```
 
 See [crates/openqbw-py/README.md](crates/openqbw-py/README.md) for the
-full Python API.
+full Python API and for building the extension from source.
 
 ## CLI quickstart
 
@@ -111,11 +129,13 @@ $ openqbw catalog mybooks.qbw
 $ openqbw schema mybooks.qbw abmc_invoice_header
 
 # Export transactions and line items to SQLite for inspection in any
-# SQL tool (DB Browser, Datasette, pandas, ...)
+# SQL tool (DB Browser, Datasette, pandas, ...). The output file is
+# replaced only when the export succeeds.
 $ openqbw export mybooks.qbw books.sqlite
 
 # CSV directory, or IIF with placeholder accounts
 $ openqbw migrate mybooks.qbw --format csv --out books/
+$ openqbw migrate mybooks.qbw --format iif --placeholder-accounts --out books.iif
 
 # Skip undecodable records instead of stopping; each is listed
 $ openqbw --lenient export mybooks.qbw books.sqlite
@@ -126,7 +146,7 @@ $ openqbw debug nulls mybooks.qbw
 $ openqbw debug validate-attribution mybooks.qbw
 ```
 
-See [docs/cli.md](docs/cli.md) for the full subcommand reference.
+See [docs/docs/cli.md](docs/docs/cli.md) for the full subcommand reference.
 
 Exit status: 0 on success, 1 on an error (including a file that is not a
 supported company file, or an undecodable record without `--lenient`), 2
@@ -149,7 +169,7 @@ the names are the warning codes (`records_outside_live_rows`,
 `line_items_not_read`, `unattributed_records`, `header_rows_without_id`,
 `invalid_root_pages`, `keystream_unverified_pages`,
 `low_confidence_sector_pages`, `unconfirmed_directory_pages`, `opaque_pages`,
-`attribution_gap`) plus `headers.duplicate_header_ids` and
+`undecoded_values`, `attribution_gap`) plus `headers.duplicate_header_ids` and
 `headers.duplicate_header_ids_conflicting_types`. Each scan's usual counts
 are written even when zero. The totals a count is out of (`..._decoded`,
 `..._extent`, `..._total`) and the `undecoded_values_*` breakdown appear
@@ -157,7 +177,7 @@ only when the count is nonzero. IIF files
 have no place for metadata; `migrate --format iif` prints
 `duplicate_headers` and the warnings on stderr only.
 
-The layout version is 2. Adding a table, a column, a CSV file or a manifest
+The layout version is 1. Adding a table, a column, a CSV file or a manifest
 key leaves it unchanged; renaming or removing one, or changing what a value
 means, increments it. Readers should ignore tables, columns and keys they do
 not know. Codes stored in the exports (`kind` in `scan_rejections` and
@@ -166,8 +186,10 @@ snake_case strings; the `message` text is for people and may change.
 NULL (an empty CSV field) means a value was not decoded, never zero.
 
 Line items carry `value` as an exact decimal string (SQLite `TEXT`, never a
-float), `value_undecoded` (the reason, when it is not decoded) and
-`value_raw_hex`. `transactions.value_sum` is the exact sum of the decoded
+float), `value_undecoded` (the reason, when it is not decoded: `zero_length`,
+`digit_over_99`, `exponent_out_of_range` or `sector_boundary`) and
+`value_raw_hex`. CSV and SQLite carry the raw date value (`txn_date_raw`)
+and how it was found (`date_source`), never a converted calendar date. `transactions.value_sum` is the exact sum of the decoded
 line values of one parent, not an invoice total. `source_table` is
 position-based and unverified; exports record that in
 `meta.source_table_attribution` and in `manifest.json`.
@@ -196,11 +218,11 @@ error. `ReadOptions::lenient()` skips such records and lists them in
 ## Documentation
 
 - [SPECIFICATION.md](SPECIFICATION.md) - format specification (work in progress)
-- [docs/use-cases.md](docs/use-cases.md) - extended use-case walkthroughs
-- [docs/migration-guide.md](docs/migration-guide.md) - leaving the QuickBooks ecosystem
-- [docs/format-overview.md](docs/format-overview.md) - high-level pointer into the spec
-- [docs/cli.md](docs/cli.md) - full CLI reference
-- [re/NOTES.md](re/NOTES.md) - the reverse-engineering lab notebook (C.1...C.57)
+- [docs/docs/use-cases.md](docs/docs/use-cases.md) - extended use-case walkthroughs
+- [docs/docs/migration-guide.md](docs/docs/migration-guide.md) - leaving the QuickBooks ecosystem
+- [docs/docs/format-overview.md](docs/docs/format-overview.md) - high-level pointer into the spec
+- [docs/docs/cli.md](docs/docs/cli.md) - full CLI reference
+- [docs/docs/python-api.md](docs/docs/python-api.md) - Python API reference
 
 ## Legal and ethical
 

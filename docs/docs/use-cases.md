@@ -12,7 +12,7 @@ accounting product or just archive it.
 
 ```console
 # Get a SQL database you can query with any tool
-$ openqbw export mybooks.qbw --out books.sqlite
+$ openqbw export mybooks.qbw books.sqlite
 
 # Inspect from sqlite3 or DB Browser
 $ sqlite3 books.sqlite "SELECT COUNT(*) FROM transaction_line_items;"
@@ -38,7 +38,7 @@ financial data. You still get:
 - File-level metadata that can support timeline analysis
 
 For files without a QuickBooks-level password, you get the full
-parsed business data: invoices, transactions, customer/vendor lists.
+parsed transaction headers and line items.
 
 ## 3. Audit and discovery
 
@@ -50,12 +50,12 @@ schema. OpenQBW can tell you:
 $ openqbw catalog mybooks.qbw
 
 # Index inventory (FK indexes only)
-$ openqbw indexes mybooks.qbw --fk-only
+$ openqbw debug indexes mybooks.qbw --fk-only
 
 # Per-table null-flag histogram (suggests defaults / deletions)
-$ openqbw nulls mybooks.qbw
+$ openqbw debug nulls mybooks.qbw
 
-# Cross-validate that the on-disk indexes match attribution
+# Export to a temporary file and report coverage and undecoded values
 $ openqbw verify mybooks.qbw
 ```
 
@@ -67,7 +67,7 @@ gives you a deterministic, open-format snapshot you can keep
 alongside the original file:
 
 ```console
-$ openqbw export mybooks.qbw --out archive/books-2024.sqlite
+$ openqbw export mybooks.qbw archive/books-2024.sqlite
 $ sha256sum archive/books-2024.sqlite > archive/books-2024.sqlite.sha256
 ```
 

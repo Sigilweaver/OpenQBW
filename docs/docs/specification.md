@@ -1,9 +1,9 @@
 # QBW File Format Specification (Draft)
 
-**Status:** incomplete, in-progress reverse engineering. Every numeric
-claim in this document is backed by a reproducible observation in
-[`re/NOTES.md`](https://github.com/Sigilweaver/OpenQBW/blob/main/re/NOTES.md) against the corpus manifest
-`re/corpus_index.json` (112 `.QBW` files, ~1.87 GiB).
+**Status:** incomplete, in-progress reverse engineering. Numeric claims
+were measured on a private corpus of 112 `.QBW` files (~1.87 GiB), which
+is not redistributed (see the README's legal section), and on the
+public Rock Castle sample where a section says so.
 
 ## 0. Conventions
 
@@ -67,7 +67,7 @@ page[0x0FFC..0x1000] == u32_LE( zlib.crc32( page[0x0000..0x0FFC] ) )
 100 % match, 0 failures. This holds for encrypted pages as well, which
 means the CRC is computed over the on-disk (ciphertext) bytes: the
 encryption layer runs *before* CRC stamping, so a parser can validate
-page integrity **without** knowing the encryption key. See [C.5](https://github.com/Sigilweaver/OpenQBW/blob/main/re/NOTES.md#c5--universal-page-footer-is-crc32-of-the-page-body--2026-04-19).
+page integrity **without** knowing the encryption key.
 
 ### 2.2a Universal 12-byte page trailer (C.12)
 
@@ -102,9 +102,8 @@ Corpus-wide frequency of the page-type byte at 0xFF2
 | 0x47 | `'G'` |      96 |  0.02 % | unknown |
 
 The page trailer is the **only** fully-structural region observed on
-pages 1..N so far. Combined with C.5 it gives a parser the complete
-page integrity+typing protocol without touching page contents. See
-[C.12](https://github.com/Sigilweaver/OpenQBW/blob/main/re/NOTES.md#c12--universal-12-byte-page-trailer-at-0xff00xffb--2026-04-19).
+pages 1..N so far. Combined with the page CRC it gives a parser the complete
+page integrity+typing protocol without touching page contents.
 
 ### 2.2b Pages decompose into 8 × 512-byte sectors; many sectors are pure fill (C.13)
 
@@ -142,7 +141,6 @@ Consequences for a parser:
     open; a likely candidate is a rolling phase index into the
     38-byte SAP copyright string (§3.4).
 
-Reproduce with `re/sector_analysis.py`. See [C.13](https://github.com/Sigilweaver/OpenQBW/blob/main/re/NOTES.md#c13--pages-decompose-into-8--512-b-sectors-many-are-pure-ap-fill--2026-04-19).
 
 ### 2.2c The AP fill is an additive keystream (C.14)
 
@@ -181,8 +179,6 @@ and a row-slot directory counting down from `0x0fca` to `0x01c2` -
 the canonical SA **page → slot → record** layout. That is direct
 evidence the payload is a genuine SAP SQL Anywhere 17.0.4 database.
 
-Reproduce with `re/fill_overlay.py`. See
-[C.14](https://github.com/Sigilweaver/OpenQBW/blob/main/re/NOTES.md#c14--the-ap-fill-is-an-additive-keystream-plaintext-recovered--2026-04-19).
 
 ### 2.3 Underlying engine: SAP SQL Anywhere 17.0.4 build 2182
 
@@ -196,7 +192,7 @@ sector-fingerprint string
 
 ...which pins the embedded engine to **SAP SQL Anywhere 17.0.4 build
 2182** (2015 release). The substring `"17.0.4.2182 SAP SE, Copyright
-(c)2015"` is present in page 0 of 112/112 files. See [C.6](https://github.com/Sigilweaver/OpenQBW/blob/main/re/NOTES.md#c6--sap-sql-anywhere-1704-build-2182-fingerprint--2026-04-19).
+(c)2015"` is present in page 0 of 112/112 files.
 
 ## 3. Page-0 superblock
 
@@ -232,7 +228,7 @@ identical across all 112 files, `f` = 2-4 distinct values (flag),
 | 0x24   | 4    | u32_LE   | `unknown_24`          | Varies per file. |
 | 0x28   | 1    | u8       | `unknown_28`          | Varies per file. |
 | 0x29   | 1    | u8 flag  | `flags_29`            | `0x00` (72/112) or `0x01` (40/112). |
-| 0x2A   | 4    | u32_LE   | `created_stamp`       | Database creation time: minutes since 1600-02-29 (see 3.1a). |
+| 0x2A   | 4    | u32_LE   | `created_stamp`       | Database creation time: minutes since 1600-02-29 (section 3.1a). |
 | 0x2E   | 2    | const    | `const_2E`            | Always `04 00`. |
 | 0x30   | 16   | zeros    | `reserved_30`         | Always 16 zero bytes. |
 
@@ -325,7 +321,7 @@ entropy near 8 bit/byte) in isolation.
 ### 4.1 The obfuscation is *not* per-file keyed
 
 Comparing pages of two unrelated `.QBW` files from the same
-QuickBooks distribution (see `re/xor_test.py`):
+QuickBooks distribution:
 
 | Metric                                              | Observed | Random-noise expectation |
 | --------------------------------------------------- | -------- | ------------------------ |
@@ -337,8 +333,7 @@ QuickBooks distribution (see `re/xor_test.py`):
 **deterministic in `(page_number, byte_offset)` alone**. The per-file
 `file_id_lo` at 0x08 is *not* an encryption key; two files with
 different `file_id_lo` values still produce the same ciphertext for
-the same (page, offset) wherever their plaintexts coincide. See
-[C.8](https://github.com/Sigilweaver/OpenQBW/blob/main/re/NOTES.md#c8--encryption-is-file-independent--2026-04-19).
+the same (page, offset) wherever their plaintexts coincide.
 
 ### 4.2 Arithmetic-progression residue in "empty" pages
 
@@ -392,7 +387,7 @@ tag immediately before the `table_name` column:
 ```
 
 The row stamp is a `u32_LE` count of minutes since 1600-02-29 (same
-unit as 3.1a), reported in issue #45. In the examples, `b1 0d 19 0d` is
+unit as section 3.1a), reported in issue #45. In the examples, `b1 0d 19 0d` is
 2017-12-20 04:33 and `59 2a 16 0d` is 2017-08-10 18:01. It varies by
 file, and on QuickBooks 2012 files by row. The reader accepts any 4
 bytes there and reports a value outside 1990..2100 as absent.
@@ -494,8 +489,13 @@ and `03 BF 32 31 03` is -349.50. The common control bytes are `3F`, `40`,
 The reader decodes a field when `1 <= k <= 10`, every digit is at most 99,
 the field lies inside the page and `e` is in -1..=2. Any other field keeps
 its raw bytes and is counted by reason: `k = 0` (`00 81` is the usual
-shape), a digit above 99, or an exponent outside -1..=2. A length byte above
-10, or a field cut off by the page end, is a record error.
+shape, reason `zero_length`), a digit above 99 (`digit_over_99`), an
+exponent outside -1..=2 (`exponent_out_of_range`), or a field whose length
+byte sits on, or whose bytes cross, a 512-byte sector boundary
+(`sector_boundary`). Sectors are obfuscated separately (section 2.2b), so
+bytes on either side of a boundary cannot be trusted to belong to one
+value; the raw bytes are kept. A length byte above 10 elsewhere, or a field
+cut off by the page end, is a record error.
 
 Evidence for this layout is in the file itself. On the Rock Castle sample, 1586
 of 4260 parent groups of three or more lines sum to exactly zero under this
@@ -508,6 +508,12 @@ sample every line of a group that sums to zero has `e` in -1..=2. Outside it
 the sample has two decoded-looking fields, `01 C5 17` (-23 x 100^5) and one
 with `e` = -3, neither plausible as a stored value, so wider exponents are
 not read.
+
+Known limit: an anchor that itself straddles a 512-byte sector boundary may
+not be found, so its line item is not read. On the Rock Castle sample, anchors
+starting 488 to 507 bytes into a sector are found about 16 times each,
+against about 110 for every other offset, which puts the loss near 4.5% of
+line items. Reading across the boundary is not implemented.
 
 What is not established:
 
@@ -638,8 +644,6 @@ Consequences for the parser:
   cluster and largely to the others.
 - This reinforces C.8: the bytes shared across files cannot be
   encrypted with a per-file key.
-
-Reproduce with `re/template_clusters.py`.
 
 ## 8b. Dead ends and methodology notes (independent Enterprise 24.0 decoder)
 

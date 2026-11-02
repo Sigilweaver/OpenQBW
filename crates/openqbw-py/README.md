@@ -7,7 +7,16 @@ and forensic workflows.
 > Prototype quality. See the parent repository's `README.md` and
 > `SPECIFICATION.md` for what is and is not yet supported.
 
-## Install (from source)
+## Install
+
+```bash
+pip install openqbw
+```
+
+Python 3.10 or later. Wheels (abi3) are published for Linux, macOS and
+Windows.
+
+To build from a clone instead:
 
 ```bash
 pip install maturin
@@ -34,12 +43,18 @@ for li in lines[:3]:
     # value is a decimal.Decimal, or None when the field was not decoded; it
     # is never 0 for "unknown". It is not established as the line amount, and
     # source_table is a position-based, unverified attribution.
-    print(li.invoice_id, li.value, li.source_table, li.flags)
+    print(li.qb_id_parent, li.value, li.value_undecoded, li.source_table, li.flags)
 for w in lines.warnings:
     print("warning:", w.kind, w.message)
 
 for h in r.transactions()[:3]:
     print(h.qb_id, h.txn_type)
+
+# Skip records that cannot be decoded instead of raising; each is listed.
+lenient = openqbw.open("/path/to/file.qbw", lenient=True)
+report = lenient.line_items()
+for rej in report.rejected:
+    print(rej.kind, rej.page_number, rej.page_offset, rej.message)
 ```
 
 ## API
@@ -51,7 +66,7 @@ raises. With `lenient=True` such records are skipped, listed in each
 result's `rejected`, and an `openqbw.OpenQBWWarning` is issued.
 
 `Reader` attributes: `path`, `lenient`, `page_count`, `file_size`,
-`attribution_gap`.
+`created_unix_seconds`, `attribution_gap`.
 
 `Reader` methods, each returning a `ScanReport`:
 

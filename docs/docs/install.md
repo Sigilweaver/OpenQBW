@@ -18,26 +18,26 @@ openqbw --help
 pip install openqbw
 ```
 
-Wheels are published for Python 3.9+ on Linux, macOS, and Windows.
+Wheels are published for Python 3.10+ on Linux, macOS, and Windows.
 
 ## Rust library
 
 ```toml
 [dependencies]
-openqbw = "0.1"
+openqbw = "0.2"
 ```
 
-MSRV: Rust 1.87.
+MSRV: Rust 1.95.
 
 ## From source
 
 ```sh
 git clone https://github.com/Sigilweaver/OpenQBW
 cd OpenQBW
-cargo build --release
+cargo build --release --locked
 ./target/release/openqbw --help
 ```
 
-Note: from-source builds also need OpenSQLAnywhere checked out
-as a sibling directory (`../OpenSQLAnywhere`), because Cargo
-resolves it as a path dependency in development.
+The `opensqlany` dependency comes from crates.io; no sibling checkout is
+needed. To build the Python extension from source, see the
+[Python API reference](./python-api).

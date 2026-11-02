@@ -30,8 +30,8 @@ or IIF.
 - Open a `.QBW` file with no QuickBooks installed.
 - Enumerate user tables via the `SYSTABLE` catalog.
 - Parse `SYSCOLUMN`, `SYSINDEX`, `SYSOBJECT`.
-- Extract invoice line items, transaction headers, and width-band
-  attribution metadata.
+- Extract line items and transaction headers, with a position-based
+  attribution of each line item to a source table.
 - Export to CSV, SQLite, or Intuit's own IIF interchange format.
 
 Line items carry their numeric value field as an exact decimal. That

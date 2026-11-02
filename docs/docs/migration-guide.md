@@ -28,9 +28,8 @@ This prints every user table. Look for the ones you care about:
 
 ## Step 3: Pick an output format
 
-OpenQBW today ships these export targets via the `openqbw migrate`
-subcommand (when available -- see `openqbw --help` for the version
-you have installed):
+OpenQBW ships these export targets (`openqbw export` and
+`openqbw migrate`; see `openqbw --help`):
 
 | Format | Use when                                            |
 |--------|------------------------------------------------------|
@@ -42,13 +41,14 @@ you have installed):
 
 ```console
 # SQLite (one file, all tables)
-$ openqbw export mybooks.qbw --out books.sqlite
+$ openqbw export mybooks.qbw books.sqlite
 
-# CSV (one file per table; see migrate subcommand)
+# CSV (a directory of files)
 $ openqbw migrate mybooks.qbw --format csv --out csv-out/
 
-# IIF (Intuit Interchange Format, importable by many tools)
-$ openqbw migrate mybooks.qbw --format iif --out books.iif
+# IIF (Intuit Interchange Format). Account names are not decoded, so the
+# file uses placeholder accounts
+$ openqbw migrate mybooks.qbw --format iif --placeholder-accounts --out books.iif
 ```
 
 ## Step 5: Verify
@@ -65,13 +65,14 @@ before relying on it.
 
 ## Mapping notes
 
-- **Dates** are stored as SA-days (days since 1900-01-01 minus an
-  offset) in the on-disk format. OpenQBW emits them as ISO-8601
-  date strings.
+- **Dates** are stored as SA-day numbers in the on-disk format. Exports
+  write the raw number as `txn_date_raw` with a `date_source` column
+  recording how it was found (a record with no date, or two candidate
+  dates, has none). They are not converted to calendar dates, because the
+  conversion offset is fitted to one sample and not checked against a date
+  known from another source.
 - **Values** are exact decimals (`+/- coef * 100^e`). Exports write
   them as decimal text, with the raw bytes in hex beside them.
-- **Foreign keys** are surfaced from the SA17 SYSINDEX catalog
-  where present, and via a name-heuristic fallback otherwise.
 - **Deleted records** are not recoverable in general. OpenQBW
   parses pages that the page-store currently considers live.
 
