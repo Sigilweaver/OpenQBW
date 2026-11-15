@@ -125,6 +125,10 @@ full Python API and for building the extension from source.
 
 ## CLI quickstart
 
+The same commands accept a `.qbb` backup with a zlib-compressed company
+stream, for example `openqbw --lenient catalog mybooks.qbb`. This reads the
+embedded company database only. Other backup members are ignored.
+
 ```console
 # Strict is the default and stops at the first record it cannot decode.
 # Real files often need --lenient, which skips those records; each skipped

@@ -1,0 +1,134 @@
+//! Read the company-file stream in a zlib-compressed QBB backup.
+
+use std::io::{self, BufRead, BufReader, Read, Seek};
+
+use flate2::{Decompress, FlushDecompress, Status};
+
+const COMPRESSION_HEADER: &str = "/Compression_Header";
+const COMPANY_FILE: &str = "/file_COMPANY_FILE";
+const ZLIB_HEADER: &[u8] = b"Compression_Format=Deflate_ZLIB;";
+const MAX_COMPANY_BYTES: usize = 1024 * 1024 * 1024;
+
+pub(crate) fn company_bytes(input: impl Read + Seek) -> io::Result<Vec<u8>> {
+    let mut backup = cfb::CompoundFile::open(input)?;
+    let mut header = [0; ZLIB_HEADER.len()];
+    backup
+        .open_stream(COMPRESSION_HEADER)?
+        .read_exact(&mut header)?;
+    if header.as_slice() != ZLIB_HEADER {
+        return Err(invalid("unsupported QBB compression"));
+    }
+    let stream = backup.open_stream(COMPANY_FILE)?;
+    inflate(&mut BufReader::new(stream), MAX_COMPANY_BYTES)
+}
+
+fn invalid(message: &str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, message)
+}
+
+fn inflate(input: &mut impl BufRead, limit: usize) -> io::Result<Vec<u8>> {
+    let mut inflater = Decompress::new(true);
+    let mut bytes = Vec::new();
+    let mut chunk = [0; 16 * 1024];
+
+    loop {
+        let before_in = inflater.total_in();
+        let before_out = inflater.total_out();
+        let status = inflater
+            .decompress(input.fill_buf()?, &mut chunk, FlushDecompress::None)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        // The increments are bounded by the input and output slices.
+        let consumed = (inflater.total_in() - before_in) as usize;
+        let produced = (inflater.total_out() - before_out) as usize;
+        input.consume(consumed);
+
+        if produced > limit - bytes.len() {
+            return Err(invalid("QBB company file exceeds the decompression limit"));
+        }
+        bytes.extend_from_slice(&chunk[..produced]);
+
+        if status == Status::StreamEnd {
+            if !input.fill_buf()?.is_empty() {
+                return Err(invalid("trailing data in QBB company-file stream"));
+            }
+            return Ok(bytes);
+        }
+        if consumed == 0 && produced == 0 {
+            return Err(invalid("incomplete QBB company-file stream"));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Cursor, Write};
+
+    use flate2::{Compression, write::ZlibEncoder};
+
+    fn compressed(bytes: &[u8]) -> Vec<u8> {
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(bytes).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    fn backup(header: &[u8], stream: &[u8]) -> Cursor<Vec<u8>> {
+        let mut backup = cfb::CompoundFile::create(Cursor::new(Vec::new())).unwrap();
+        backup
+            .create_stream(COMPRESSION_HEADER)
+            .unwrap()
+            .write_all(header)
+            .unwrap();
+        backup
+            .create_stream(COMPANY_FILE)
+            .unwrap()
+            .write_all(stream)
+            .unwrap();
+        backup.flush().unwrap();
+        backup.into_inner()
+    }
+
+    #[test]
+    fn reads_company_stream_from_synthetic_backup() {
+        let bytes = include_bytes!("../tests/data/synthetic.qbw");
+        let input = backup(
+            b"Compression_Format=Deflate_ZLIB;Version=1.2.3;",
+            &compressed(bytes),
+        );
+        let inflated = company_bytes(input).unwrap();
+        assert_eq!(inflated, bytes.as_slice());
+        let reader = crate::Reader::from_bytes(inflated, &crate::ReadOptions::strict()).unwrap();
+        assert_eq!(reader.page_count(), 8);
+        assert_eq!(reader.catalog().items.len(), 3);
+    }
+
+    #[test]
+    fn rejects_unsupported_compression() {
+        let input = backup(b"Compression_Format=invalid_compression;", &[0; 4]);
+        assert_eq!(
+            company_bytes(input).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+    }
+
+    #[test]
+    fn rejects_truncated_corrupt_and_trailing_data() {
+        let encoded = compressed(b"contents");
+        assert!(inflate(&mut &encoded[..encoded.len() - 1], 100).is_err());
+
+        let mut bad_checksum = encoded.clone();
+        *bad_checksum.last_mut().unwrap() ^= 1;
+        assert!(inflate(&mut bad_checksum.as_slice(), 100).is_err());
+
+        let mut trailing = encoded;
+        trailing.push(0);
+        assert!(inflate(&mut trailing.as_slice(), 100).is_err());
+    }
+
+    #[test]
+    fn enforces_decompression_limit() {
+        let encoded = compressed(&[0; 500]);
+        assert!(inflate(&mut encoded.as_slice(), 499).is_err());
+        assert_eq!(inflate(&mut encoded.as_slice(), 500).unwrap().len(), 500);
+    }
+}

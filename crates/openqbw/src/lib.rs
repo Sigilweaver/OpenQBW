@@ -52,6 +52,7 @@ mod opaque;
 mod open;
 mod owner_bridge;
 mod page_attribution;
+mod qbb;
 mod reader;
 mod scan;
 mod syscolumn;

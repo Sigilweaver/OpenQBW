@@ -13,6 +13,10 @@ $ openqbw --help
 | `verify`              | Export, then report coverage and undecoded values.             |
 | `debug`               | Reverse-engineering diagnostics (`fkgraph`, `nulls`, `validate-attribution`, `indexes`, `forensics`). |
 
+Company-file arguments also accept supported `.qbb` backups. The parser
+reads the zlib-compressed company stream (up to 1 GiB inflated) and ignores
+the other members of the backup. All normal QBW data checks still apply.
+
 ## Global option
 
 `--lenient` is accepted by every subcommand. By default a read is strict: a

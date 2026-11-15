@@ -1,5 +1,6 @@
 //! The entry point: [`Reader`] opens a file and reads its records.
 
+use std::fs::File;
 use std::path::Path;
 
 use opensqlany::{ApModel, PageStore, PageType};
@@ -32,7 +33,8 @@ pub struct Reader {
 }
 
 impl Reader {
-    /// Open the file at `path`.
+    /// Open the file at `path`. For a `.qbb` extension, read the zlib-compressed
+    /// company-file stream (up to 1 GiB inflated) and apply the same QBW checks.
     ///
     /// # Errors
     ///
@@ -43,7 +45,14 @@ impl Reader {
     /// damaged; `Store` when the keystream cannot be calibrated; and, in
     /// strict mode, the first catalog page that fails to decode.
     pub fn open(path: impl AsRef<Path>, options: &ReadOptions) -> Result<Self> {
-        Self::from_store(open_store(path.as_ref())?, options)
+        let path = path.as_ref();
+        if path
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("qbb"))
+        {
+            return Self::from_bytes(crate::qbb::company_bytes(File::open(path)?)?, options);
+        }
+        Self::from_store(open_store(path)?, options)
     }
 
     /// As [`Reader::open`], over the bytes of a file already in memory.

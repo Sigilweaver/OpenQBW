@@ -6,6 +6,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Read the company database directly from supported zlib-compressed `.qbb` backups.
+
 ## [0.2.0] - 2026-11-01
 
 Built on opensqlany 0.3.0, fetched from crates.io. `Cargo.lock` is committed.
