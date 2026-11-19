@@ -67,6 +67,16 @@ pub enum Error {
         /// CRC computed over the page body.
         computed: u32,
     },
+    /// A QBB backup could not be unpacked into its company file. The
+    /// backup is damaged, uses an unsupported compression, or holds a company
+    /// file larger than the allowed size. Reading the file itself failed with
+    /// [`Error::Io`] instead.
+    #[error("cannot read QBB backup: {reason}")]
+    #[non_exhaustive]
+    Backup {
+        /// What is wrong with the backup.
+        reason: BackupFailure,
+    },
     /// Any other page-store failure.
     #[error("page store: {source}")]
     #[non_exhaustive]
@@ -115,6 +125,52 @@ pub enum Error {
     },
 }
 
+/// Why a QBB backup could not be unpacked. Carried by [`Error::Backup`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum BackupFailure {
+    /// The file starts like a compound file but its structure is damaged.
+    BadContainer(String),
+    /// A stream the reader needs is not in the backup.
+    MissingStream(&'static str),
+    /// `Compression_Header` is shorter than the `Compression_Format=...;`
+    /// prefix the reader checks.
+    ShortHeader,
+    /// `Compression_Header` names a compression other than `Deflate_ZLIB`.
+    UnsupportedCompression,
+    /// The company-file stream is not valid zlib data (bad header, bad
+    /// checksum or corrupt deflate data).
+    BadCompressedData(String),
+    /// The company-file stream ends before the zlib stream does.
+    Truncated,
+    /// Bytes follow the end of the zlib stream.
+    TrailingData,
+    /// The company file inflates to more than the allowed size.
+    TooLarge {
+        /// The limit in bytes.
+        limit: usize,
+    },
+}
+
+impl std::fmt::Display for BackupFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BadContainer(why) => write!(f, "damaged compound-file container: {why}"),
+            Self::MissingStream(name) => write!(f, "stream {name} is missing"),
+            Self::ShortHeader => f.write_str("Compression_Header is too short"),
+            Self::UnsupportedCompression => {
+                f.write_str("unsupported compression; only Deflate_ZLIB is read")
+            }
+            Self::BadCompressedData(why) => write!(f, "invalid zlib data: {why}"),
+            Self::Truncated => f.write_str("the company-file stream is cut short"),
+            Self::TrailingData => f.write_str("data follows the end of the company-file stream"),
+            Self::TooLarge { limit } => {
+                write!(f, "the company file inflates to more than {limit} bytes")
+            }
+        }
+    }
+}
+
 /// Machine-readable class of an [`Error`], stable across message changes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
@@ -131,6 +187,8 @@ pub enum ErrorKind {
     BadTrailer,
     /// [`Error::BadCrc`]
     BadCrc,
+    /// [`Error::Backup`]
+    Backup,
     /// [`Error::Store`]
     Store,
     /// [`Error::InvalidValueLength`]
@@ -151,6 +209,7 @@ impl ErrorKind {
             Self::UnsupportedFlags => "unsupported_flags",
             Self::BadTrailer => "bad_trailer",
             Self::BadCrc => "bad_crc",
+            Self::Backup => "backup",
             Self::Store => "store",
             Self::InvalidValueLength => "invalid_value_length",
             Self::TruncatedValue => "truncated_value",
@@ -169,6 +228,7 @@ impl Error {
             Self::UnsupportedFlags { .. } => ErrorKind::UnsupportedFlags,
             Self::BadTrailer { .. } => ErrorKind::BadTrailer,
             Self::BadCrc { .. } => ErrorKind::BadCrc,
+            Self::Backup { .. } => ErrorKind::Backup,
             Self::Store { .. } => ErrorKind::Store,
             Self::InvalidValueLength { .. } => ErrorKind::InvalidValueLength,
             Self::TruncatedValue { .. } => ErrorKind::TruncatedValue,

@@ -5,6 +5,8 @@ use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom};
 
 use flate2::{Decompress, FlushDecompress, Status};
 
+use crate::error::{BackupFailure, Error, Result};
+
 const COMPRESSION_HEADER: &str = "/Compression_Header";
 const COMPANY_FILE: &str = "/file_COMPANY_FILE";
 const ZLIB_HEADER: &[u8] = b"Compression_Format=Deflate_ZLIB;";
@@ -23,24 +25,49 @@ pub(crate) fn has_signature(file: &mut File) -> io::Result<bool> {
     Ok(prefix == CFB_SIGNATURE)
 }
 
-pub(crate) fn company_bytes(input: impl Read + Seek) -> io::Result<Vec<u8>> {
-    let mut backup = cfb::CompoundFile::open(input)?;
+pub(crate) fn company_bytes(input: impl Read + Seek) -> Result<Vec<u8>> {
+    let mut backup = cfb::CompoundFile::open(input).map_err(container_error)?;
     let mut header = [0; ZLIB_HEADER.len()];
     backup
-        .open_stream(COMPRESSION_HEADER)?
-        .read_exact(&mut header)?;
+        .open_stream(COMPRESSION_HEADER)
+        .map_err(|e| stream_error(e, COMPRESSION_HEADER))?
+        .read_exact(&mut header)
+        .map_err(|e| match e.kind() {
+            io::ErrorKind::UnexpectedEof => backup_error(BackupFailure::ShortHeader),
+            _ => Error::Io(e),
+        })?;
     if header.as_slice() != ZLIB_HEADER {
-        return Err(invalid("unsupported QBB compression"));
+        return Err(backup_error(BackupFailure::UnsupportedCompression));
     }
-    let stream = backup.open_stream(COMPANY_FILE)?;
+    let stream = backup
+        .open_stream(COMPANY_FILE)
+        .map_err(|e| stream_error(e, COMPANY_FILE))?;
     inflate(&mut BufReader::new(stream), MAX_COMPANY_BYTES)
 }
 
-fn invalid(message: &str) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, message)
+fn backup_error(reason: BackupFailure) -> Error {
+    Error::Backup { reason }
 }
 
-fn inflate(input: &mut impl BufRead, limit: usize) -> io::Result<Vec<u8>> {
+/// A failure to open the compound file: a damaged container, or a read error.
+fn container_error(e: io::Error) -> Error {
+    match e.kind() {
+        io::ErrorKind::InvalidData | io::ErrorKind::UnexpectedEof => {
+            backup_error(BackupFailure::BadContainer(e.to_string()))
+        }
+        _ => Error::Io(e),
+    }
+}
+
+/// A failure to open a named stream: absent from the backup, or a read error.
+fn stream_error(e: io::Error, name: &'static str) -> Error {
+    match e.kind() {
+        io::ErrorKind::NotFound => backup_error(BackupFailure::MissingStream(name)),
+        _ => container_error(e),
+    }
+}
+
+fn inflate(input: &mut impl BufRead, limit: usize) -> Result<Vec<u8>> {
     let mut inflater = Decompress::new(true);
     let mut bytes = Vec::new();
     let mut chunk = [0; 16 * 1024];
@@ -50,25 +77,25 @@ fn inflate(input: &mut impl BufRead, limit: usize) -> io::Result<Vec<u8>> {
         let before_out = inflater.total_out();
         let status = inflater
             .decompress(input.fill_buf()?, &mut chunk, FlushDecompress::None)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            .map_err(|e| backup_error(BackupFailure::BadCompressedData(e.to_string())))?;
         // The increments are bounded by the input and output slices.
         let consumed = (inflater.total_in() - before_in) as usize;
         let produced = (inflater.total_out() - before_out) as usize;
         input.consume(consumed);
 
         if produced > limit - bytes.len() {
-            return Err(invalid("QBB company file exceeds the decompression limit"));
+            return Err(backup_error(BackupFailure::TooLarge { limit }));
         }
         bytes.extend_from_slice(&chunk[..produced]);
 
         if status == Status::StreamEnd {
             if !input.fill_buf()?.is_empty() {
-                return Err(invalid("trailing data in QBB company-file stream"));
+                return Err(backup_error(BackupFailure::TrailingData));
             }
             return Ok(bytes);
         }
         if consumed == 0 && produced == 0 {
-            return Err(invalid("incomplete QBB company-file stream"));
+            return Err(backup_error(BackupFailure::Truncated));
         }
     }
 }
@@ -121,7 +148,7 @@ mod tests {
         let input = backup(b"Compression_Format=invalid_compression;", &[0; 4]);
         assert_eq!(
             company_bytes(input).unwrap_err().kind(),
-            io::ErrorKind::InvalidData
+            crate::ErrorKind::Backup
         );
     }
 

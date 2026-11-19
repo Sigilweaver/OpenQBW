@@ -40,7 +40,10 @@ impl Reader {
     ///
     /// # Errors
     ///
-    /// [`Error::Io`](crate::Error::Io) when the file cannot be read; a
+    /// [`Error::Io`](crate::Error::Io) when the file cannot be read;
+    /// [`Error::Backup`](crate::Error::Backup) when a QBB backup cannot be
+    /// unpacked (damaged container, missing stream, unsupported compression,
+    /// invalid zlib data, or a company file over the size limit); a
     /// format error ([`ErrorKind`](crate::ErrorKind) `BadMagic`,
     /// `UnsupportedVersion`, `UnsupportedFlags`, `BadCrc`, `BadTrailer`)
     /// when it is not a supported QuickBooks company file or a page is
