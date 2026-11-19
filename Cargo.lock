@@ -319,7 +319,9 @@ name = "openqbw-cli"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "cfb",
  "clap",
+ "flate2",
  "openqbw",
  "opensqlany",
  "rusqlite",

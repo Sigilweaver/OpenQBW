@@ -231,3 +231,33 @@ fn put_lineitem(p: &mut [u8], at: usize, parent: &str, item: &[u8; 16], amount: 
     p[at + 33..at + 37].copy_from_slice(&SA_DAY.to_le_bytes());
     p[at + 37..at + 41].copy_from_slice(&7u32.to_le_bytes());
 }
+
+/// A QBB backup in the layout `Reader::open` reads: a compound file with a
+/// `Compression_Header` stream (`header`) and a `file_COMPANY_FILE` stream
+/// holding `company` as zlib data. `None` leaves that stream out.
+pub fn synthetic_qbb(header: Option<&[u8]>, company: Option<&[u8]>) -> Vec<u8> {
+    use std::io::{Cursor, Write};
+
+    let mut backup = cfb::CompoundFile::create(Cursor::new(Vec::new())).unwrap();
+    if let Some(header) = header {
+        backup
+            .create_stream("/Compression_Header")
+            .unwrap()
+            .write_all(header)
+            .unwrap();
+    }
+    if let Some(company) = company {
+        let mut zlib = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        zlib.write_all(company).unwrap();
+        backup
+            .create_stream("/file_COMPANY_FILE")
+            .unwrap()
+            .write_all(&zlib.finish().unwrap())
+            .unwrap();
+    }
+    backup.flush().unwrap();
+    backup.into_inner().into_inner()
+}
+
+/// The `Compression_Header` content of a supported backup.
+pub const QBB_HEADER: &[u8] = b"Compression_Format=Deflate_ZLIB;Version=1.2.3;";
