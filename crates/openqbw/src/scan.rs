@@ -69,14 +69,37 @@ impl BitOrAssign for Leniency {
 /// strict. New fields are added in minor releases; build with
 /// [`ReadOptions::strict`], [`ReadOptions::lenient`] or
 /// [`ReadOptions::with_leniency`].
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ReadOptions {
     /// Which checks may be relaxed.
     pub leniency: Leniency,
+    /// The most bytes a QBB backup's company file may inflate to. A larger
+    /// one fails with [`Error::Backup`](crate::Error::Backup) before it is
+    /// held in memory. Applies to QBB backups only; the default is
+    /// [`ReadOptions::DEFAULT_MAX_BACKUP_BYTES`].
+    pub max_backup_bytes: usize,
+}
+
+impl Default for ReadOptions {
+    fn default() -> Self {
+        Self {
+            leniency: Leniency::default(),
+            max_backup_bytes: Self::DEFAULT_MAX_BACKUP_BYTES,
+        }
+    }
 }
 
 impl ReadOptions {
+    /// Default limit on an inflated QBB company file: 1 GiB. A company file
+    /// is held whole in memory, and the largest QBW in the 112-file corpus
+    /// (see `SPECIFICATION.md`) is about 42 MiB, so the default is roughly 24
+    /// times that. A backup of a larger company needs a higher limit through
+    /// [`ReadOptions::with_max_backup_bytes`]; a service that opens untrusted
+    /// backups should set a lower one, because a small backup can inflate to
+    /// the full limit.
+    pub const DEFAULT_MAX_BACKUP_BYTES: usize = 1024 * 1024 * 1024;
+
     /// Strict options (the default).
     pub fn strict() -> Self {
         Self::default()
@@ -91,6 +114,13 @@ impl ReadOptions {
     /// These options with `leniency` in place of the current set.
     pub fn with_leniency(mut self, leniency: Leniency) -> Self {
         self.leniency = leniency;
+        self
+    }
+
+    /// These options with a limit of `bytes` on the inflated size of a QBB
+    /// company file.
+    pub fn with_max_backup_bytes(mut self, bytes: usize) -> Self {
+        self.max_backup_bytes = bytes;
         self
     }
 

@@ -39,6 +39,7 @@ fn build_py_err(py: Python<'_>, e: &openqbw_rs::Error, path: Option<&PathBuf>) -
         | ErrorKind::UnsupportedFlags
         | ErrorKind::BadCrc
         | ErrorKind::BadTrailer
+        | ErrorKind::Backup
         | ErrorKind::Store => "FormatError",
         _ => "OpenQBWError",
     };

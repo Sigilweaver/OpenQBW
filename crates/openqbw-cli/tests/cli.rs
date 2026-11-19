@@ -738,3 +738,60 @@ fn catalog_does_not_show_an_invalid_last_page_as_a_page() {
     assert!(bogus.contains(",1,1,"), "{bogus}");
     assert!(bogus.contains("last_page_invalid"), "{bogus}");
 }
+
+/// A QBB backup holding the synthetic QBW, written to `path`.
+fn write_backup(path: &Path) {
+    use std::io::Write;
+
+    let company = std::fs::read(fixture("synthetic.qbw")).unwrap();
+    let mut zlib = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    zlib.write_all(&company).unwrap();
+    let mut backup = cfb::CompoundFile::create(std::fs::File::create(path).unwrap()).unwrap();
+    backup
+        .create_stream("/Compression_Header")
+        .unwrap()
+        .write_all(b"Compression_Format=Deflate_ZLIB;Version=1.2.3;")
+        .unwrap();
+    backup
+        .create_stream("/file_COMPANY_FILE")
+        .unwrap()
+        .write_all(&zlib.finish().unwrap())
+        .unwrap();
+    backup.flush().unwrap();
+}
+
+#[test]
+fn catalog_reads_a_qbb_backup() {
+    let dir = tmp("qbb");
+    let backup = dir.join("books.qbb");
+    write_backup(&backup);
+    let from_backup = openqbw(&["catalog".as_ref(), os(&backup)]);
+    assert!(from_backup.status.success(), "{from_backup:?}");
+    let from_qbw = openqbw(&["catalog".as_ref(), os(&fixture("synthetic.qbw"))]);
+    assert!(from_qbw.status.success(), "{from_qbw:?}");
+    // The first line names the file; the catalog under it is the same.
+    let body = |out: &Output| -> String {
+        String::from_utf8_lossy(&out.stdout)
+            .split_once('\n')
+            .unwrap()
+            .1
+            .to_string()
+    };
+    assert_eq!(body(&from_backup), body(&from_qbw));
+    assert!(!from_backup.stdout.is_empty());
+}
+
+#[test]
+fn damaged_qbb_backup_fails_with_a_backup_error() {
+    let dir = tmp("qbb-bad");
+    let backup = dir.join("bad.qbb");
+    {
+        let mut b = cfb::CompoundFile::create(std::fs::File::create(&backup).unwrap()).unwrap();
+        b.create_stream("/Compression_Header").unwrap();
+        b.flush().unwrap();
+    }
+    let out = openqbw(&["catalog".as_ref(), os(&backup)]);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("cannot read QBB backup"), "{err}");
+}

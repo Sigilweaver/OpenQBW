@@ -1,5 +1,6 @@
 //! The entry point: [`Reader`] opens a file and reads its records.
 
+use std::fs::File;
 use std::path::Path;
 
 use opensqlany::{ApModel, PageStore, PageType};
@@ -32,18 +33,34 @@ pub struct Reader {
 }
 
 impl Reader {
-    /// Open the file at `path`.
+    /// Open the file at `path`. A file that starts with the compound-file
+    /// signature is a QBB backup: its zlib-compressed company-file stream
+    /// (up to [`ReadOptions::max_backup_bytes`] inflated) is read and the same
+    /// QBW checks apply. Any other file is read as a QBW, whatever its
+    /// extension.
     ///
     /// # Errors
     ///
-    /// [`Error::Io`](crate::Error::Io) when the file cannot be read; a
-    /// format error ([`ErrorKind`](crate::ErrorKind) `BadMagic`,
+    /// [`Error::Io`](crate::Error::Io) when the file cannot be read;
+    /// [`Error::Backup`](crate::Error::Backup) when a QBB backup cannot be
+    /// unpacked (damaged container, missing stream, unsupported compression,
+    /// invalid zlib data, a company file over `max_backup_bytes`, or a failed
+    /// allocation); a format error ([`ErrorKind`](crate::ErrorKind) `BadMagic`,
     /// `UnsupportedVersion`, `UnsupportedFlags`, `BadCrc`, `BadTrailer`)
     /// when it is not a supported QuickBooks company file or a page is
     /// damaged; `Store` when the keystream cannot be calibrated; and, in
     /// strict mode, the first catalog page that fails to decode.
     pub fn open(path: impl AsRef<Path>, options: &ReadOptions) -> Result<Self> {
-        Self::from_store(open_store(path.as_ref())?, options)
+        let path = path.as_ref();
+        let mut file = File::open(path)?;
+        if crate::qbb::has_signature(&mut file)? {
+            return Self::from_bytes(
+                crate::qbb::company_bytes(file, options.max_backup_bytes)?,
+                options,
+            );
+        }
+        drop(file);
+        Self::from_store(open_store(path)?, options)
     }
 
     /// As [`Reader::open`], over the bytes of a file already in memory.

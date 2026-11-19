@@ -12,20 +12,33 @@ public Rock Castle sample where a section says so.
 - Offsets are in **bytes from start-of-file** unless noted.
 - "QBW" here = QuickBooks Desktop **company** file (`.QBW`). Sibling
   formats (`.QBB`, `.QBM`, `.TLG`, `.ND`, `.DSN`, `.QBA`) have their
-  own shape and are not specified yet.
+  own shape. Section 1.1 describes one observed QBW backup wrapper.
 
 ## 1. File family overview
 
 | Extension | Role (hypothesised)                              | Corpus? |
 | --------- | ------------------------------------------------ | ------- |
 | `.QBW`    | Primary company database.                        | 112 files |
-| `.QBB`    | Compressed backup of a `.QBW`.                   | 0 |
+| `.QBB`    | Compressed backup of a `.QBW`.                   | 2 files |
 | `.QBM`    | "Portable" company file (compact backup).        | 0 |
 | `.TLG`    | Transaction log / WAL companion to a `.QBW`.     | 0 |
 | `.ND`     | Network descriptor (small text config).          | 0 |
 | `.QBA`    | Accountant's copy.                               | 0 |
 
-Only `.QBW` is specified here.
+### 1.1. Zlib QBW backup wrapper
+
+Two private, locally readable QuickBooks Desktop backups from 2026 are
+Compound File Binary containers (signature `d0 cf 11 e0 a1 b1 1a e1` at
+file offset 0). The root `Compression_Header` stream begins at logical
+stream offset 0 with `Compression_Format=Deflate_ZLIB;`, followed by a
+version field. The root `file_COMPANY_FILE` stream starts at logical stream
+offset 0 with a zlib header (`78 da` in both samples). Inflating it consumed
+the entire stream in both samples and produced page-aligned payloads with the
+QBW magic at offset `0x14` of the inflated data. The existing QBW reader
+loaded both payloads in lenient mode and reported catalog warnings.
+The reader checks only the `Compression_Format=Deflate_ZLIB;` prefix of the
+header; the version field after it is not interpreted. Other compression
+methods and the structure of auxiliary streams are not described.
 
 ## 2. High-level layout of `.QBW`
 

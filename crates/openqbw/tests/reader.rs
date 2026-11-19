@@ -4,7 +4,7 @@ mod common;
 
 use std::path::PathBuf;
 
-use openqbw::{ErrorKind, ReadOptions, Reader, RecordFlag};
+use openqbw::{BackupFailure, Error, ErrorKind, ReadOptions, Reader, RecordFlag};
 
 fn fixture_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data")
@@ -148,4 +148,121 @@ fn damaged_page_is_an_error() {
 fn missing_file_is_an_io_error() {
     let e = Reader::open("/nonexistent/openqbw.qbw", &ReadOptions::default()).unwrap_err();
     assert_eq!(e.kind(), ErrorKind::Io);
+}
+
+fn temp_file(name: &str, bytes: &[u8]) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("openqbw-reader-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(name);
+    std::fs::write(&path, bytes).unwrap();
+    path
+}
+
+fn backup_failure(e: Error) -> BackupFailure {
+    match e {
+        Error::Backup { reason, .. } => reason,
+        other => panic!("not a backup error: {other:?}"),
+    }
+}
+
+#[test]
+fn opens_a_qbb_backup() {
+    let qbb = common::synthetic_qbb(
+        Some(common::QBB_HEADER),
+        Some(&common::synthetic_qbw(false)),
+    );
+    let path = temp_file("backup.qbb", &qbb);
+    let r = Reader::open(&path, &ReadOptions::default()).unwrap();
+    assert_eq!(r.page_count(), 8);
+    assert_eq!(r.catalog().items.len(), 3);
+    assert_eq!(r.transactions().unwrap().items.len(), 1);
+}
+
+#[test]
+fn backup_is_detected_by_content_not_extension() {
+    let qbb = common::synthetic_qbb(
+        Some(common::QBB_HEADER),
+        Some(&common::synthetic_qbw(false)),
+    );
+    let renamed = temp_file("backup-renamed.qbw", &qbb);
+    assert_eq!(
+        Reader::open(&renamed, &ReadOptions::default())
+            .unwrap()
+            .page_count(),
+        8
+    );
+
+    let qbw = temp_file("company.qbb", &common::synthetic_qbw(false));
+    assert_eq!(
+        Reader::open(&qbw, &ReadOptions::default())
+            .unwrap()
+            .page_count(),
+        8
+    );
+}
+
+#[test]
+fn qbb_that_is_not_a_compound_file_is_a_bad_magic_error() {
+    let path = temp_file("junk.qbb", &[0x41; 8192]);
+    let e = Reader::open(&path, &ReadOptions::default()).unwrap_err();
+    assert_eq!(e.kind(), ErrorKind::BadMagic, "{e}");
+}
+
+#[test]
+fn backup_without_the_company_stream_is_an_error() {
+    let qbb = common::synthetic_qbb(Some(common::QBB_HEADER), None);
+    let path = temp_file("no-company.qbb", &qbb);
+    let e = Reader::open(&path, &ReadOptions::default()).unwrap_err();
+    assert_eq!(
+        backup_failure(e),
+        BackupFailure::MissingStream("/file_COMPANY_FILE")
+    );
+}
+
+#[test]
+fn backup_without_a_compression_header_is_an_error() {
+    let qbb = common::synthetic_qbb(None, Some(&common::synthetic_qbw(false)));
+    let path = temp_file("no-header.qbb", &qbb);
+    let e = Reader::open(&path, &ReadOptions::default()).unwrap_err();
+    assert_eq!(
+        backup_failure(e),
+        BackupFailure::MissingStream("/Compression_Header")
+    );
+}
+
+#[test]
+fn backup_with_a_short_compression_header_is_an_error() {
+    let qbb = common::synthetic_qbb(
+        Some(b"Compression_Format"),
+        Some(&common::synthetic_qbw(false)),
+    );
+    let path = temp_file("short-header.qbb", &qbb);
+    let e = Reader::open(&path, &ReadOptions::default()).unwrap_err();
+    assert_eq!(backup_failure(e), BackupFailure::ShortHeader);
+}
+
+#[test]
+fn backup_with_another_compression_is_an_error() {
+    let qbb = common::synthetic_qbb(
+        Some(b"Compression_Format=invalid_compression;"),
+        Some(&common::synthetic_qbw(false)),
+    );
+    let path = temp_file("other-compression.qbb", &qbb);
+    let e = Reader::open(&path, &ReadOptions::default()).unwrap_err();
+    assert_eq!(backup_failure(e), BackupFailure::UnsupportedCompression);
+}
+
+#[test]
+fn backup_over_the_size_limit_is_an_error() {
+    let company = common::synthetic_qbw(false);
+    let qbb = common::synthetic_qbb(Some(common::QBB_HEADER), Some(&company));
+    let path = temp_file("limit.qbb", &qbb);
+    let limit = company.len() - 1;
+    let options = ReadOptions::default().with_max_backup_bytes(limit);
+    let e = Reader::open(&path, &options).unwrap_err();
+    assert_eq!(e.kind(), ErrorKind::Backup);
+    assert_eq!(backup_failure(e), BackupFailure::TooLarge { limit });
+
+    let options = ReadOptions::default().with_max_backup_bytes(company.len());
+    assert!(Reader::open(&path, &options).is_ok());
 }

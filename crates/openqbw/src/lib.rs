@@ -52,6 +52,7 @@ mod opaque;
 mod open;
 mod owner_bridge;
 mod page_attribution;
+mod qbb;
 mod reader;
 mod scan;
 mod syscolumn;
@@ -65,7 +66,7 @@ mod testutil;
 
 pub use date::DateSource;
 pub use decimal::Decimal;
-pub use error::{Error, ErrorKind, Result};
+pub use error::{BackupFailure, Error, ErrorKind, Result};
 pub use lineitem::{LineItem, UndecodedReason};
 pub use owner_bridge::BridgeSource;
 pub use page_attribution::{AttributionGap, PageAttribution};

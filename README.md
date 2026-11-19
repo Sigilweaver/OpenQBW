@@ -51,6 +51,13 @@ lists them (55 on the Rock Castle sample).
 The format write-up is [SPECIFICATION.md](SPECIFICATION.md), including the
 line-item value layout in section 5.2 and the open questions in section 8.
 
+## Known issues
+
+- QBB backups: only `Compression_Format=Deflate_ZLIB;` is read. Another
+  `Compression_Format` returns `Error::Backup`. The version field after it is
+  not checked, and members other than the company file are not read or
+  reported.
+
 ## Non-goals
 
 - Shipping, linking, or distributing any Intuit code or trademarks.
@@ -124,6 +131,12 @@ See [crates/openqbw-py/README.md](crates/openqbw-py/README.md) for the
 full Python API and for building the extension from source.
 
 ## CLI quickstart
+
+The same commands accept a QBB backup (detected by content) with a zlib-compressed company
+stream, for example `openqbw --lenient catalog mybooks.qbb`. This reads the
+embedded company database only; other backup members are not read. The
+company file may inflate to at most 1 GiB by default; library users change
+that with `ReadOptions::with_max_backup_bytes`.
 
 ```console
 # Strict is the default and stops at the first record it cannot decode.

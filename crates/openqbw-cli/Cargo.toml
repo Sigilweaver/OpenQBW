@@ -24,5 +24,9 @@ anyhow = { workspace = true }
 clap = { workspace = true }
 rusqlite = { workspace = true }
 
+[dev-dependencies]
+cfb = { workspace = true }
+flate2 = { workspace = true }
+
 [lints]
 workspace = true

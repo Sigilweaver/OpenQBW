@@ -6,6 +6,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Read the company database directly from zlib-compressed QBB backups
+  (`openqbw catalog books.qbb`, `Reader::open`). A backup is recognised by its
+  compound-file signature, not its extension. Thanks to @lems111 for the
+  format analysis and the implementation.
+- `Error::Backup`, `BackupFailure` and `ErrorKind::Backup` report a QBB backup
+  that cannot be unpacked: damaged container, missing stream, unsupported
+  compression, invalid zlib data, over-limit size, failed allocation.
+- `ReadOptions::max_backup_bytes` and `with_max_backup_bytes` set the limit on
+  the inflated company file (default 1 GiB).
+
 ## [0.2.0] - 2026-11-01
 
 Built on opensqlany 0.3.0, fetched from crates.io. `Cargo.lock` is committed.

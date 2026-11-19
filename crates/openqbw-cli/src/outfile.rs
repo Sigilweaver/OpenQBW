@@ -28,6 +28,13 @@ fn has_superblock_magic(path: &Path) -> Result<bool> {
         .is_some_and(|m| u32::from_le_bytes([m[0], m[1], m[2], m[3]]) == SA_MAGIC))
 }
 
+/// A file that starts with the compound-file signature of a QBB backup.
+fn has_qbb_signature(path: &Path) -> Result<bool> {
+    let mut prefix = Vec::with_capacity(8);
+    File::open(path)?.take(8).read_to_end(&mut prefix)?;
+    Ok(prefix == [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1])
+}
+
 /// `true` when both paths are the same file: the same path after resolving
 /// links, or a hard link to it.
 fn same_file(a: &Path, b: &Path) -> bool {
@@ -48,7 +55,8 @@ fn same_file(a: &Path, b: &Path) -> bool {
 
 /// Refuse an output `path` that would destroy data: the input itself, or an
 /// existing file that starts with the SQL Anywhere superblock magic (a
-/// company file named by mistake, for example with the arguments swapped).
+/// company file named by mistake, for example with the arguments swapped),
+/// or a QBB backup (compound-file signature).
 /// Touches nothing. A path that does not exist passes.
 pub fn check_output(input: &Path, path: &Path) -> Result<()> {
     let Ok(meta) = fs::metadata(path) else {
@@ -56,6 +64,11 @@ pub fn check_output(input: &Path, path: &Path) -> Result<()> {
     };
     if same_file(input, path) {
         anyhow::bail!("refusing to write {path:?}: it is the input file. Nothing was changed.");
+    }
+    if meta.is_file() && has_qbb_signature(path)? {
+        anyhow::bail!(
+            "refusing to overwrite {path:?}: it looks like a QuickBooks backup. Nothing was changed."
+        );
     }
     if meta.is_file() && has_superblock_magic(path)? {
         anyhow::bail!(
@@ -252,6 +265,17 @@ mod tests {
         s.commit().unwrap();
         assert_eq!(fs::read(&dest).unwrap(), b"new");
         assert_eq!(fs::read_dir(&d).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn existing_compound_backup_is_refused_as_output() {
+        let d = dir("compound");
+        let input = d.join("input.qbw");
+        let backup = d.join("backup.QBB");
+        let signature = [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1];
+        fs::write(&backup, signature).unwrap();
+        assert!(check_output(&input, &backup).is_err());
+        assert_eq!(fs::read(&backup).unwrap(), signature);
     }
 
     #[test]
