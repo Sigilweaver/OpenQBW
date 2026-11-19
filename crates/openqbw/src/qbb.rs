@@ -12,7 +12,6 @@ const COMPANY_FILE: &str = "/file_COMPANY_FILE";
 const ZLIB_HEADER: &[u8] = b"Compression_Format=Deflate_ZLIB;";
 /// Compound File Binary signature at offset 0 of a QBB backup.
 const CFB_SIGNATURE: [u8; 8] = [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1];
-const MAX_COMPANY_BYTES: usize = 1024 * 1024 * 1024;
 
 /// `true` when `file` starts with the compound-file signature. The file
 /// position is reset to the start.
@@ -25,7 +24,8 @@ pub(crate) fn has_signature(file: &mut File) -> io::Result<bool> {
     Ok(prefix == CFB_SIGNATURE)
 }
 
-pub(crate) fn company_bytes(input: impl Read + Seek) -> Result<Vec<u8>> {
+/// Inflate the company file of the backup in `input`, up to `limit` bytes.
+pub(crate) fn company_bytes(input: impl Read + Seek, limit: usize) -> Result<Vec<u8>> {
     let mut backup = cfb::CompoundFile::open(input).map_err(container_error)?;
     let mut header = [0; ZLIB_HEADER.len()];
     backup
@@ -42,7 +42,7 @@ pub(crate) fn company_bytes(input: impl Read + Seek) -> Result<Vec<u8>> {
     let stream = backup
         .open_stream(COMPANY_FILE)
         .map_err(|e| stream_error(e, COMPANY_FILE))?;
-    inflate(&mut BufReader::new(stream), MAX_COMPANY_BYTES)
+    inflate(&mut BufReader::new(stream), limit)
 }
 
 fn backup_error(reason: BackupFailure) -> Error {
@@ -67,6 +67,21 @@ fn stream_error(e: io::Error, name: &'static str) -> Error {
     }
 }
 
+/// Make room for `extra` more bytes, doubling but never past `limit`, so an
+/// allocation failure is an error and not an abort. The caller has checked
+/// that `bytes.len() + extra <= limit`.
+fn grow(bytes: &mut Vec<u8>, extra: usize, limit: usize) -> Result<()> {
+    if bytes.capacity() - bytes.len() >= extra {
+        return Ok(());
+    }
+    let len = bytes.len();
+    let doubled = len.min(limit - len);
+    let want = extra.max(doubled);
+    bytes
+        .try_reserve_exact(want)
+        .map_err(|_| backup_error(BackupFailure::OutOfMemory { bytes: len + want }))
+}
+
 fn inflate(input: &mut impl BufRead, limit: usize) -> Result<Vec<u8>> {
     let mut inflater = Decompress::new(true);
     let mut bytes = Vec::new();
@@ -86,6 +101,7 @@ fn inflate(input: &mut impl BufRead, limit: usize) -> Result<Vec<u8>> {
         if produced > limit - bytes.len() {
             return Err(backup_error(BackupFailure::TooLarge { limit }));
         }
+        grow(&mut bytes, produced, limit)?;
         bytes.extend_from_slice(&chunk[..produced]);
 
         if status == Status::StreamEnd {
@@ -136,7 +152,7 @@ mod tests {
             b"Compression_Format=Deflate_ZLIB;Version=1.2.3;",
             &compressed(bytes),
         );
-        let inflated = company_bytes(input).unwrap();
+        let inflated = company_bytes(input, crate::ReadOptions::DEFAULT_MAX_BACKUP_BYTES).unwrap();
         assert_eq!(inflated, bytes.as_slice());
         let reader = crate::Reader::from_bytes(inflated, &crate::ReadOptions::strict()).unwrap();
         assert_eq!(reader.page_count(), 8);
@@ -147,7 +163,9 @@ mod tests {
     fn rejects_unsupported_compression() {
         let input = backup(b"Compression_Format=invalid_compression;", &[0; 4]);
         assert_eq!(
-            company_bytes(input).unwrap_err().kind(),
+            company_bytes(input, crate::ReadOptions::DEFAULT_MAX_BACKUP_BYTES)
+                .unwrap_err()
+                .kind(),
             crate::ErrorKind::Backup
         );
     }
@@ -171,5 +189,25 @@ mod tests {
         let encoded = compressed(&[0; 500]);
         assert!(inflate(&mut encoded.as_slice(), 499).is_err());
         assert_eq!(inflate(&mut encoded.as_slice(), 500).unwrap().len(), 500);
+    }
+
+    #[test]
+    fn limit_is_part_of_the_error_and_growth_stays_within_it() {
+        let encoded = compressed(&vec![7; 100_000]);
+        let err = inflate(&mut encoded.as_slice(), 99_999).unwrap_err();
+        assert!(matches!(
+            err,
+            Error::Backup {
+                reason: BackupFailure::TooLarge { limit: 99_999 }
+            }
+        ));
+        let bytes = inflate(&mut encoded.as_slice(), 100_000).unwrap();
+        assert_eq!(bytes.len(), 100_000);
+        assert!(bytes.capacity() <= 100_000 + 16 * 1024);
+    }
+
+    #[test]
+    fn default_limit_is_one_gibibyte() {
+        assert_eq!(crate::ReadOptions::default().max_backup_bytes, 1 << 30);
     }
 }

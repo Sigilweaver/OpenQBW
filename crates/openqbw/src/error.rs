@@ -150,6 +150,11 @@ pub enum BackupFailure {
         /// The limit in bytes.
         limit: usize,
     },
+    /// Memory for the inflated company file could not be allocated.
+    OutOfMemory {
+        /// The size in bytes that was requested.
+        bytes: usize,
+    },
 }
 
 impl std::fmt::Display for BackupFailure {
@@ -166,6 +171,9 @@ impl std::fmt::Display for BackupFailure {
             Self::TrailingData => f.write_str("data follows the end of the company-file stream"),
             Self::TooLarge { limit } => {
                 write!(f, "the company file inflates to more than {limit} bytes")
+            }
+            Self::OutOfMemory { bytes } => {
+                write!(f, "cannot allocate {bytes} bytes for the company file")
             }
         }
     }
