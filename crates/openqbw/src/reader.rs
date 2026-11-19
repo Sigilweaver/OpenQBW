@@ -33,8 +33,10 @@ pub struct Reader {
 }
 
 impl Reader {
-    /// Open the file at `path`. For a `.qbb` extension, read the zlib-compressed
-    /// company-file stream (up to 1 GiB inflated) and apply the same QBW checks.
+    /// Open the file at `path`. A file that starts with the compound-file
+    /// signature is a QBB backup: its zlib-compressed company-file stream
+    /// (up to 1 GiB inflated) is read and the same QBW checks apply. Any other
+    /// file is read as a QBW, whatever its extension.
     ///
     /// # Errors
     ///
@@ -46,12 +48,11 @@ impl Reader {
     /// strict mode, the first catalog page that fails to decode.
     pub fn open(path: impl AsRef<Path>, options: &ReadOptions) -> Result<Self> {
         let path = path.as_ref();
-        if path
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("qbb"))
-        {
-            return Self::from_bytes(crate::qbb::company_bytes(File::open(path)?)?, options);
+        let mut file = File::open(path)?;
+        if crate::qbb::has_signature(&mut file)? {
+            return Self::from_bytes(crate::qbb::company_bytes(file)?, options);
         }
+        drop(file);
         Self::from_store(open_store(path)?, options)
     }
 

@@ -28,14 +28,8 @@ fn has_superblock_magic(path: &Path) -> Result<bool> {
         .is_some_and(|m| u32::from_le_bytes([m[0], m[1], m[2], m[3]]) == SA_MAGIC))
 }
 
-/// A named QBB backup with a compound-file signature.
+/// A file that starts with the compound-file signature of a QBB backup.
 fn has_qbb_signature(path: &Path) -> Result<bool> {
-    if !path
-        .extension()
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("qbb"))
-    {
-        return Ok(false);
-    }
     let mut prefix = Vec::with_capacity(8);
     File::open(path)?.take(8).read_to_end(&mut prefix)?;
     Ok(prefix == [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1])
@@ -62,7 +56,7 @@ fn same_file(a: &Path, b: &Path) -> bool {
 /// Refuse an output `path` that would destroy data: the input itself, or an
 /// existing file that starts with the SQL Anywhere superblock magic (a
 /// company file named by mistake, for example with the arguments swapped),
-/// or a named QBB with a compound-file signature.
+/// or a QBB backup (compound-file signature).
 /// Touches nothing. A path that does not exist passes.
 pub fn check_output(input: &Path, path: &Path) -> Result<()> {
     let Ok(meta) = fs::metadata(path) else {

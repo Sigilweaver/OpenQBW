@@ -1,13 +1,27 @@
 //! Read the company-file stream in a zlib-compressed QBB backup.
 
-use std::io::{self, BufRead, BufReader, Read, Seek};
+use std::fs::File;
+use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom};
 
 use flate2::{Decompress, FlushDecompress, Status};
 
 const COMPRESSION_HEADER: &str = "/Compression_Header";
 const COMPANY_FILE: &str = "/file_COMPANY_FILE";
 const ZLIB_HEADER: &[u8] = b"Compression_Format=Deflate_ZLIB;";
+/// Compound File Binary signature at offset 0 of a QBB backup.
+const CFB_SIGNATURE: [u8; 8] = [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1];
 const MAX_COMPANY_BYTES: usize = 1024 * 1024 * 1024;
+
+/// `true` when `file` starts with the compound-file signature. The file
+/// position is reset to the start.
+pub(crate) fn has_signature(file: &mut File) -> io::Result<bool> {
+    let mut prefix = Vec::with_capacity(CFB_SIGNATURE.len());
+    file.by_ref()
+        .take(CFB_SIGNATURE.len() as u64)
+        .read_to_end(&mut prefix)?;
+    file.seek(SeekFrom::Start(0))?;
+    Ok(prefix == CFB_SIGNATURE)
+}
 
 pub(crate) fn company_bytes(input: impl Read + Seek) -> io::Result<Vec<u8>> {
     let mut backup = cfb::CompoundFile::open(input)?;
