@@ -35,16 +35,17 @@ pub struct Reader {
 impl Reader {
     /// Open the file at `path`. A file that starts with the compound-file
     /// signature is a QBB backup: its zlib-compressed company-file stream
-    /// (up to [`ReadOptions::max_backup_bytes`] inflated) is read and the same QBW checks apply. Any other
-    /// file is read as a QBW, whatever its extension.
+    /// (up to [`ReadOptions::max_backup_bytes`] inflated) is read and the same
+    /// QBW checks apply. Any other file is read as a QBW, whatever its
+    /// extension.
     ///
     /// # Errors
     ///
     /// [`Error::Io`](crate::Error::Io) when the file cannot be read;
     /// [`Error::Backup`](crate::Error::Backup) when a QBB backup cannot be
     /// unpacked (damaged container, missing stream, unsupported compression,
-    /// invalid zlib data, a company file over `max_backup_bytes`, or a failed allocation); a
-    /// format error ([`ErrorKind`](crate::ErrorKind) `BadMagic`,
+    /// invalid zlib data, a company file over `max_backup_bytes`, or a failed
+    /// allocation); a format error ([`ErrorKind`](crate::ErrorKind) `BadMagic`,
     /// `UnsupportedVersion`, `UnsupportedFlags`, `BadCrc`, `BadTrailer`)
     /// when it is not a supported QuickBooks company file or a page is
     /// damaged; `Store` when the keystream cannot be calibrated; and, in

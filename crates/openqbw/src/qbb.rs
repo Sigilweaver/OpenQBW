@@ -34,7 +34,7 @@ pub(crate) fn company_bytes(input: impl Read + Seek, limit: usize) -> Result<Vec
         .read_exact(&mut header)
         .map_err(|e| match e.kind() {
             io::ErrorKind::UnexpectedEof => backup_error(BackupFailure::ShortHeader),
-            _ => Error::Io(e),
+            _ => container_error(e),
         })?;
     if header.as_slice() != ZLIB_HEADER {
         return Err(backup_error(BackupFailure::UnsupportedCompression));
@@ -91,7 +91,11 @@ fn inflate(input: &mut impl BufRead, limit: usize) -> Result<Vec<u8>> {
         let before_in = inflater.total_in();
         let before_out = inflater.total_out();
         let status = inflater
-            .decompress(input.fill_buf()?, &mut chunk, FlushDecompress::None)
+            .decompress(
+                input.fill_buf().map_err(container_error)?,
+                &mut chunk,
+                FlushDecompress::None,
+            )
             .map_err(|e| backup_error(BackupFailure::BadCompressedData(e.to_string())))?;
         // The increments are bounded by the input and output slices.
         let consumed = (inflater.total_in() - before_in) as usize;
@@ -105,7 +109,7 @@ fn inflate(input: &mut impl BufRead, limit: usize) -> Result<Vec<u8>> {
         bytes.extend_from_slice(&chunk[..produced]);
 
         if status == Status::StreamEnd {
-            if !input.fill_buf()?.is_empty() {
+            if !input.fill_buf().map_err(container_error)?.is_empty() {
                 return Err(backup_error(BackupFailure::TrailingData));
             }
             return Ok(bytes);
@@ -170,25 +174,69 @@ mod tests {
         );
     }
 
+    fn failure(result: Result<Vec<u8>>) -> BackupFailure {
+        match result.unwrap_err() {
+            Error::Backup { reason, .. } => reason,
+            other => panic!("not a backup error: {other:?}"),
+        }
+    }
+
     #[test]
     fn rejects_truncated_corrupt_and_trailing_data() {
         let encoded = compressed(b"contents");
-        assert!(inflate(&mut &encoded[..encoded.len() - 1], 100).is_err());
+        assert_eq!(
+            failure(inflate(&mut &encoded[..encoded.len() - 1], 100)),
+            BackupFailure::Truncated
+        );
 
         let mut bad_checksum = encoded.clone();
         *bad_checksum.last_mut().unwrap() ^= 1;
-        assert!(inflate(&mut bad_checksum.as_slice(), 100).is_err());
+        assert!(matches!(
+            failure(inflate(&mut bad_checksum.as_slice(), 100)),
+            BackupFailure::BadCompressedData(_)
+        ));
 
         let mut trailing = encoded;
         trailing.push(0);
-        assert!(inflate(&mut trailing.as_slice(), 100).is_err());
+        assert_eq!(
+            failure(inflate(&mut trailing.as_slice(), 100)),
+            BackupFailure::TrailingData
+        );
     }
 
     #[test]
     fn enforces_decompression_limit() {
         let encoded = compressed(&[0; 500]);
-        assert!(inflate(&mut encoded.as_slice(), 499).is_err());
+        assert_eq!(
+            failure(inflate(&mut encoded.as_slice(), 499)),
+            BackupFailure::TooLarge { limit: 499 }
+        );
         assert_eq!(inflate(&mut encoded.as_slice(), 500).unwrap().len(), 500);
+    }
+
+    #[test]
+    fn damaged_container_is_a_backup_error() {
+        let mut garbage = CFB_SIGNATURE.to_vec();
+        garbage.extend_from_slice(&[0x41; 600]);
+        assert!(matches!(
+            failure(company_bytes(Cursor::new(garbage), 1 << 20)),
+            BackupFailure::BadContainer(_)
+        ));
+    }
+
+    #[test]
+    fn truncated_backup_file_is_a_backup_error() {
+        let payload: Vec<u8> = (0..200_000u32)
+            .map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8)
+            .collect();
+        let whole = backup(b"Compression_Format=Deflate_ZLIB;", &compressed(&payload)).into_inner();
+        for cut in [whole.len() - 4096, whole.len() / 2, 1024] {
+            let result = company_bytes(Cursor::new(whole[..cut].to_vec()), 1 << 20);
+            assert!(
+                matches!(result, Err(Error::Backup { .. })),
+                "cut at {cut}: {result:?}"
+            );
+        }
     }
 
     #[test]
