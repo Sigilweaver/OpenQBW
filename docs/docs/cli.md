@@ -15,8 +15,9 @@ $ openqbw --help
 
 Company-file arguments also accept QBB backups, detected by their compound-file
 signature rather than the extension. The parser
-reads the zlib-compressed company stream (up to 1 GiB inflated by default) and ignores
-the other members of the backup. All normal QBW data checks still apply.
+reads the zlib-compressed company stream (`Compression_Format=Deflate_ZLIB;`,
+the only compression supported; up to 1 GiB inflated by default) and does not
+read the other members of the backup. All normal QBW data checks still apply.
 
 ## Global option
 

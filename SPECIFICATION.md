@@ -36,8 +36,9 @@ offset 0 with a zlib header (`78 da` in both samples). Inflating it consumed
 the entire stream in both samples and produced page-aligned payloads with the
 QBW magic at offset `0x14` of the inflated data. The existing QBW reader
 loaded both payloads in lenient mode and reported catalog warnings.
-This observation does not describe other compression methods or establish
-the structure of auxiliary streams.
+The reader checks only the `Compression_Format=Deflate_ZLIB;` prefix of the
+header; the version field after it is not interpreted. Other compression
+methods and the structure of auxiliary streams are not described.
 
 ## 2. High-level layout of `.QBW`
 
