@@ -28,5 +28,5 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 rusqlite = { version = "0.42", features = ["bundled"] }
 thiserror = "2"
-cfb = "0.14"
+cfb = "0.16"
 flate2 = "1"
