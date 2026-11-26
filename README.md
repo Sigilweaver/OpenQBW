@@ -57,6 +57,13 @@ line-item value layout in section 5.2 and the open questions in section 8.
   `Compression_Format` returns `Error::Backup`. The version field after it is
   not checked, and members other than the company file are not read or
   reported.
+- Enterprise-era files: files written by QuickBooks Desktop Enterprise 23.0
+  and 24.0 can open with the catalog readable while a large share of data
+  pages are reported opaque. When more than half of a file's data pages are
+  opaque, `line_items()` returns `Error::ContentOpaque` (`ContentError` in
+  Python) instead of partial rows. See
+  [#60](https://github.com/Sigilweaver/OpenQBW/issues/60) and
+  [#22](https://github.com/Sigilweaver/OpenQBW/issues/22).
 
 ## Non-goals
 
