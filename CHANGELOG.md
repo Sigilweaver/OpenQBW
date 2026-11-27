@@ -18,6 +18,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ReadOptions::max_backup_bytes` and `with_max_backup_bytes` set the limit on
   the inflated company file (default 1 GiB).
 
+### Changed
+
+- `CITATION.cff` identifies the Zenodo concept DOI (10.5281/zenodo.20470596),
+  which resolves to the latest archived version, instead of the DOI of the
+  0.1.1 version record.
+
 ## [0.2.0] - 2026-11-01
 
 Built on opensqlany 0.3.0, fetched from crates.io. `Cargo.lock` is committed.
